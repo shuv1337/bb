@@ -443,10 +443,46 @@ uses this mapping to launch remote-capable editors and terminals over SSH.
 Browsers or devices without a helper can still use bb; local editor actions are
 simply unavailable.
 
+## OpenCode
+
+The bundled `provider-opencode` plugin registers provider id `opencode`. bb
+attaches to a live OpenCode v2 service on the host (upstream `opencode`,
+`shuvcode`, or another app) and talks HTTP. `acp-opencode` remains as
+**OpenCode (ACP)** for OpenCode 1.x and as an escape hatch.
+
+Host passthrough (set on the daemon environment):
+
+- `BB_OPENCODE_SERVER` — attach to this v2 URL instead of scanning
+  registrations. Optional `BB_OPENCODE_PASSWORD`; username is always
+  `opencode`. A 401 is reported as `unauthenticated`.
+- `BB_OPENCODE_APP` — prefer this app id among live registrations
+  (`opencode`, `shuvcode`, …). When nothing is installed, it also selects
+  the install plan (`shuvcode` → `npm install -g shuvcode`; default is
+  `curl -fsSL https://opencode.ai/v2/install | bash`, which installs
+  `@opencode/cli`). A discovered binary or registration wins over this
+  value; bb never replaces a fork with upstream. Windows has no
+  package-manager install.
+
+Default agent and variant for new threads:
+
+```bash
+bb plugin config provider-opencode set defaultAgent reviewer
+bb plugin config provider-opencode unset defaultAgent
+bb plugin config provider-opencode set defaultVariant thinking
+bb plugin config provider-opencode unset defaultVariant
+```
+
+Empty `defaultAgent` uses OpenCode's `default_agent` (usually `build`). Plan
+mode always uses the OpenCode `plan` agent. Empty `defaultVariant` uses the
+model's native default. A picker reasoning level overrides `defaultVariant`.
+These settings travel as `providerOptions.agent` and
+`providerOptions.variant`. Deleting a bb thread does not remove the OpenCode
+session.
+
 ## Custom ACP Agents
 
 Known ACP agents appear when their CLI is installed on the host. bb exposes
-`acp-opencode` when `opencode` is on PATH and can be launched as `opencode acp`,
+`acp-opencode` (OpenCode (ACP)) when `opencode` is on PATH and can be launched as `opencode acp`,
 `acp-omp` when `omp` (oh-my-pi) is on PATH, `acp-grok` when Grok Build's `grok`
 CLI is on PATH and can be launched as `grok agent stdio`, and
 `acp-hermes-agent` when Hermes' `hermes` CLI is on PATH. `acp-cursor` is always
@@ -539,8 +575,10 @@ so do not pin OpenCode models here: add the model to the OpenCode config and
 bb discovers it automatically.
 
 An OpenCode "agent" (build, plan, or a custom primary agent) is a session
-mode, not a model, so it does not belong in `customModels`. bb does not select
-OpenCode agents; set the default agent in the OpenCode config instead.
+mode, not a model, so it does not belong in `customModels`. On the native
+`opencode` provider, set `defaultAgent` with `bb plugin config
+provider-opencode set defaultAgent <name>`. On OpenCode (ACP), set the
+default agent in the OpenCode config instead.
 
 ## Agent Instructions
 

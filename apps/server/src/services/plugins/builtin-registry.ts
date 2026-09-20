@@ -113,6 +113,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "provider-opencode",
+    pluginId: "provider-opencode",
+    defaultEnabled: true,
+  },
+  {
     name: "provider-usage",
     pluginId: "provider-usage",
     defaultEnabled: true,

@@ -1,0 +1,771 @@
+[
+  {
+    "id": "EVT_1",
+    "type": "server.connected",
+    "data": {}
+  },
+  {
+    "id": "EVT_2",
+    "created": 1789895466870,
+    "type": "session.created",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "slug": "clever-falcon",
+      "version": "2.0.8-shuv.1",
+      "projectID": "OTHER_1",
+      "location": {
+        "directory": "<WORKSPACE>"
+      },
+      "subpath": "",
+      "title": "bb: m0-spike do-not-use",
+      "metadata": {
+        "bbThreadId": "m0-runtime-spike",
+        "bbPurpose": "provider-opencode M0 fixture"
+      },
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "question",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ]
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 0,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_3",
+    "created": 1789895467293,
+    "type": "session.inbox.enqueued",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "inboxID": "MSG_1",
+      "sessionID": "SES_1",
+      "item": {
+        "type": "user",
+        "payload": {
+          "text": "Read the file hello.txt in this workspace. Reply with only the first word you find. Then stop. Do not run shell."
+        },
+        "delivery": "steer"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 1,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_4",
+    "created": 1789895467308,
+    "type": "session.execution.started",
+    "data": {
+      "sessionID": "SES_1"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 2,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_5",
+    "created": 1789895467325,
+    "metadata": {
+      "instructions": {
+        "initial": true
+      }
+    },
+    "type": "session.instructions.updated",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "delta": {
+        "core/environment": "deff85626c3c689ea68d7fb383ee5d76852eba9fbff82e9ed8cf259c46c26f35",
+        "core/date": "a1c58eae50dd2eaa9ccf1c52186da25f354ac2b428ace01e4e6e971190b46229",
+        "core/codemode": "c7de9837cd8baab59ebffdcd43edf45df4b996b9db543faa45fef33f7180b16c",
+        "core/instructions": "08503134f2a3950f28064a289bac492d6a0643a0c1f6065fc7c22704db39c2c0",
+        "core/skill-guidance": "634a052b63d6656cf0e08b0a0fa9bf62cb679e4fd5c708b372b32a23d07fcbf3"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 3,
+      "version": 2
+    }
+  },
+  {
+    "id": "EVT_6",
+    "created": 1789895467330,
+    "type": "session.inbox.delivered",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "inboxID": "MSG_1"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 4,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_7",
+    "created": 1789895469210,
+    "type": "session.step.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "agent": "build",
+      "model": {
+        "id": "OTHER_3",
+        "providerID": "google"
+      },
+      "assistantMessageID": "MSG_4",
+      "started": 1789895467349
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 5,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_8",
+    "created": 1789895469215,
+    "type": "session.tool.input.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_4",
+      "id": "call_1125890",
+      "name": "read"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 6,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_9",
+    "created": 1789895469218,
+    "type": "session.tool.input.ended",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_4",
+      "id": "call_1125890",
+      "text": ""
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 7,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_10",
+    "created": 1789895469220,
+    "type": "session.tool.called",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_4",
+      "id": "call_1125890",
+      "input": {
+        "path": "hello.txt"
+      },
+      "executed": false,
+      "state": {
+        "thoughtSignature": "<redacted>"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 8,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_11",
+    "created": 1789895469224,
+    "type": "permission.asked",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "id": "OTHER_2",
+      "sessionID": "SES_1",
+      "action": "read",
+      "resources": [
+        "hello.txt"
+      ],
+      "save": [
+        "*"
+      ],
+      "source": {
+        "type": "tool",
+        "messageID": "MSG_4",
+        "id": "call_1125890"
+      }
+    }
+  },
+  {
+    "id": "EVT_12",
+    "created": 1789895469262,
+    "type": "session.step.streamed",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_4"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 9,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_13",
+    "created": 1789895469279,
+    "type": "permission.replied",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "requestID": "OTHER_2",
+      "reply": "once"
+    }
+  },
+  {
+    "id": "EVT_14",
+    "created": 1789895469287,
+    "type": "session.tool.success",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_4",
+      "id": "call_1125890",
+      "content": [
+        {
+          "type": "text",
+          "text": "<redacted tool output>"
+        }
+      ],
+      "metadata": {
+        "truncated": false
+      },
+      "executed": false
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 10,
+      "version": 2
+    }
+  },
+  {
+    "id": "EVT_15",
+    "created": 1789895469290,
+    "type": "session.step.ended",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_4",
+      "finish": "tool-calls",
+      "rawFinish": "STOP",
+      "cost": 0,
+      "tokens": "<redacted>"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 11,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_16",
+    "created": 1789895469292,
+    "type": "session.usage.updated",
+    "data": {
+      "sessionID": "SES_1",
+      "cost": 0,
+      "tokens": "<redacted>"
+    }
+  },
+  {
+    "id": "EVT_17",
+    "created": 1789895469306,
+    "type": "session.instructions.updated",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "delta": {
+        "core/codemode": "d34808aba0ba8e1f000d0ba7075b6079e15ff31fd7ced5a5d3712e25b57e0079",
+        "core/mcp-guidance": "dbdead7dba9eeaa17fd86d3ed943918da046479412435bf41a5193c358c61eac"
+      },
+      "text": "The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\nThe Code Mode tool\u2026<truncated len=11354>"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 12,
+      "version": 2
+    }
+  },
+  {
+    "id": "EVT_18",
+    "created": 1789895470252,
+    "type": "session.step.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "agent": "build",
+      "model": {
+        "id": "OTHER_3",
+        "providerID": "google"
+      },
+      "assistantMessageID": "MSG_5",
+      "started": 1789895469319
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 13,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_19",
+    "created": 1789895470256,
+    "type": "session.text.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_5",
+      "ordinal": 0
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 14,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_20",
+    "created": 1789895470263,
+    "type": "session.text.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_5",
+      "ordinal": 0,
+      "delta": "m0"
+    }
+  },
+  {
+    "id": "EVT_21",
+    "created": 1789895470264,
+    "type": "session.text.ended",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_5",
+      "ordinal": 0,
+      "text": "m0",
+      "state": {
+        "thoughtSignature": "<redacted>"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 15,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_22",
+    "created": 1789895470266,
+    "type": "session.step.streamed",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_5"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 16,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_23",
+    "created": 1789895470268,
+    "type": "session.step.ended",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_5",
+      "finish": "stop",
+      "rawFinish": "STOP",
+      "cost": 0,
+      "tokens": "<redacted>"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 17,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_24",
+    "created": 1789895470270,
+    "type": "session.usage.updated",
+    "data": {
+      "sessionID": "SES_1",
+      "cost": 0,
+      "tokens": "<redacted>"
+    }
+  },
+  {
+    "id": "EVT_25",
+    "created": 1789895470271,
+    "type": "session.execution.succeeded",
+    "data": {
+      "sessionID": "SES_1"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 18,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_26",
+    "created": 1789895470303,
+    "type": "form.created",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "form": {
+        "id": "FORM_1",
+        "sessionID": "SES_1",
+        "title": "m0 spike question",
+        "fields": [
+          {
+            "key": "choice",
+            "title": "Pick a color",
+            "required": true,
+            "type": "string",
+            "options": [
+              {
+                "value": "red",
+                "label": "Red"
+              },
+              {
+                "value": "blue",
+                "label": "Blue"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "EVT_27",
+    "created": 1789895470309,
+    "type": "form.replied",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "id": "FORM_1",
+      "sessionID": "SES_1",
+      "answer": {
+        "choice": "blue"
+      }
+    }
+  },
+  {
+    "id": "EVT_28",
+    "created": 1789895470314,
+    "type": "session.inbox.enqueued",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "inboxID": "MSG_2",
+      "sessionID": "SES_1",
+      "item": {
+        "type": "compaction",
+        "payload": {},
+        "delivery": "steer"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 19,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_29",
+    "created": 1789895470318,
+    "type": "session.execution.started",
+    "data": {
+      "sessionID": "SES_1"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 20,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_30",
+    "created": 1789895470322,
+    "type": "session.inbox.delivered",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "inboxID": "MSG_2"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 21,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_31",
+    "created": 1789895470322,
+    "type": "session.compaction.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "reason": "manual",
+      "recent": "",
+      "inputID": "MSG_2"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 22,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_32",
+    "created": 1789895470348,
+    "type": "session.inbox.enqueued",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "inboxID": "MSG_3",
+      "sessionID": "SES_1",
+      "item": {
+        "type": "user",
+        "payload": {
+          "text": "Use the explore subagent to glob hello.txt in this workspace. After it returns, stop. Do not edit files.",
+          "agents": [
+            {
+              "name": "explore"
+            }
+          ]
+        },
+        "delivery": "steer"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 23,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_33",
+    "created": 1789895471007,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": "## Objective\n-"
+    }
+  },
+  {
+    "id": "EVT_34",
+    "created": 1789895471078,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": " Read `hello.txt` in the workspace and reply with only the first word found without running"
+    }
+  },
+  {
+    "id": "EVT_35",
+    "created": 1789895471213,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": " shell commands.\n\n## Requirements\n- Reply with only the first word found in `hello.txt`.\n- Do"
+    }
+  },
+  {
+    "id": "EVT_36",
+    "created": 1789895471316,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": " not run shell commands.\n\n## Decisions\n- Used the `read` tool rather than shell commands to inspect `hello.txt`.\n\n## Wor\u2026<truncated len=127>"
+    }
+  },
+  {
+    "id": "EVT_37",
+    "created": 1789895471329,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": "\n### Completed\n- Read `hello.txt` and replied with the first word (`m0`).\n\n### Active\n- (none)\n\n"
+    }
+  },
+  {
+    "id": "EVT_38",
+    "created": 1789895471360,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": "### Blocked\n- (none)\n\n## Next Move\n1. (none)\n\n## Relevant Files\n-"
+    }
+  },
+  {
+    "id": "EVT_39",
+    "created": 1789895471369,
+    "type": "session.compaction.delta",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "text": " `hello.txt`: Workspace marker file containing the read text.\n\n## Important Context\n- (none)"
+    }
+  },
+  {
+    "id": "EVT_40",
+    "created": 1789895471385,
+    "type": "session.usage.updated",
+    "data": {
+      "sessionID": "SES_1",
+      "cost": 0,
+      "tokens": "<redacted>"
+    }
+  },
+  {
+    "id": "EVT_41",
+    "created": 1789895471386,
+    "type": "session.compaction.ended",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "reason": "manual",
+      "model": {
+        "id": "OTHER_3",
+        "providerID": "google"
+      },
+      "text": "## Objective\n- Read `hello.txt` in the workspace and reply with only the first word found without running shell commands\u2026<truncated len=578>",
+      "recent": "",
+      "tokens": "<redacted>",
+      "cost": 0
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 25,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_42",
+    "created": 1789895471392,
+    "type": "session.inbox.delivered",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "inboxID": "MSG_3"
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 26,
+      "version": 1
+    }
+  }
+]

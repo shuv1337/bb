@@ -56,6 +56,7 @@ const FIRST_PARTY_PLUGINS: Record<string, FirstPartyPlugin> = {
   "Claude Code provider": { id: "provider-claude-code", icon: SparklesIcon },
   "Codex provider": { id: "provider-codex", icon: SparklesIcon },
   "Pi provider": { id: "provider-pi", icon: SparklesIcon },
+  "OpenCode provider": { id: "provider-opencode", icon: SparklesIcon },
 };
 
 export function pluginIcon(displayName: string): IconSvgElement | null {

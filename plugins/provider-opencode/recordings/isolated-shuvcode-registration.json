@@ -1,0 +1,35 @@
+{
+  "app": "shuvcode",
+  "command": [
+    "shuvcode",
+    "serve",
+    "--service",
+    "--hostname",
+    "127.0.0.1",
+    "--port",
+    "14096"
+  ],
+  "childPid": 699286,
+  "livePidUnchanged": true,
+  "liveInodeBefore": "133624243 1789865937 173",
+  "liveInodeAfter": "133624243 1789865937 173",
+  "liveRegistrationUntouched": true,
+  "foundRegistrationFiles": [
+    {
+      "path": "state/shuvcode/service.json",
+      "abs": "/tmp/shuvcode/m0-iso-shuv/state/shuvcode/service.json",
+      "size": 171,
+      "data": {
+        "id": "6838ee95-a202-45e0-be5f-dd27274c8f02",
+        "version": "2.0.8-shuv.1",
+        "url": "http://127.0.0.1:14096",
+        "pid": 699298,
+        "password": "<redacted len=43 sha12=17f897e9796a>"
+      }
+    }
+  ],
+  "stateTree": [
+    "shuvcode/service.json"
+  ],
+  "logTail": "server listening on http://127.0.0.1:14096\n"
+}

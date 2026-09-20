@@ -6,6 +6,7 @@ export const PROVIDER_IDS = [
   "claude-code",
   "codex",
   "pi",
+  "opencode",
   "acp-cursor",
   "acp-opencode",
   "acp-omp",
@@ -23,6 +24,9 @@ export const NATIVE_ROOT_ENV_KEYS = [
   "PI_PROFILE",
   "PI_CODING_AGENT_DIR",
   "PI_CONFIG_FILES",
+  "BB_OPENCODE_APP",
+  "BB_OPENCODE_SERVER",
+  "BB_OPENCODE_PASSWORD",
   "GROK_HOME",
   "GROK_CLAUDE_SKILLS_ENABLED",
   "GROK_CURSOR_SKILLS_ENABLED",
@@ -795,9 +799,10 @@ function openCodeVariant(
   dirsFor: (paths: FixturePaths) => OpenCodeDirs,
   env: (paths: FixturePaths) => FixtureEnv,
   extraUserNames: readonly string[],
+  providerId: ProviderId = "acp-opencode",
 ): FixtureVariant {
   return {
-    providerId: "acp-opencode",
+    providerId,
     variant,
     env,
     build: (paths) => buildOpenCode(paths, dirsFor(paths)),
@@ -1404,6 +1409,29 @@ export const FIXTURE_VARIANTS: readonly FixtureVariant[] = [
       OPENCODE_CONFIG_DIR: "~/opencode-custom",
     }),
     ["custom-opencode-skill"],
+  ),
+  openCodeVariant(
+    "default",
+    (paths) => ({
+      configDir: path.join(paths.home, ".config", "opencode"),
+      customConfigDir: null,
+    }),
+    () => ({}),
+    [],
+    "opencode",
+  ),
+  openCodeVariant(
+    "config-dir",
+    (paths) => ({
+      configDir: path.join(paths.root, "xdg", "opencode"),
+      customConfigDir: path.join(paths.home, "opencode-custom"),
+    }),
+    (paths) => ({
+      XDG_CONFIG_HOME: path.join(paths.root, "xdg"),
+      OPENCODE_CONFIG_DIR: "~/opencode-custom",
+    }),
+    ["custom-opencode-skill"],
+    "opencode",
   ),
   ompVariant(
     "default",

@@ -1,0 +1,95 @@
+{
+  "capturedAt": "2026-09-20",
+  "livePidUnchanged": true,
+  "client": "@opencode/client@2.0.10",
+  "server": "shuvcode 2.0.8-shuv.1",
+  "instructions": {
+    "sessionCreateHasInstructions": false,
+    "sessionUpdateFields": ["title", "permissions"],
+    "entryKeyPattern": "^[a-z0-9][a-z0-9._-]*$",
+    "putBbInstructions": { "ok": true, "key": "bb.instructions" },
+    "putSlashKey": {
+      "ok": false,
+      "key": "bb/user",
+      "tag": "InvalidRequestError",
+      "message": "Expected a string matching the RegExp ^[a-z0-9][a-z0-9._-]*$"
+    },
+    "putCoreInstructions": {
+      "ok": true,
+      "key": "core.instructions",
+      "note": "Created a separate API entry; did not replace ambient core/instructions"
+    },
+    "listAfterPutKeys": ["bb.instructions", "core.instructions"],
+    "listReturnsPlaintextValue": true,
+    "removeBb": { "ok": true },
+    "listAfterRemoveKeys": ["core.instructions"],
+    "eventDeltaKeysOnFirstStep": [
+      "core/environment",
+      "core/date",
+      "core/codemode",
+      "core/instructions",
+      "core/skill-guidance",
+      "core/mcp-guidance",
+      "api/bb.instructions",
+      "api/core.instructions"
+    ],
+    "eventDeltaValuesAreHashes": true,
+    "eventHasText": false
+  },
+  "skills": {
+    "SkillInfoKeys": ["id", "name", "description", "autoinvoke", "path", "content"],
+    "tmpLocation": {
+      "count": 55,
+      "httpPathCount": 0,
+      "builtinPathExample": "/builtin/opencode.md",
+      "filesystemPathExample": "<HOME>/.agents/skills/bb-cli/SKILL.md",
+      "discoveredThrowawayId": "m0-probe"
+    },
+    "promptSkillsCatalogId": {
+      "ok": true,
+      "id": "m0-probe",
+      "payloadExpandedKeys": ["id", "name", "text"]
+    },
+    "sessionSkillCatalogId": { "ok": true, "id": "m0-probe", "event": "session.skill.activated" },
+    "outsideCatalog": [
+      { "id": "injected-skill", "skillActivateTag": "SkillNotFoundError", "promptTag": "InvalidRequestError" },
+      { "id": "<abs-dir>", "skillActivateTag": "SkillNotFoundError", "promptTag": "InvalidRequestError" },
+      { "id": "<abs-SKILL.md>", "skillActivateTag": "SkillNotFoundError", "promptTag": "InvalidRequestError" }
+    ]
+  },
+  "commands": {
+    "CommandInfoKeys": ["name", "description"],
+    "pathField": false,
+    "unknown": { "tag": "CommandNotFoundError" },
+    "knownNameInit": { "ok": true, "note": "injects a user prompt; not used as a mapping primitive" }
+  },
+  "environment": { "ok": true, "input": { "variables": { "M0_MAPPING_SPIKE": "1" } } },
+  "fork": {
+    "generatedInput": { "sessionID": "string", "before": "string | undefined  // ^msg_" },
+    "openapiProperties": ["before"],
+    "beforeExclusiveProven": {
+      "beforeSynB": { "includesSynA": true, "includesSynB": false, "boundaryType": "before" },
+      "beforeSynA": { "includesSynA": false, "boundaryType": "before" }
+    },
+    "emptySession": { "tag": "InvalidRequestError", "kind": "empty_session" },
+    "inboxIdBeforeDelivery": { "tag": "MessageNotFoundError" },
+    "beforeObjectBoundary": { "status": 400, "message": "Expected string | null at [\"before\"]" },
+    "rawHttpThrough": {
+      "status": 200,
+      "boundaryType": "through",
+      "truncationProven": false,
+      "note": "Returned type through but context still contained messages after SYN_B. Do not use."
+    }
+  },
+  "variants": {
+    "observedVariantIds": ["high", "low", "max", "medium", "minimal", "none", "thinking", "xhigh"],
+    "bbLadder": ["none", "low", "medium", "high", "xhigh", "max"],
+    "opencodeOnly": ["minimal", "thinking"],
+    "googleDefault": {
+      "id": "gemini-3.7-flash-high",
+      "providerID": "google",
+      "variants": []
+    },
+    "googlePattern": "effort baked into ModelInfo.id; variants[] empty"
+  }
+}

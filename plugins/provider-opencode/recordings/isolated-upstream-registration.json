@@ -1,0 +1,26 @@
+{
+  "app": "opencode-upstream-cli",
+  "binary": "/tmp/shuvcode/m0-upstream-cli/node_modules/@opencode/cli-linux-x64/bin/opencode",
+  "versionText": "opencode v2.0.11",
+  "childPid": 734773,
+  "liveInodeBefore": "133624243 1789865937 173",
+  "liveInodeAfter": "133624243 1789865937 173",
+  "liveRegistrationUntouched": true,
+  "foundRegistrationFiles": [
+    {
+      "path": "state/opencode/service.json",
+      "size": 165,
+      "data": {
+        "id": "a1d71579-1e55-4f51-b807-d0e06034aa66",
+        "version": "2.0.11",
+        "url": "http://127.0.0.1:14097",
+        "pid": 734773,
+        "password": "<redacted len=43 sha12=53a4c31959c7>"
+      }
+    }
+  ],
+  "stateTree": [
+    "opencode/service.json"
+  ],
+  "logTail": "server listening on http://127.0.0.1:14097\n"
+}

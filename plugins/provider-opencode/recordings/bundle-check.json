@@ -1,0 +1,30 @@
+{
+  "clientVersions": [
+    "2.0.10",
+    "2.0.11"
+  ],
+  "entry": "import { OpenCode } from '@opencode/client/promise'; import { Service } from '@opencode/client/service';",
+  "esbuild": {
+    "bundle": true,
+    "format": "esm",
+    "platform": "node"
+  },
+  "results": {
+    "2.0.10": {
+      "bytes": 85830,
+      "effectImportCount": 0,
+      "solidImportCount": 0,
+      "schemaImportCount": 0
+    },
+    "2.0.11": {
+      "bytes": 85424,
+      "effectImportCount": 0,
+      "solidImportCount": 0,
+      "schemaImportCount": 0
+    }
+  },
+  "npmInstallStillPullsEffect": true,
+  "reason": "@opencode/schema and @opencode/protocol have hard dependencies on effect@4.0.0-rc.112. The promise+service graph does not import them at runtime when bundled.",
+  "solidJs": "optional unmet peer; not in promise/service bundle",
+  "verdict": "promise+service host bundle does not contain effect or solid-js. D9 fetch-client fallback is NOT required for the bundled plugin artifact. Do not import ./effect or ./solid."
+}

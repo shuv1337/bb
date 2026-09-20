@@ -33,6 +33,7 @@ describe("builtin server artifacts", () => {
     { pluginDir: "provider-claude-code" },
     { pluginDir: "provider-codex" },
     { pluginDir: "provider-pi" },
+    { pluginDir: "provider-opencode" },
   ])(
     "builds the $pluginDir server entry with only the bare SDK specifier left external",
     async ({ pluginDir }) => {
