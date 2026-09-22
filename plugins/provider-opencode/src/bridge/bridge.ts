@@ -32,7 +32,8 @@ import {
   turnStartParamsSchema,
   turnSteerParamsSchema,
   type InitializeResult,
-  type InteractionRequestPayload,
+  type JsonValue,
+  type PendingInteractionPayload,
   type PendingInteractionResolution,
   type ProviderBridgeContext,
   type ThreadDelta,
@@ -47,6 +48,7 @@ import {
   type AppliedSessionKnobs,
 } from "../session-params.js";
 import {
+  assertSelectableAgentId,
   createOpenCodeRuntime,
   resolvePlanExitAgentId,
   type OpenCodeModel,
@@ -107,7 +109,7 @@ type OwnerRecord = { threadId: string; cwd: string };
 
 function isExtensionResolution(
   resolution: PendingInteractionResolution,
-): resolution is { kind: "request_answer"; value: unknown } {
+): resolution is { kind: "request_answer"; value: JsonValue } {
   return "kind" in resolution && resolution.kind === "request_answer";
 }
 
@@ -296,7 +298,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sessionID: string;
     kind: "permission" | "form";
     requestID: string;
-    payload: InteractionRequestPayload;
+    payload: PendingInteractionPayload;
   }): void {
     interactionSerial += 1;
     const id = `oc-int-${interactionSerial}`;
@@ -547,6 +549,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     return oc.models({ directory: cwd });
   }
 
+  async function assertRequestedAgent(cwd: string, agent: string | null): Promise<void> {
+    if (agent === null) {
+      return;
+    }
+    const listed = await (await runtime()).agents({ directory: cwd });
+    assertSelectableAgentId(agent, listed.agents);
+  }
+
   async function handleRequest(
     request: OpenCodeCommand & { id: string | number },
   ): Promise<void> {
@@ -610,6 +620,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           catalog,
         });
         const oc = await runtime();
+        await assertRequestedAgent(request.params.cwd, knobs.agent);
         const handle = await oc.createSession({
           location: { directory: request.params.cwd },
           title: sessionTitleForThread(request.params.threadId),
@@ -637,6 +648,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           catalog,
         });
         const oc = await runtime();
+        await assertRequestedAgent(request.params.cwd, knobs.agent);
         let handle: SessionHandle;
         try {
           handle = await oc.openSession(request.params.providerThreadId);
@@ -666,6 +678,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           catalog,
         });
         const oc = await runtime();
+        await assertRequestedAgent(request.params.cwd, knobs.agent);
         const source =
           sessionsByProviderId.get(request.params.sourceProviderThreadId)?.handle ??
           (await oc.openSession(request.params.sourceProviderThreadId));
@@ -712,6 +725,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           instructionMode: "append",
           catalog: session.catalog,
         });
+        await assertRequestedAgent(session.cwd, knobs.agent);
         await applyKnobs(session, knobs);
         const delivery =
           request.method === "turn/steer" ? "steer" : session.busy ? "queue" : "steer";

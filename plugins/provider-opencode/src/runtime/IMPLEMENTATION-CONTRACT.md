@@ -127,7 +127,7 @@ Append: put/remove entry key `bb.instructions` (`^[a-z0-9][a-z0-9._-]*$`). Empty
 
 ### Skills / commands
 
-Catalog ids from `skills()` / `commands()` only. `prompt.skills` is `{ id: string }[]`. Paths and unknown ids fail at the server. No `skills/configure` root registration.
+Catalog ids from `skills()` / `commands()` only. `prompt.skills` is `{ id: string }[]`. Paths and unknown ids fail at the server. No `skills/configure` root registration. `resolveNativeRoots` calls both when health is ready. Command names have no path, so the host materializes them for the daemon. Filesystem command directories are only the fallback when `commands()` was not fetched.
 
 ### Permissions
 

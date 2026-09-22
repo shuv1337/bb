@@ -7,6 +7,7 @@ import { experimental_scanPublicSdkOnly as scanPublicSdkOnly } from "@get-bb/plu
 const scan = scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), {
   allow: [
     /^@opencode\/client(?:\/promise|\/service)$/u,
+    /^@get-bb\/plugin-sdk\/provider-bridge\/testing$/u,
     /^(?:\.\.\/)+vitest\.shared\.js$/u,
   ],
 });

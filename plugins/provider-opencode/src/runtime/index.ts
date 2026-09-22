@@ -39,10 +39,12 @@ export {
   OpenCodeRuntimeError,
   OpenCodeRuntimeNotReadyError,
   OpenCodeUnauthenticatedError,
+  OpenCodeUnknownAgentError,
   OpenCodeUnknownCheckpointError,
   sanitizeErrorMessage,
 } from "./errors.js";
 export {
+  assertSelectableAgentId,
   extractConfigDefaultAgent,
   isSelectableAgent,
   resolveDefaultAgentId,

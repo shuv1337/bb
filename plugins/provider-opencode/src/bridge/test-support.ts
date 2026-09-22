@@ -10,6 +10,10 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { createOpenCodeBridge } from "./bridge.js";
 import type {
+  OpenCodeDiscoveryHealth,
+  OpenCodeRuntime as LiveOpenCodeRuntime,
+} from "../runtime/index.js";
+import type {
   CreateSessionInput,
   OpenCodeEvent,
   OpenCodeFileAttachment,
@@ -91,7 +95,7 @@ export class FakeOpenCodeRuntime implements OpenCodeRuntime {
   lastModel: OpenCodeModelRef | undefined;
   lastTitle: string | undefined;
   closed = false;
-  private nextId = 0;
+  nextId = 0;
   private readonly subscribers: Array<{
     sessionID: string;
     queue: AsyncQueue<OpenCodeEvent>;
@@ -209,6 +213,20 @@ export class FakeOpenCodeRuntime implements OpenCodeRuntime {
           }
         }
       },
+    };
+  }
+
+  async health(): Promise<OpenCodeDiscoveryHealth> {
+    return {
+      status: "ready",
+      statusMessage: null,
+      appId: "opencode",
+      version: "2.0.11",
+      installedVersion: "2.0.11",
+      url: "http://127.0.0.1:4096",
+      registrationFile: null,
+      pid: 1,
+      pathBinaryAppId: "opencode",
     };
   }
 
@@ -407,7 +425,9 @@ export interface OpenCodeBridgeHarness {
 export async function startOpenCodeBridgeHarness(): Promise<OpenCodeBridgeHarness> {
   const workspaceDir = mkdtempSync(join(tmpdir(), "bb-opencode-bridge-"));
   const fake = new FakeOpenCodeRuntime();
-  const bridge = createOpenCodeBridge({ createRuntime: async () => fake });
+  const bridge = createOpenCodeBridge({
+    createRuntime: async () => fake as unknown as LiveOpenCodeRuntime,
+  });
   const rpc = createBridgeJsonRpcTestHarness(bridge.handleLine);
   let requestId = 1;
   const initialize = await rpc.waitForResponse(

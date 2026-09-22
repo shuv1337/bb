@@ -25,6 +25,13 @@ export class OpenCodeUnknownCheckpointError extends OpenCodeRuntimeError {
   }
 }
 
+export class OpenCodeUnknownAgentError extends OpenCodeRuntimeError {
+  constructor(agent: string) {
+    super("unknown_agent", `Unknown OpenCode agent "${agent}"`);
+    this.name = "OpenCodeUnknownAgentError";
+  }
+}
+
 export class OpenCodeInstructionReplaceError extends OpenCodeRuntimeError {
   constructor() {
     super(

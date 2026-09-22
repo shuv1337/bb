@@ -2,7 +2,6 @@ import { z } from "zod";
 import {
   ZERO_TOKEN_USAGE,
   experimental_COMPACTION_PRESENTATION as COMPACTION_PRESENTATION,
-  experimental_REASONING_PRESENTATION as REASONING_PRESENTATION,
   experimental_fileReadPresentation as fileReadPresentation,
   experimental_presentationTitle as presentationTitle,
   experimental_searchPresentation as searchPresentation,
@@ -18,7 +17,7 @@ import {
   USER_QUESTION_MAX_OPTIONS,
   USER_QUESTION_MAX_QUESTIONS,
 } from "@get-bb/plugin-sdk/provider-bridge";
-import type { InteractionRequestPayload } from "@get-bb/plugin-sdk/provider-bridge";
+import type { PendingInteractionPayload } from "@get-bb/plugin-sdk/provider-bridge";
 import type { OpenCodeNativeEvent, OpenCodeSessionMessage } from "./runtime/index.js";
 import {
   OPENCODE_AGENT_KIND,
@@ -56,7 +55,6 @@ const IGNORED_EVENT_TYPES = new Set([
   "form.replied",
   "session.step.streamed",
   "session.tool.input.ended",
-  "session.tool.input.delta",
 ]);
 
 const nativeEventSchema = z
@@ -149,7 +147,6 @@ interface NativeSessionState {
   tools: Map<string, ToolState>;
   children: Map<string, ChildState>;
   textOpen: Set<string>;
-  reasoningOpen: Set<string>;
   compactionOpen: boolean;
 }
 
@@ -165,7 +162,6 @@ function emptyNativeState(): NativeSessionState {
     tools: new Map(),
     children: new Map(),
     textOpen: new Set(),
-    reasoningOpen: new Set(),
     compactionOpen: false,
   };
 }
@@ -182,7 +178,7 @@ export interface OpenCodeTranslateContext {
 export interface OpenCodeInteraction {
   requestID: string;
   sessionID: string;
-  payload: InteractionRequestPayload;
+  payload: PendingInteractionPayload;
 }
 
 export interface OpenCodeTranslateResult {
@@ -408,7 +404,7 @@ function formFitsUserQuestion(fields: FormField[]): boolean {
   );
 }
 
-function userQuestionPayload(fields: FormField[]): InteractionRequestPayload {
+function userQuestionPayload(fields: FormField[]): PendingInteractionPayload {
   return {
     kind: "user_question",
     questions: fields.map((field) => ({
@@ -426,7 +422,7 @@ function approvalPayload(args: {
   action: string;
   resources: string[];
   toolId: string | undefined;
-}): InteractionRequestPayload {
+}): PendingInteractionPayload {
   const resource = args.resources[0] ?? args.action;
   if (args.action === "read") {
     return {
@@ -503,7 +499,7 @@ function ensureTurnOpen(
 
 function closeTurn(
   state: NativeSessionState,
-  status: "completed" | "interrupted" | "error",
+  status: "completed" | "interrupted" | "failed",
 ): ThreadDelta[] {
   if (!state.turnOpen) {
     return [];
@@ -526,7 +522,7 @@ function closeTurn(
 function closeDelegation(
   state: NativeSessionState,
   childId: string,
-  status: "completed" | "interrupted" | "error",
+  status: "completed" | "interrupted" | "failed",
 ): ThreadDelta[] {
   const child = state.children.get(childId);
   const label = child?.label ?? childId;
@@ -543,7 +539,7 @@ function closeDelegation(
     deltas.push({
       kind: "item.close",
       key: { providerItemId: childId },
-      status: status === "completed" ? "completed" : "error",
+      status,
       item: {
         type: "delegation",
         childRef: childId,
@@ -617,14 +613,6 @@ export function createOpenCodeDeltaTranslator() {
       });
     }
     state.textOpen.clear();
-    for (const reasoningId of state.reasoningOpen) {
-      deltas.push({
-        kind: "item.textClose",
-        key: { providerItemId: reasoningId },
-        channel: "reasoningText",
-      });
-    }
-    state.reasoningOpen.clear();
     if (state.compactionOpen) {
       deltas.push({
         kind: "item.close",
@@ -744,10 +732,10 @@ export function createOpenCodeDeltaTranslator() {
       }
       case "session.execution.failed": {
         if (isChild) {
-          deltas.push(...closeDelegation(owner, eventSessionID, "error"));
+          deltas.push(...closeDelegation(owner, eventSessionID, "failed"));
           break;
         }
-        deltas.push(...closeTurn(native, "error"));
+        deltas.push(...closeTurn(native, "failed"));
         native.executionTurnId = undefined;
         break;
       }
@@ -829,26 +817,7 @@ export function createOpenCodeDeltaTranslator() {
         }
         break;
       }
-      case "session.tool.progress": {
-        const id = asString(data.id);
-        if (id === undefined) {
-          break;
-        }
-        const metadata = asRecord(data.metadata);
-        const message =
-          asString(metadata?.message) ??
-          asString(metadata?.text) ??
-          asString(data.message);
-        deltas.push({
-          kind: "item.progress",
-          key: keyFor(id, parentRef),
-          ...(message !== undefined ? { message } : {}),
-          ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
-        });
-        break;
-      }
-      case "session.tool.success":
-      case "session.tool.failed": {
+      case "session.tool.success": {
         const id = asString(data.id);
         if (id === undefined) {
           break;
@@ -856,11 +825,7 @@ export function createOpenCodeDeltaTranslator() {
         const tool = native.tools.get(id);
         const name = tool?.name ?? "tool";
         const classified = classifyTool(name, tool?.input, ctx.cwd);
-        const errorRecord = asRecord(data.error);
-        const resultText = toolResultText(
-          data.content ?? asString(errorRecord?.message) ?? data.error,
-        );
-        const failed = event.type === "session.tool.failed";
+        const resultText = toolResultText(data.content);
         if (tool?.opened !== true) {
           deltas.push({
             kind: "item.open",
@@ -883,21 +848,20 @@ export function createOpenCodeDeltaTranslator() {
             ? {
                 ...classified.item,
                 aggregatedOutput: resultText,
-                exitCode: failed ? 1 : 0,
+                exitCode: 0,
               }
             : classified.item.type === "tool"
               ? {
                   ...classified.item,
-                  result: stripThoughtSignature(data.content ?? data.error),
-                  ...(failed ? { error: resultText } : {}),
+                  result: stripThoughtSignature(data.content),
                 }
               : classified.item;
         deltas.push({
           kind: "item.close",
           key: keyFor(id, parentRef),
-          status: failed ? "error" : "completed",
+          status: "completed",
           ...(classified.item.type === "command"
-            ? { aggregatedOutput: resultText, exitCode: failed ? 1 : 0 }
+            ? { aggregatedOutput: resultText, exitCode: 0 }
             : {}),
           ...(resultText.length > 0 ? { resultText } : {}),
           item: closedItem,
@@ -929,90 +893,75 @@ export function createOpenCodeDeltaTranslator() {
         });
         break;
       }
-      case "session.text.started":
-      case "session.reasoning.started": {
+      case "session.text.started": {
         const assistantMessageID = asString(data.assistantMessageID);
         if (assistantMessageID === undefined) {
           break;
         }
         const ordinal = asNumber(data.ordinal) ?? 0;
-        const reasoning = event.type === "session.reasoning.started";
-        const itemId = `${reasoning ? "reason" : "text"}:${assistantMessageID}:${ordinal}`;
-        const openSet = reasoning ? native.reasoningOpen : native.textOpen;
-        openSet.add(itemId);
+        const itemId = `text:${assistantMessageID}:${ordinal}`;
+        native.textOpen.add(itemId);
         native.lastCheckpointId = assistantMessageID;
         deltas.push(...ensureTurnOpen(isChild ? owner : native, parentRef), {
           kind: "item.open",
           key: keyFor(itemId, parentRef),
-          item: reasoning
-            ? { type: "reasoning", summary: [], content: [] }
-            : { type: "agentMessage", text: "" },
-          presentation: reasoning ? REASONING_PRESENTATION : AGENT_MESSAGE_PRESENTATION,
+          item: { type: "agentMessage", text: "" },
+          presentation: AGENT_MESSAGE_PRESENTATION,
           ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
         });
         break;
       }
-      case "session.text.delta":
-      case "session.reasoning.delta": {
+      case "session.text.delta": {
         const assistantMessageID = asString(data.assistantMessageID);
         const deltaText = typeof data.delta === "string" ? data.delta : "";
         if (assistantMessageID === undefined || deltaText.length === 0) {
           break;
         }
         const ordinal = asNumber(data.ordinal) ?? 0;
-        const reasoning = event.type === "session.reasoning.delta";
-        const itemId = `${reasoning ? "reason" : "text"}:${assistantMessageID}:${ordinal}`;
-        const openSet = reasoning ? native.reasoningOpen : native.textOpen;
-        if (!openSet.has(itemId)) {
-          openSet.add(itemId);
+        const itemId = `text:${assistantMessageID}:${ordinal}`;
+        if (!native.textOpen.has(itemId)) {
+          native.textOpen.add(itemId);
           deltas.push(...ensureTurnOpen(isChild ? owner : native, parentRef), {
             kind: "item.open",
             key: keyFor(itemId, parentRef),
-            item: reasoning
-              ? { type: "reasoning", summary: [], content: [] }
-              : { type: "agentMessage", text: "" },
-            presentation: reasoning ? REASONING_PRESENTATION : AGENT_MESSAGE_PRESENTATION,
+            item: { type: "agentMessage", text: "" },
+            presentation: AGENT_MESSAGE_PRESENTATION,
           });
         }
         deltas.push({
           kind: "item.textDelta",
           key: keyFor(itemId, parentRef),
-          channel: reasoning ? "reasoningText" : "agentMessage",
+          channel: "agentMessage",
           text: deltaText,
           ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
         });
         break;
       }
-      case "session.text.ended":
-      case "session.reasoning.ended": {
+      case "session.text.ended": {
         const assistantMessageID = asString(data.assistantMessageID);
         if (assistantMessageID === undefined) {
           break;
         }
         const ordinal = asNumber(data.ordinal) ?? 0;
-        const reasoning = event.type === "session.reasoning.ended";
-        const itemId = `${reasoning ? "reason" : "text"}:${assistantMessageID}:${ordinal}`;
+        const itemId = `text:${assistantMessageID}:${ordinal}`;
         const text = typeof data.text === "string" ? data.text : undefined;
-        const openSet = reasoning ? native.reasoningOpen : native.textOpen;
         native.lastCheckpointId = assistantMessageID;
-        if (!openSet.has(itemId)) {
+        if (!native.textOpen.has(itemId)) {
           deltas.push({
             kind: "item.open",
             key: keyFor(itemId, parentRef),
-            item: reasoning
-              ? { type: "reasoning", summary: [], content: text !== undefined ? [text] : [] }
-              : { type: "agentMessage", text: text ?? "" },
-            presentation: reasoning ? REASONING_PRESENTATION : AGENT_MESSAGE_PRESENTATION,
+            item: { type: "agentMessage", text: text ?? "" },
+            presentation: AGENT_MESSAGE_PRESENTATION,
           });
         }
         deltas.push({
           kind: "item.textClose",
           key: keyFor(itemId, parentRef),
-          channel: reasoning ? "reasoningText" : "agentMessage",
+          channel: "agentMessage",
           ...(text !== undefined ? { text } : {}),
           ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
         });
-        openSet.delete(itemId);
+        native.textOpen.delete(itemId);
         break;
       }
       case "session.usage.updated": {
@@ -1113,28 +1062,6 @@ export function createOpenCodeDeltaTranslator() {
             modelContextWindow: ctx.modelContextWindow,
           });
         }
-        deltas.push(...closeTurn(native, "completed"));
-        break;
-      }
-      case "session.compaction.failed": {
-        const errorRecord = asRecord(data.error);
-        const message = asString(errorRecord?.message) ?? "Context compaction failed";
-        if (native.compactionOpen) {
-          deltas.push({
-            kind: "item.close",
-            key: { providerItemId: "compaction" },
-            status: "error",
-            item: { type: "compaction" },
-            presentation: COMPACTION_PRESENTATION,
-          });
-          native.compactionOpen = false;
-        }
-        deltas.push({
-          kind: "provider.warning",
-          category: "compaction-skipped",
-          summary: "Context compaction failed",
-          details: message,
-        });
         deltas.push(...closeTurn(native, "completed"));
         break;
       }

@@ -136,12 +136,20 @@ export type OpenCodePromptInput = {
   id?: string;
 };
 
+export type OpenCodeJson =
+  | null
+  | boolean
+  | number
+  | string
+  | OpenCodeJson[]
+  | { readonly [key: string]: OpenCodeJson };
+
 export type CreateSessionInput = {
   location: OpenCodeLocation;
   title?: string;
   agent?: string;
   model?: OpenCodeModelRef;
-  metadata?: Record<string, unknown>;
+  metadata?: { readonly [key: string]: OpenCodeJson };
   permissionMode?: OpenCodePermissionMode;
   permissions?: readonly OpenCodePermissionRule[];
   instructions?: { mode: OpenCodeInstructionMode; text: string };

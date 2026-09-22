@@ -1,6 +1,6 @@
 ---
 name: opencode-provider
-description: "Inspect BB OpenCode provider defaultAgent, defaultVariant, BB_OPENCODE_SERVER, BB_OPENCODE_APP, BB_OPENCODE_PASSWORD, native skills, and compaction."
+description: "Inspect BB OpenCode provider defaultAgent, defaultVariant, BB_OPENCODE_SERVER, BB_OPENCODE_APP, BB_OPENCODE_PASSWORD, native skills and commands, and compaction."
 ---
 
 # OpenCode provider
@@ -39,9 +39,12 @@ Passthrough on the host daemon:
 
 PATH `opencode` may be a symlink; identity is `--version` output.
 
-## Skills, compact, rewind
+## Skills, commands, compact, rewind
 
-`bb skill list` shows OpenCode nested skills from the catalog and filesystem
-roots. Compact is `bb thread compact` (OpenCode compact RPC, not `/compact`).
-Fork is checkpoint rewind. Deleting a bb thread does not remove the OpenCode
-session.
+`bb skill list` shows OpenCode nested skills from `GET /api/skill` when the
+service is up, and from filesystem roots when it is down. The `/` menu
+prefers `GET /api/command` the same way. A picked command runs
+`session.command`, not a pasted prompt. OpenCode (ACP) does not call these
+catalogs. Compact is `bb thread compact` (OpenCode compact RPC, not
+`/compact`). Fork is checkpoint rewind. Deleting a bb thread does not remove
+the OpenCode session.

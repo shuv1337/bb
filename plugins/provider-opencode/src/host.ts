@@ -7,6 +7,7 @@ import {
 import { createOpenCodeRuntime } from "./runtime/index.js";
 import {
   resolveOpenCodeNativeRoots,
+  type OpenCodeCatalogCommand,
   type OpenCodeCatalogSkill,
 } from "./native-roots.js";
 
@@ -15,7 +16,19 @@ export { experimental_providerBridge } from "./bridge/bridge.js";
 export type OpenCodeHostDiscovery = {
   appId: string | null;
   catalogSkills: readonly OpenCodeCatalogSkill[];
+  catalogCommands: readonly OpenCodeCatalogCommand[] | null;
 };
+
+function catalogCommandsFrom(
+  commands: readonly { name: string; description?: string }[],
+): OpenCodeCatalogCommand[] {
+  return commands.map((command) => {
+    const description = command.description?.trim();
+    return description !== undefined && description.length > 0
+      ? { name: command.name, description }
+      : { name: command.name };
+  });
+}
 
 export async function loadOpenCodeHostDiscovery(args: {
   cwd: string | null;
@@ -30,19 +43,29 @@ export async function loadOpenCodeHostDiscovery(args: {
     const health = await runtime.health();
     const appId = health.appId;
     if (health.status !== "ready" || args.cwd === null) {
-      return { appId, catalogSkills: [] };
+      return { appId, catalogSkills: [], catalogCommands: null };
     }
-    const skills = await runtime.skills({ directory: args.cwd });
+    const [skillsResult, commandsResult] = await Promise.allSettled([
+      runtime.skills({ directory: args.cwd }),
+      runtime.commands({ directory: args.cwd }),
+    ]);
     return {
       appId,
-      catalogSkills: skills.map((skill) => ({
-        id: skill.id,
-        name: skill.name,
-        path: skill.path,
-      })),
+      catalogSkills:
+        skillsResult.status === "fulfilled"
+          ? skillsResult.value.map((skill) => ({
+              id: skill.id,
+              name: skill.name,
+              path: skill.path,
+            }))
+          : [],
+      catalogCommands:
+        commandsResult.status === "fulfilled"
+          ? catalogCommandsFrom(commandsResult.value)
+          : null,
     };
   } catch {
-    return { appId: null, catalogSkills: [] };
+    return { appId: null, catalogSkills: [], catalogCommands: null };
   } finally {
     await runtime.close();
   }
@@ -60,6 +83,7 @@ export async function resolveOpenCodeHostNativeRoots(args: {
     cwd: args.cwd,
     appId: args.discovery.appId ?? undefined,
     catalogSkills: args.discovery.catalogSkills,
+    catalogCommands: args.discovery.catalogCommands,
   });
 }
 

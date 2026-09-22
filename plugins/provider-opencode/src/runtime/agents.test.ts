@@ -39,7 +39,7 @@ describe("default agent", () => {
     ).toBe("build");
   });
 
-  it("uses the setting default when leaving plan if selectable", () => {
+  it("uses a selectable setting when leaving plan and does not fall back to build", () => {
     expect(
       resolvePlanExitAgentId({
         settingDefaultAgent: "plan",
@@ -47,9 +47,23 @@ describe("default agent", () => {
         configDefaultAgent: "build",
       }),
     ).toBe("plan");
-    expect(
+    expect(() =>
       resolvePlanExitAgentId({
         settingDefaultAgent: "explore",
+        agents,
+        configDefaultAgent: "build",
+      }),
+    ).toThrow('Unknown OpenCode agent "explore"');
+    expect(() =>
+      resolvePlanExitAgentId({
+        settingDefaultAgent: "missing",
+        agents,
+        configDefaultAgent: "build",
+      }),
+    ).toThrow('Unknown OpenCode agent "missing"');
+    expect(
+      resolvePlanExitAgentId({
+        settingDefaultAgent: null,
         agents,
         configDefaultAgent: "build",
       }),

@@ -90,7 +90,9 @@ Claude process before its next turn and keeps the conversation.
 
 The native OpenCode provider (`opencode`) attaches to a live OpenCode v2
 service on the host. OpenCode (ACP) remains `acp-opencode` for v1 binaries.
-Set the native default agent with
+Native skills and slash commands prefer that service's `GET /api/skill` and
+`GET /api/command` catalogs; OpenCode (ACP) does not. Set the native default
+agent with
 `bb plugin config provider-opencode set defaultAgent <name>` and a catalog
 variant with `bb plugin config provider-opencode set defaultVariant <id>`.
 Host env passthrough: `BB_OPENCODE_SERVER`, `BB_OPENCODE_PASSWORD`,

@@ -479,6 +479,12 @@ These settings travel as `providerOptions.agent` and
 `providerOptions.variant`. Deleting a bb thread does not remove the OpenCode
 session.
 
+While a v2 service is up, the composer prefers that workspace's
+`GET /api/skill` and `GET /api/command` catalogs. Command entries have names,
+not paths. When the service is down, skills and commands fall back to the
+filesystem roots in the table below, plus `~/.config/<app>/commands` and the
+legacy `command` directory. `acp-opencode` does not call these HTTP catalogs.
+
 ## Custom ACP Agents
 
 Known ACP agents appear when their CLI is installed on the host. bb exposes

@@ -23,20 +23,31 @@ Declared roots (`experimental_nativeSkillRoots` / `experimental_nativeCommandRoo
   `.agents/skills`, recursive.
 - `project` skills: `.opencode/skills`, `.claude/skills`, `.agents/skills`,
   recursive with ancestors.
-- `project` commands: `.opencode/commands` with ancestors. The HTTP command
-  catalog has no paths, so commands are filesystem-only.
+- `project` commands: `.opencode/commands` with ancestors. This root is
+  always scanned, whether or not the service is up.
 
-Host-resolved extras (`experimental_resolvesNativeRoots`):
+Host `resolveNativeRoots` prefers the live catalog and falls back to the
+filesystem when that request did not succeed:
 
-- `~/.config/<app>/skills` for the attached app (`opencode`, `shuvcode`, …),
-  using `XDG_CONFIG_HOME` when set. Discovery `health.appId` selects the app;
-  `BB_OPENCODE_APP` is the fallback when discovery has none.
-  `OPENCODE_CONFIG_DIR` is honored only for upstream `opencode`.
-- Catalog skills from `GET /api/skill` when the service is up, only when
-  `path` is an accessible host file. Virtual `/builtin/…` paths and URLs are
-  skipped. Nested catalog ids become skill-file fallback names. A path is
-  omitted only when it already sits in a declared home, workspace-ancestor,
-  or app-config root.
+- Skills: `GET /api/skill` at the workspace. `~/.config/<app>/skills` (and
+  upstream `OPENCODE_CONFIG_DIR/skills`) is always included, because that
+  directory depends on the attached app. Catalog entries are added when
+  `path` is an accessible host file outside those directories and the
+  declared home and workspace roots. Virtual `/builtin/…` paths and URLs
+  are skipped. Nested catalog ids become skill-file fallback names.
+- Commands: `GET /api/command` at the workspace. The payload is
+  `{ name, description? }` with no path, so each safe name is written as
+  markdown under a temporary catalog directory and that directory is the
+  commands root. Nested names keep `/` as directories. bb's scanner joins
+  those directories with `:`; `session.command` sends `/` again.
+- Command fallback, only when `GET /api/command` was not fetched:
+  `~/.config/<app>/commands`, legacy `command`, upstream
+  `OPENCODE_CONFIG_DIR` copies of both, and `.opencode/command` on
+  workspace ancestors.
+
+Discovery `health.appId` selects `<app>` (`opencode`, `shuvcode`, …), using
+`XDG_CONFIG_HOME` when set. `BB_OPENCODE_APP` is the fallback when discovery
+has none. `OPENCODE_CONFIG_DIR` is honored only for upstream `opencode`.
 
 bb cannot register extra skill roots on the session (`skills/configure` is
 off). Only skills already in OpenCode's catalog can be activated.

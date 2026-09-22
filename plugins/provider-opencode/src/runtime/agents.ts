@@ -1,3 +1,4 @@
+import { OpenCodeUnknownAgentError } from "./errors.js";
 import type { OpenCodeAgent } from "./types.js";
 
 export function isSelectableAgent(agent: OpenCodeAgent): boolean {
@@ -34,16 +35,23 @@ export function resolveDefaultAgentId(input: {
   return selectable[0]?.id ?? null;
 }
 
+export function assertSelectableAgentId(
+  agent: string,
+  agents: readonly OpenCodeAgent[],
+): void {
+  if (agents.some((entry) => entry.id === agent && isSelectableAgent(entry))) {
+    return;
+  }
+  throw new OpenCodeUnknownAgentError(agent);
+}
+
 export function resolvePlanExitAgentId(input: {
   settingDefaultAgent: string | null;
   agents: readonly OpenCodeAgent[];
   configDefaultAgent: string | null;
 }): string | null {
-  const selectable = input.agents.filter(isSelectableAgent);
-  if (
-    input.settingDefaultAgent !== null &&
-    selectable.some((agent) => agent.id === input.settingDefaultAgent)
-  ) {
+  if (input.settingDefaultAgent !== null) {
+    assertSelectableAgentId(input.settingDefaultAgent, input.agents);
     return input.settingDefaultAgent;
   }
   return resolveDefaultAgentId({

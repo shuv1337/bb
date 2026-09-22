@@ -105,7 +105,7 @@ Observed on the spike session:
 
 Child explore session additionally: `session.created` with **`data.parentID`**, `data.agent: "explore"`, inherited parent `metadata` and `permissions`, then the same tool/permission stream on the child id.
 
-**Not observed** (do not guess): `session.idle`, `session.compaction.failed`, `form.cancelled`, `session.forked`, `session.permissions` (ruleset-changed event). Settle on `session.execution.succeeded|failed|interrupted` until idle is recorded.
+**Not observed** (do not guess): `session.idle`, `session.compaction.failed`, `form.cancelled`, `session.forked`, `session.permissions` (ruleset-changed event), `session.reasoning.started|delta|ended`, `session.tool.failed`, `session.tool.progress`, `session.tool.input.delta`. Settle on `session.execution.succeeded|failed|interrupted` until idle is recorded. The translator must not switch on or ignore-list any other name in this sentence.
 
 Envelope facts:
 
@@ -199,7 +199,7 @@ There is **no** session API to register a skill root. `skills/configure` paths t
 - **Not** a host path: `/builtin/opencode.md` (virtual builtin). A filesystem resolver cannot scan it.
 - HTTP catalogs: documented by v2; **not observed**. Do not assume `path` is a URL; do not assume it is a cache file. Unproven.
 
-`CommandInfo` live+generated: `{ name, description? }` **only**. **No `path`.** `GET /api/command` cannot feed a filesystem native-command resolver. Commands are name-only; `session.command({ name, text })`. Unknown name → `CommandNotFoundError`. Filesystem fallback remains `.opencode/commands` as documented, not the HTTP list.
+`CommandInfo` live+generated: `{ name, description? }` **only**. **No `path`.** `resolveNativeRoots` still prefers `GET /api/command` when the service is up: each safe name is materialized as a markdown file (nested `/` becomes directories) because the native-root contract only accepts filesystem paths. `session.command({ name, text })` receives that name with bb's `:` nesting turned back into `/`. Unknown name → `CommandNotFoundError`. When that request was not fetched, the fallback is the filesystem: `~/.config/<app>/{commands,command}`, upstream `OPENCODE_CONFIG_DIR`, and ancestor `.opencode/command`, beside the declared `.opencode/commands` root.
 
 ### 7.4 Fork `before` vs bb checkpoint
 

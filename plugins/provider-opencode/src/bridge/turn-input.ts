@@ -19,7 +19,9 @@ export interface ExtractedOpenCodeTurnInput {
 }
 
 function fileUri(filePath: string): string {
-  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+  const absolute = path.isAbsolute(filePath)
+    ? filePath
+    : path.resolve(filePath);
   return `file://${absolute}`;
 }
 
@@ -52,14 +54,21 @@ export function extractOpenCodeTurnInput(
           resource.origin !== "builtin" &&
           mentioned === `${resource.trigger}${resource.name}`
         ) {
-          const remainder = `${item.text.slice(0, mention.start)}${item.text.slice(mention.end)}`.trim();
-          command = { name: resource.name, text: remainder };
+          const remainder =
+            `${item.text.slice(0, mention.start)}${item.text.slice(mention.end)}`.trim();
+          command = {
+            name: resource.name.split(":").join("/"),
+            text: remainder,
+          };
         }
       }
     } else if (item.type === "localImage" || item.type === "localFile") {
       files.push({
         uri: fileUri(item.path),
-        name: item.type === "localFile" ? item.name ?? path.basename(item.path) : path.basename(item.path),
+        name:
+          item.type === "localFile"
+            ? (item.name ?? path.basename(item.path))
+            : path.basename(item.path),
       });
     } else if (item.type === "image") {
       files.push({ uri: item.url });
