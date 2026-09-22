@@ -14,7 +14,7 @@
     "data": {
       "sessionID": "SES_1",
       "slug": "clever-falcon",
-      "version": "2.0.8-shuv.1",
+      "version": "2.0.8",
       "projectID": "OTHER_1",
       "location": {
         "directory": "<WORKSPACE>"
@@ -338,7 +338,7 @@
         "core/codemode": "d34808aba0ba8e1f000d0ba7075b6079e15ff31fd7ced5a5d3712e25b57e0079",
         "core/mcp-guidance": "dbdead7dba9eeaa17fd86d3ed943918da046479412435bf41a5193c358c61eac"
       },
-      "text": "The Code Mode tool catalog has changed. This catalog supersedes the previous Code Mode tool catalog.\n\nThe Code Mode tool\u2026<truncated len=11354>"
+      "text": "<redacted>"
     },
     "durable": {
       "aggregateID": "SES_1",
@@ -677,7 +677,7 @@
     },
     "data": {
       "sessionID": "SES_1",
-      "text": " not run shell commands.\n\n## Decisions\n- Used the `read` tool rather than shell commands to inspect `hello.txt`.\n\n## Wor\u2026<truncated len=127>"
+      "text": " not run shell commands.\n\n## Decisions\n- Used the `read` tool rather than shell commands to inspect `hello.txt`.\n\n## Wor\u2026<redacted>"
     }
   },
   {
@@ -740,7 +740,7 @@
         "id": "OTHER_3",
         "providerID": "google"
       },
-      "text": "## Objective\n- Read `hello.txt` in the workspace and reply with only the first word found without running shell commands\u2026<truncated len=578>",
+      "text": "## Objective\n- Read `hello.txt` in the workspace and reply with only the first word found without running shell commands\u2026<redacted>",
       "recent": "",
       "tokens": "<redacted>",
       "cost": 0

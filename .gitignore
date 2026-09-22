@@ -71,6 +71,7 @@ output.txt
 .codex
 .hermes/plans/
 .otto/
+.grok/
 
 # turborepo
 .turbo
@@ -85,6 +86,7 @@ apps/app/bundle-stats.json
 # Raw provider bridge recordings (record mode output) can hold secrets; only
 # the redacted copies under packages/provider-bridge-protocol/recordings ship.
 provider-recordings/raw/
+plugins/*/recordings/
 
 # Private provider corpus (tests read it through BB_PROVIDER_CORPUS_DIR).
 # Only the in-repo harness and scripts directories of that name are tracked.

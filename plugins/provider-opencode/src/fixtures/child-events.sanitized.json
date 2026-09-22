@@ -9,8 +9,8 @@
     "data": {
       "sessionID": "SES_2",
       "slug": "kind-cactus",
-      "version": "2.0.8-shuv.1",
-      "projectID": "eae9f96346fe87bb9b9bbf71c3e70c881930cdda",
+      "version": "2.0.8",
+      "projectID": "OTHER_1",
       "parentID": "SES_1",
       "location": {
         "directory": "<WORKSPACE>"

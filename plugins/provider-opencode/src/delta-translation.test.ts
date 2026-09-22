@@ -35,7 +35,7 @@ const CTX: OpenCodeTranslateContext = {
 
 function readJson(name: string): unknown {
   return JSON.parse(
-    readFileSync(new URL(`../recordings/${name}`, import.meta.url), "utf8"),
+    readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"),
   );
 }
 

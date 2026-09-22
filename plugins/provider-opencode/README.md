@@ -59,7 +59,7 @@ passthrough so a value set on the host daemon reaches the bridge. Username
 for explicit URL auth is always `opencode`. A 401 is `unauthenticated`.
 
 PATH `opencode` may be a symlink; app identity comes from `--version`
-(`shuvcode v2.0.8-shuv.1` → `shuvcode`). The installer runs only when no
+(`shuvcode v2.0.8` → `shuvcode`). The installer runs only when no
 v2-capable binary and no registration exist. A discovered app (PATH branding
 or registration) is the install target; `BB_OPENCODE_APP` cannot replace a
 present binary. Default when nothing is present is upstream OpenCode via

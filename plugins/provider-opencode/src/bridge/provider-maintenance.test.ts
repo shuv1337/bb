@@ -110,8 +110,8 @@ describe("openCodeHealthResult", () => {
           status: "ready",
           statusMessage: null,
           appId: "shuvcode",
-          version: "2.0.8-shuv.1",
-          url: "http://100.126.224.77:4096",
+          version: "2.0.8",
+          url: "http://127.0.0.1:4096",
           pathBinaryAppId: "shuvcode",
         }),
       ),
@@ -119,7 +119,7 @@ describe("openCodeHealthResult", () => {
     expect(ready.status).toBe("ready");
     expect(ready.canInstall).toBe(false);
     expect(ready.canUpdate).toBe(false);
-    expect(ready.installedVersion).toBe("2.0.8-shuv.1");
+    expect(ready.installedVersion).toBe("2.0.8");
     expect(ready.loginCommand).toBe("shuvcode auth login");
   });
 
@@ -362,7 +362,7 @@ describe("OpenCode installation plans", () => {
         health: async () =>
           health({
             status: "ready",
-            version: "2.0.8-shuv.1",
+            version: "2.0.8",
             pathBinaryAppId: "shuvcode",
             appId: "shuvcode",
           }),
@@ -373,11 +373,11 @@ describe("OpenCode installation plans", () => {
       health: async () =>
         health({
           status: "ready",
-          version: "2.0.8-shuv.1",
+          version: "2.0.8",
           pathBinaryAppId: "shuvcode",
         }),
       resolveExecutablePath: async (command: string) =>
-        command === "shuvcode" ? "/home/shuv/.local/bin/shuvcode" : null,
+        command === "shuvcode" ? "/opt/bin/shuvcode" : null,
       npmLatestVersion: async () => "2.0.11",
       probeNpmGlobalPackage: async () => ({
         npmBin: null,

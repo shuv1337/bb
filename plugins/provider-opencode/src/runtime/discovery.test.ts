@@ -55,7 +55,7 @@ async function listen(
 
 describe("discovery", () => {
   it("parses branded and bare version output", () => {
-    expect(parseAppIdFromVersion("shuvcode v2.0.8-shuv.1\n")).toBe("shuvcode");
+    expect(parseAppIdFromVersion("shuvcode v2.0.8\n")).toBe("shuvcode");
     expect(parseVersionOutput("1.18.31")).toEqual({
       appId: null,
       version: "1.18.31",
@@ -145,7 +145,7 @@ describe("discovery", () => {
       JSON.stringify({
         url: "http://127.0.0.1:9",
         pid: 99,
-        version: "2.0.8-shuv.1",
+        version: "2.0.8",
       }),
     );
     const deps = discoveryDepsFrom({
@@ -167,7 +167,7 @@ describe("discovery", () => {
       res.setHeader("content-type", "application/json");
       res.end(
         JSON.stringify({
-          version: "2.0.8-shuv.1",
+          version: "2.0.8",
           pid: 4242,
           urls: [],
           paths: { tmp: "/t" },
@@ -182,7 +182,7 @@ describe("discovery", () => {
       JSON.stringify({
         url,
         pid: 4242,
-        version: "2.0.8-shuv.1",
+        version: "2.0.8",
         password: "pw",
       }),
     );
@@ -194,12 +194,12 @@ describe("discovery", () => {
       execVersion: async (binary) =>
         binary === "opencode"
           ? { stdout: "1.18.31", status: 0 }
-          : { stdout: "shuvcode v2.0.8-shuv.1", status: 0 },
+          : { stdout: "shuvcode v2.0.8", status: 0 },
     });
     const attached = await resolveAttachedRegistration(deps);
     expect(attached.health.status).toBe("ready");
     expect(attached.health.pathBinaryAppId).toBe("shuvcode");
-    expect(attached.health.installedVersion).toBe("2.0.8-shuv.1");
+    expect(attached.health.installedVersion).toBe("2.0.8");
   });
 
   it("reports unauthenticated for a live pid with a wrong registration password", async () => {
@@ -215,7 +215,7 @@ describe("discovery", () => {
       JSON.stringify({
         url,
         pid: 7,
-        version: "2.0.8-shuv.1",
+        version: "2.0.8",
         password: "wrong",
       }),
     );
@@ -236,7 +236,7 @@ describe("discovery", () => {
       res.setHeader("content-type", "application/json");
       res.end(
         JSON.stringify({
-          version: "2.0.8-shuv.1",
+          version: "2.0.8",
           pid: 4242,
           urls: [],
           paths: { tmp: "/t" },
@@ -260,7 +260,7 @@ describe("discovery", () => {
       JSON.stringify({
         url,
         pid: 4242,
-        version: "2.0.8-shuv.1",
+        version: "2.0.8",
         password: "pw",
       }),
     );
@@ -269,7 +269,7 @@ describe("discovery", () => {
       homedir: root,
       kill: (pid) => pid === 4242,
       which: () => undefined,
-      execVersion: async () => ({ stdout: "shuvcode v2.0.8-shuv.1", status: 0 }),
+      execVersion: async () => ({ stdout: "shuvcode v2.0.8", status: 0 }),
     });
     const attached = await resolveAttachedRegistration(deps);
     expect(attached.health.status).toBe("ready");
