@@ -1,7 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createOpenCodeRuntime } from "./index.js";
-import { OpenCodeUnknownCheckpointError } from "./errors.js";
+import {
+  OpenCodeUnauthenticatedError,
+  OpenCodeUnknownCheckpointError,
+} from "./errors.js";
 
 const servers: Array<{ close: () => Promise<void> }> = [];
 
@@ -29,7 +32,13 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : undefined;
 }
 
-async function startFixture(input?: { password?: string; dropSse?: boolean }) {
+async function startFixture(input?: {
+  password?: string;
+  dropSse?: boolean;
+  bareUnauthorized?: boolean;
+  unauthorizedEvents?: boolean;
+  unauthorizedAfterConnect?: boolean;
+}) {
   const password = input?.password ?? "pw";
   const expectedAuth =
     "Basic " + Buffer.from(`opencode:${password}`).toString("base64");
@@ -46,6 +55,7 @@ async function startFixture(input?: { password?: string; dropSse?: boolean }) {
     }
   >();
   let sse: ServerResponse | null = null;
+  let eventConnections = 0;
   const pid = 4242;
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
@@ -55,6 +65,35 @@ async function startFixture(input?: { password?: string; dropSse?: boolean }) {
       res.statusCode = 401;
       res.end();
       return;
+    }
+    if (
+      input?.bareUnauthorized &&
+      !(method === "GET" && url.startsWith("/api/info"))
+    ) {
+      res.statusCode = 401;
+      res.end();
+      return;
+    }
+    if (
+      input?.unauthorizedEvents &&
+      method === "GET" &&
+      url.startsWith("/api/event")
+    ) {
+      res.statusCode = 401;
+      res.end();
+      return;
+    }
+    if (
+      input?.unauthorizedAfterConnect &&
+      method === "GET" &&
+      url.startsWith("/api/event")
+    ) {
+      eventConnections += 1;
+      if (eventConnections > 1) {
+        res.statusCode = 401;
+        res.end();
+        return;
+      }
     }
     void (async () => {
       if (method === "GET" && url.startsWith("/api/info")) {
@@ -72,7 +111,7 @@ async function startFixture(input?: { password?: string; dropSse?: boolean }) {
         res.write(
           `data: ${JSON.stringify({ type: "server.connected", data: {} })}\n\n`,
         );
-        if (input?.dropSse) {
+        if (input?.dropSse || input?.unauthorizedAfterConnect) {
           res.end();
           return;
         }
@@ -388,5 +427,122 @@ describe("http runtime adapter", () => {
       runtime.createSession({ location: { directory: "/workspace" } }),
     ).rejects.toThrow(/not ready|not attached|did not answer/i);
     await runtime.close();
+  });
+
+  it("classifies a bare 401 and keeps the cause", async () => {
+    const fixture = await startFixture({ bareUnauthorized: true });
+    const runtime = await createOpenCodeRuntime({
+      env: {
+        BB_OPENCODE_SERVER: fixture.url,
+        BB_OPENCODE_PASSWORD: fixture.password,
+      },
+    });
+    let caught: unknown;
+    try {
+      await runtime.models({ directory: "/workspace" });
+    } catch (error) {
+      caught = error;
+    } finally {
+      await runtime.close();
+    }
+    expect(caught).toBeInstanceOf(OpenCodeUnauthenticatedError);
+    if (!(caught instanceof OpenCodeUnauthenticatedError)) {
+      throw new Error("expected OpenCodeUnauthenticatedError");
+    }
+    expect(caught.cause).toBeDefined();
+  });
+
+  it("does not classify a session id that contains 401", async () => {
+    const fixture = await startFixture();
+    const runtime = await createOpenCodeRuntime({
+      env: {
+        BB_OPENCODE_SERVER: fixture.url,
+        BB_OPENCODE_PASSWORD: fixture.password,
+      },
+    });
+    const sessionID = "ses_401abcd";
+    let caught: unknown;
+    try {
+      await runtime.openSession(sessionID);
+    } catch (error) {
+      caught = error;
+    } finally {
+      await runtime.close();
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(OpenCodeUnauthenticatedError);
+    if (!(caught instanceof Error)) {
+      throw new Error("expected an Error");
+    }
+    expect(caught.message).toContain(sessionID);
+  });
+
+  it("rejects an unauthorized event stream without an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const fixture = await startFixture({ unauthorizedEvents: true });
+    const runtime = await createOpenCodeRuntime({
+      env: {
+        BB_OPENCODE_SERVER: fixture.url,
+        BB_OPENCODE_PASSWORD: fixture.password,
+      },
+    });
+    try {
+      const ac = new AbortController();
+      const first = runtime
+        .subscribe("ses_test1", ac.signal)
+        [Symbol.asyncIterator]()
+        .next();
+      const prompted = runtime
+        .createSession({ location: { directory: "/workspace" }, title: "t" })
+        .then((session) => session.prompt({ text: "hi" }));
+      await expect(first).rejects.toBeInstanceOf(OpenCodeUnauthenticatedError);
+      await expect(prompted).rejects.toBeInstanceOf(OpenCodeUnauthenticatedError);
+      await expect(runtime.models({ directory: "/workspace" })).rejects.toThrow(
+        /OpenCode rejected authentication/,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await runtime.close();
+    }
+  });
+
+  it("rejects a reconnect that fails before the next server.connected and keeps that status", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const fixture = await startFixture({ unauthorizedAfterConnect: true });
+    const runtime = await createOpenCodeRuntime({
+      env: {
+        BB_OPENCODE_SERVER: fixture.url,
+        BB_OPENCODE_PASSWORD: fixture.password,
+      },
+    });
+    try {
+      const ac = new AbortController();
+      const first = runtime
+        .subscribe("ses_test1", ac.signal)
+        [Symbol.asyncIterator]()
+        .next();
+      await expect(first).rejects.toBeInstanceOf(OpenCodeUnauthenticatedError);
+      const health = await runtime.health();
+      expect(health.status).toBe("unauthenticated");
+      await expect(runtime.models({ directory: "/workspace" })).rejects.toThrow(
+        /OpenCode rejected authentication/,
+      );
+      expect((await runtime.health()).status).toBe("unauthenticated");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await runtime.close();
+    }
   });
 });

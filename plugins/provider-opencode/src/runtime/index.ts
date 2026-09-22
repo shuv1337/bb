@@ -54,6 +54,7 @@ export { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
 export {
   createFakeOpenCodeRuntime,
   type CreateFakeOpenCodeRuntimeOptions,
+  type FakeOpenCodeRuntime,
 } from "./fake-runtime.js";
 export { createHttpOpenCodeRuntime } from "./http-runtime.js";
 export {

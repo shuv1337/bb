@@ -5,6 +5,7 @@ type Subscriber = {
   sessionID: string;
   push: (event: RuntimeSessionEvent) => void;
   close: () => void;
+  fail: (error: unknown) => void;
 };
 
 export type EventSourceFactory = (
@@ -53,17 +54,44 @@ export class EventPump {
   private running: Promise<void> | null = null;
   private connected = false;
   private sawConnected = false;
+  private everConnected = false;
   private closed = false;
   private backoffMs = 250;
   private connectWaiters: Array<(ok: boolean) => void> = [];
+  private streamError: unknown = null;
+  private stoppedSettled = false;
+  private resolveStopped = (): void => {};
+  private rejectStopped = (_error: unknown): void => {};
+  private readonly stopped: Promise<void>;
 
-  constructor(private readonly source: EventSourceFactory) {}
+  constructor(private readonly source: EventSourceFactory) {
+    this.stopped = new Promise((resolve, reject) => {
+      this.resolveStopped = resolve;
+      this.rejectStopped = reject;
+    });
+  }
+
+  whenStopped(): Promise<void> {
+    return this.stopped;
+  }
 
   async ensureRunning(): Promise<void> {
+    if (this.streamError !== null) throw this.streamError;
     if (this.closed) throw new Error("event pump closed");
     if (this.connected) return;
     if (this.connection === null) this.start();
     await this.waitUntilConnected(SSE_CONNECT_TIMEOUT_MS);
+  }
+
+  fail(error: unknown): void {
+    this.streamError = error;
+    this.connected = false;
+    const connection = this.connection;
+    this.connection = null;
+    connection?.abort();
+    this.flushWaiters(false);
+    for (const subscriber of this.subscribers) subscriber.fail(error);
+    this.subscribers.clear();
   }
 
   get isConnected(): boolean {
@@ -77,10 +105,11 @@ export class EventPump {
     const queue: RuntimeSessionEvent[] = [];
     let notify: (() => void) | null = null;
     let done = false;
+    let failure: Error | null = null;
     const subscriber: Subscriber = {
       sessionID,
       push: (event) => {
-        if (done) return;
+        if (done || failure !== null) return;
         if (queue.length >= SUBSCRIBER_BUFFER_LIMIT) {
           queue.length = 0;
           queue.push({
@@ -97,8 +126,20 @@ export class EventPump {
         done = true;
         notify?.();
       },
+      fail: (error: unknown) => {
+        if (done || failure !== null) return;
+        failure =
+          error instanceof Error
+            ? error
+            : new Error("OpenCode event stream failed");
+        notify?.();
+      },
     };
     this.subscribers.add(subscriber);
+    if (this.streamError !== null) {
+      this.subscribers.delete(subscriber);
+      subscriber.fail(this.streamError);
+    }
     const onAbort = () => {
       this.subscribers.delete(subscriber);
       signal.removeEventListener("abort", onAbort);
@@ -110,16 +151,16 @@ export class EventPump {
     return {
       [Symbol.asyncIterator]: () => ({
         next: async () => {
-          while (!done || queue.length > 0) {
+          for (;;) {
+            if (failure !== null) throw failure;
             const item = queue.shift();
-            if (item) return { value: item, done: false };
+            if (item !== undefined) return { value: item, done: false };
             if (done) return { value: undefined, done: true };
             await new Promise<void>((resolve) => {
               notify = resolve;
             });
             notify = null;
           }
-          return { value: undefined, done: true };
         },
         return: async () => {
           onAbort();
@@ -139,6 +180,7 @@ export class EventPump {
     this.flushWaiters(false);
     for (const subscriber of this.subscribers) subscriber.close();
     this.subscribers.clear();
+    this.settleStopped();
     await this.running?.catch(() => undefined);
   }
 
@@ -165,8 +207,15 @@ export class EventPump {
           }
           this.dispatch(event);
         }
-      } catch {
+      } catch (error) {
         if (this.closed || controller.signal.aborted) break;
+        if (!this.sawConnected) {
+          if (this.streamError === null) this.streamError = error;
+          this.connected = false;
+          this.flushWaiters(false);
+          if (this.everConnected) this.settleStopped(this.streamError);
+          break;
+        }
       }
       this.connected = false;
       if (this.closed || controller.signal.aborted) break;
@@ -176,23 +225,39 @@ export class EventPump {
     }
   }
 
+  private settleStopped(error?: unknown): void {
+    if (this.stoppedSettled) return;
+    this.stoppedSettled = true;
+    if (error !== undefined) this.rejectStopped(error);
+    else this.resolveStopped();
+  }
+
   private markConnected(reconnecting: boolean): void {
     this.connected = true;
     this.sawConnected = true;
+    this.everConnected = true;
     this.flushWaiters(true);
     if (reconnecting) this.emitResync("reconnect");
   }
 
   private async waitUntilConnected(timeoutMs: number): Promise<void> {
     if (this.connected) return;
+    if (this.streamError !== null) throw this.streamError;
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error("OpenCode event stream did not become ready"));
       }, timeoutMs);
       this.connectWaiters.push((ok) => {
         clearTimeout(timer);
-        if (ok) resolve();
-        else reject(new Error("OpenCode event stream closed"));
+        if (ok) {
+          resolve();
+          return;
+        }
+        if (this.streamError !== null) {
+          reject(this.streamError);
+          return;
+        }
+        reject(new Error("OpenCode event stream closed"));
       });
     });
   }

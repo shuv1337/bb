@@ -7,6 +7,7 @@ import { EventPump } from "./events.js";
 import {
   OpenCodeInstructionReplaceError,
   OpenCodeRuntimeNotReadyError,
+  OpenCodeUnauthenticatedError,
 } from "./errors.js";
 import { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
 import { BB_INSTRUCTION_ENTRY_KEY } from "./types.js";
@@ -60,11 +61,17 @@ function readyHealth(): OpenCodeDiscoveryHealth {
   };
 }
 
+export interface FakeOpenCodeRuntime extends OpenCodeRuntime {
+  emit(event: Record<string, unknown>): void;
+  failStream(error: unknown): void;
+}
+
 export function createFakeOpenCodeRuntime(
   options: CreateFakeOpenCodeRuntimeOptions = {},
-): OpenCodeRuntime {
-  const health = options.health ?? readyHealth();
+): FakeOpenCodeRuntime {
+  let healthSnapshot = options.health ?? readyHealth();
   let closed = false;
+  let streamFailure: Error | null = null;
   const sessions = new Map<string, FakeSession>();
   let seq = 0;
   const nextId = (prefix: string) => {
@@ -72,9 +79,14 @@ export function createFakeOpenCodeRuntime(
     return `${prefix}${seq.toString(16).padStart(4, "0")}`;
   };
   const pushQueue: unknown[][] = [];
+  const queuedBeforeConnect: unknown[] = [];
   const pump = new EventPump(async function* (signal) {
     yield { type: "server.connected", data: {} };
     const local: unknown[] = [];
+    while (queuedBeforeConnect.length > 0) {
+      const pending = queuedBeforeConnect.shift();
+      if (pending !== undefined) local.push(pending);
+    }
     pushQueue.push(local);
     try {
       while (!signal.aborted) {
@@ -92,7 +104,43 @@ export function createFakeOpenCodeRuntime(
   });
 
   const emit = (event: Record<string, unknown>) => {
+    if (pushQueue.length === 0) {
+      queuedBeforeConnect.push(event);
+      return;
+    }
     for (const queue of pushQueue) queue.push(event);
+  };
+
+  const reportStreamFailure = (error: unknown): Error => {
+    const classified =
+      streamFailure ??
+      (error instanceof OpenCodeUnauthenticatedError
+        ? error
+        : error instanceof Error
+          ? error
+          : new Error("OpenCode event stream failed"));
+    if (streamFailure === null) {
+      streamFailure = classified;
+      healthSnapshot = {
+        ...healthSnapshot,
+        status:
+          classified instanceof OpenCodeUnauthenticatedError
+            ? "unauthenticated"
+            : "unknown",
+        statusMessage: classified.message,
+      };
+    }
+    pump.fail(classified);
+    return classified;
+  };
+
+  const connect = async (): Promise<void> => {
+    try {
+      await pump.ensureRunning();
+    } catch (error) {
+      if (closed) throw error;
+      throw reportStreamFailure(error);
+    }
   };
 
   const handleOf = (session: FakeSession): SessionHandle => {
@@ -205,6 +253,9 @@ export function createFakeOpenCodeRuntime(
       replyForm: async () => {
         assertOpen();
       },
+      cancelForm: async () => {
+        assertOpen();
+      },
       setEnvironment: async (variables) => {
         assertOpen();
         session.environment = { ...variables };
@@ -230,11 +281,11 @@ export function createFakeOpenCodeRuntime(
     };
   };
 
-  const runtime: OpenCodeRuntime = {
+  const runtime: FakeOpenCodeRuntime = {
     info: async () => {
-      if (health.status !== "ready") {
+      if (healthSnapshot.status !== "ready") {
         throw new OpenCodeRuntimeNotReadyError(
-          health.statusMessage ?? "not ready",
+          healthSnapshot.statusMessage ?? "not ready",
         );
       }
       return {
@@ -243,7 +294,7 @@ export function createFakeOpenCodeRuntime(
         appId: options.appId ?? "opencode",
       };
     },
-    health: async () => health,
+    health: async () => healthSnapshot,
     models: async () => options.models ?? [],
     agents: async (): Promise<OpenCodeAgentCatalog> => {
       const agents = options.agents ?? [
@@ -273,15 +324,15 @@ export function createFakeOpenCodeRuntime(
     skills: async () => options.skills ?? [],
     commands: async () => options.commands ?? [],
     createSession: async (input: CreateSessionInput) => {
-      if (health.status !== "ready") {
+      if (healthSnapshot.status !== "ready") {
         throw new OpenCodeRuntimeNotReadyError(
-          health.statusMessage ?? "not ready",
+          healthSnapshot.statusMessage ?? "not ready",
         );
       }
       if (input.instructions?.mode === "replace") {
         throw new OpenCodeInstructionReplaceError();
       }
-      await pump.ensureRunning();
+      await connect();
       const id = nextId("ses");
       const session: FakeSession = {
         info: {
@@ -315,12 +366,17 @@ export function createFakeOpenCodeRuntime(
       if (!session) {
         throw new Error(`Session not found: ${sessionID}`);
       }
-      await pump.ensureRunning();
+      await connect();
       return handleOf(session);
     },
     subscribe: (sessionID, signal) => {
-      void pump.ensureRunning();
-      return pump.subscribe(sessionID, signal);
+      const events = pump.subscribe(sessionID, signal);
+      void connect().catch(() => undefined);
+      return events;
+    },
+    emit,
+    failStream: (error: unknown) => {
+      reportStreamFailure(error);
     },
     close: async () => {
       closed = true;

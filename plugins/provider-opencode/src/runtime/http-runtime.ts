@@ -46,19 +46,91 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function wrapClientError(error: unknown): never {
-  const message =
-    error instanceof Error
-      ? sanitizeErrorMessage(error.message)
-      : "OpenCode request failed";
-  const tag =
-    isRecord(error) && typeof error._tag === "string" ? error._tag : "";
-  if (tag === "UnauthorizedError" || /401|unauthor/i.test(message)) {
-    throw new OpenCodeUnauthenticatedError(message);
+const GENERIC_CLIENT_REASONS = new Set([
+  "Transport",
+  "UnexpectedStatus",
+  "UnsupportedContentType",
+  "MalformedResponse",
+  "SseEventTooLarge",
+]);
+
+function causeChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (isRecord(current) && !seen.has(current)) {
+    seen.add(current);
+    chain.push(current);
+    current = current.cause;
   }
-  throw error instanceof Error
-    ? new Error(message, { cause: error })
-    : new Error(message);
+  return chain;
+}
+
+function isUnauthenticated(error: unknown): boolean {
+  return causeChain(error).some((value) => {
+    if (!isRecord(value)) return false;
+    if (typeof value.status === "number" && value.status === 401) return true;
+    return value._tag === "UnauthorizedError";
+  });
+}
+
+function clientMessage(error: unknown): string {
+  let fallback = "OpenCode request failed";
+  for (const value of causeChain(error)) {
+    if (!isRecord(value)) continue;
+    if (typeof value.message !== "string" || value.message.length === 0) continue;
+    const message = sanitizeErrorMessage(value.message);
+    if (!GENERIC_CLIENT_REASONS.has(message)) return message;
+    fallback = message;
+  }
+  return fallback;
+}
+
+function classifyClientError(error: unknown): Error {
+  if (isUnauthenticated(error)) {
+    return new OpenCodeUnauthenticatedError(clientMessage(error), {
+      cause: error,
+    });
+  }
+  return new Error(clientMessage(error), { cause: error });
+}
+
+function wrapClientError(error: unknown): never {
+  throw classifyClientError(error);
+}
+
+async function throwUnauthorized(response: Response): Promise<never> {
+  let payload: unknown;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("json")) {
+    try {
+      payload = await response.json();
+    } catch {
+      payload = undefined;
+    }
+  } else {
+    await response.body?.cancel()?.catch(() => undefined);
+  }
+  const cause: Record<string, unknown> = { status: response.status };
+  if (isRecord(payload)) {
+    if (typeof payload._tag === "string") cause._tag = payload._tag;
+    if (typeof payload.message === "string") cause.message = payload.message;
+  }
+  const message =
+    typeof cause.message === "string" && cause.message.length > 0
+      ? cause.message
+      : "OpenCode rejected authentication";
+  throw new Error(sanitizeErrorMessage(message), { cause });
+}
+
+function fetchRejectingUnauthorized(
+  fetchImpl: typeof globalThis.fetch,
+): typeof globalThis.fetch {
+  return async (input, init) => {
+    const response = await fetchImpl(input, init);
+    if (response.status !== 401) return response;
+    return throwUnauthorized(response);
+  };
 }
 
 function usableUrl(url: string): boolean {
@@ -87,7 +159,7 @@ function clientFor(
               password: registration.password,
             },
     }),
-    fetch: fetchImpl,
+    fetch: fetchRejectingUnauthorized(fetchImpl),
   });
 }
 
@@ -96,6 +168,8 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
   private registration: LiveRegistration | null = null;
   private pump: EventPump | null = null;
   private closed = false;
+  private streamFailure: Error | null = null;
+  private watchedPump: EventPump | null = null;
   private healthSnapshot: OpenCodeDiscoveryHealth;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly refreshAttachment: () => Promise<{
@@ -144,7 +218,18 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
       usableUrl(attached.registration.url)
     ) {
       this.replaceClient(attached.registration);
-      this.healthSnapshot = attached.health;
+      if (this.streamFailure === null) {
+        this.healthSnapshot = attached.health;
+      } else {
+        this.healthSnapshot = {
+          ...attached.health,
+          status:
+            this.streamFailure instanceof OpenCodeUnauthenticatedError
+              ? "unauthenticated"
+              : "unknown",
+          statusMessage: this.streamFailure.message,
+        };
+      }
     } else {
       await this.detachClient();
       this.healthSnapshot =
@@ -272,7 +357,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
 
   async createSession(input: CreateSessionInput): Promise<SessionHandle> {
     this.assertReady();
-    await this.requirePump().ensureRunning();
+    await this.requireConnectedPump();
     if (input.instructions?.mode === "replace") {
       throw new OpenCodeInstructionReplaceError();
     }
@@ -308,7 +393,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
 
   async openSession(sessionID: string): Promise<SessionHandle> {
     this.assertReady();
-    await this.requirePump().ensureRunning();
+    await this.requireConnectedPump();
     const client = this.requireClient();
     try {
       const raw = await client.session.get({ sessionID });
@@ -327,8 +412,9 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     if (pump === null) {
       throw new OpenCodeRuntimeNotReadyError("OpenCode event stream is not attached");
     }
-    void pump.ensureRunning();
-    return pump.subscribe(sessionID, signal);
+    const events = pump.subscribe(sessionID, signal);
+    this.watchPump(pump);
+    return events;
   }
 
   async close(): Promise<void> {
@@ -428,7 +514,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
             sessionID: id,
             before,
           });
-          await runtime.requirePump().ensureRunning();
+          await runtime.requireConnectedPump();
           return runtime.handle(sessionInfoFrom(forked, location));
         } catch (error) {
           if (
@@ -460,6 +546,13 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
             sessionID: id,
             formID,
             answer,
+          });
+        }),
+      cancelForm: (formID) =>
+        run(async (client) => {
+          await client.session.form.cancel({
+            sessionID: id,
+            formID,
           });
         }),
       setEnvironment: (variables) =>
@@ -504,16 +597,20 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
       return;
     }
     const previous = this.pump;
+    this.streamFailure = null;
     this.registration = registration;
     this.client = clientFor(registration, this.fetchImpl);
     this.pump = new EventPump((signal) =>
       this.requireClient().event.subscribe({ signal }),
     );
+    this.armPumpWatch(this.pump);
     void previous?.close();
   }
 
   private async detachClient(): Promise<void> {
     const previous = this.pump;
+    this.streamFailure = null;
+    this.watchedPump = null;
     this.pump = null;
     this.client = null;
     this.registration = null;
@@ -532,6 +629,48 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
       throw new OpenCodeRuntimeNotReadyError("OpenCode event stream is not attached");
     }
     return this.pump;
+  }
+
+  private armPumpWatch(pump: EventPump): void {
+    if (this.watchedPump === pump) return;
+    this.watchedPump = pump;
+    void pump.whenStopped().catch((error: unknown) => {
+      if (this.closed || this.pump !== pump) return;
+      this.reportStreamFailure(pump, error);
+    });
+  }
+
+  private watchPump(pump: EventPump): void {
+    this.armPumpWatch(pump);
+    void pump.ensureRunning().catch((error: unknown) => {
+      if (this.closed || this.pump !== pump) return;
+      this.reportStreamFailure(pump, error);
+    });
+  }
+
+  private async requireConnectedPump(): Promise<void> {
+    const pump = this.requirePump();
+    try {
+      await pump.ensureRunning();
+    } catch (error) {
+      if (this.closed || this.pump !== pump) throw error;
+      throw this.reportStreamFailure(pump, error);
+    }
+  }
+
+  private reportStreamFailure(pump: EventPump, error: unknown): Error {
+    const classified = this.streamFailure ?? classifyClientError(error);
+    this.streamFailure = classified;
+    this.healthSnapshot = {
+      ...this.healthSnapshot,
+      status:
+        classified instanceof OpenCodeUnauthenticatedError
+          ? "unauthenticated"
+          : "unknown",
+      statusMessage: classified.message,
+    };
+    pump.fail(classified);
+    return classified;
   }
 
   private assertOpen(): void {

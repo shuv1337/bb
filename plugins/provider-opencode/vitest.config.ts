@@ -6,6 +6,7 @@ import {
 export default defineWorkspaceTestConfig({
   test: {
     silent: "passed-only",
+    setupFiles: ["./vitest.setup.ts"],
     projects: sharedWorkerProjects({
       pkgDir: __dirname,
       name: "bb-plugin-provider-opencode",

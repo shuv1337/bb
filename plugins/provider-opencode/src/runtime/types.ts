@@ -219,6 +219,7 @@ export interface SessionHandle {
     formID: string,
     answer: Record<string, string | number | boolean | string[]>,
   ): Promise<void>;
+  cancelForm(formID: string): Promise<void>;
   setEnvironment(variables: Record<string, string>): Promise<void>;
   setInstructions(input: {
     mode: OpenCodeInstructionMode;

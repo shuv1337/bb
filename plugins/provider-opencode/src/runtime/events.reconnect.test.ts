@@ -39,6 +39,49 @@ describe("EventPump reconnect", () => {
     );
   });
 
+  it("fails a reconnect that errors before the next server.connected", async () => {
+    let generation = 0;
+    const pump = new EventPump(async function* () {
+      generation += 1;
+      if (generation > 1) throw new Error("reconnect unauthorized");
+      yield { type: "server.connected", data: {} };
+    });
+    const ac = new AbortController();
+    const iterator = pump.subscribe("ses_a", ac.signal)[Symbol.asyncIterator]();
+    let stoppedError: unknown;
+    const stopped = pump.whenStopped().then(
+      () => "clean" as const,
+      (error: unknown) => {
+        stoppedError = error;
+        return "failed" as const;
+      },
+    );
+    const consumed = iterator.next().then(
+      () => "value" as const,
+      (error: unknown) => error,
+    );
+    try {
+      await pump.ensureRunning();
+      const outcome = await Promise.race([
+        stopped,
+        new Promise<"timeout">((resolve) => {
+          setTimeout(() => resolve("timeout"), 1_500);
+        }),
+      ]);
+      expect(outcome).toBe("failed");
+      expect(stoppedError).toBeInstanceOf(Error);
+      if (!(stoppedError instanceof Error)) {
+        throw new Error("expected reconnect failure");
+      }
+      expect(stoppedError.message).toBe("reconnect unauthorized");
+      pump.fail(stoppedError);
+      await expect(consumed).resolves.toBe(stoppedError);
+    } finally {
+      ac.abort();
+      await pump.close();
+    }
+  });
+
   it("aborts pending backoff on close", async () => {
     const pump = new EventPump(async function* () {
       yield { type: "server.connected", data: {} };

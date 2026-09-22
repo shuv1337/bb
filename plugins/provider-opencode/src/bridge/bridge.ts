@@ -63,6 +63,20 @@ import {
   getOpenCodeProviderInstallationStatus,
 } from "./provider-maintenance.js";
 
+const UNOPENED_DISPATCH_GRACE_MS = 250;
+
+const PROVIDER_ACTIVITY = new Set([
+  "session.inbox.enqueued",
+  "session.inbox.delivered",
+  "session.execution.started",
+  "session.compaction.started",
+  "session.compaction.delta",
+  "session.compaction.ended",
+  "session.step.started",
+  "session.tool.input.started",
+  "session.tool.called",
+]);
+
 const commandSchema = z.discriminatedUnion("method", [
   z.object({ method: z.literal("initialize"), params: initializeParamsSchema }),
   z.object({ method: z.literal("model/list"), params: modelListParamsSchema }),
@@ -147,6 +161,7 @@ interface PendingInteraction {
   requestID: string;
   persistApprovals: boolean;
   handle: SessionHandle;
+  threadId: string;
 }
 
 interface ThreadSession {
@@ -162,6 +177,12 @@ interface ThreadSession {
   work: Promise<void>;
   childHandles: Map<string, SessionHandle>;
   catalog: OpenCodeModel[];
+  turnOpen: boolean;
+  liveProviderTurnId: string | undefined;
+  pendingAccepts: Array<{
+    clientRequestId: string;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>;
 }
 
 function decodeRequest(raw: unknown): DecodedRequest {
@@ -206,17 +227,185 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
   let ownersPath: string | null = null;
   let interactionSerial = 0;
+  let zeroWorkSerial = 0;
   let closed = false;
 
+  function clearPendingAccept(session: ThreadSession): void {
+    for (const pending of session.pendingAccepts) {
+      if (pending.timer !== null) clearTimeout(pending.timer);
+    }
+    session.pendingAccepts = [];
+  }
+
+  function noteProviderActivity(session: ThreadSession): void {
+    for (const pending of session.pendingAccepts) {
+      if (pending.timer === null) continue;
+      clearTimeout(pending.timer);
+      pending.timer = null;
+    }
+  }
+
+  function liveTurnIdOf(session: ThreadSession): string | undefined {
+    return (
+      session.liveProviderTurnId ??
+      translator.executionTurnId(session.handle.id)
+    );
+  }
+
+  function failureMessage(error: unknown): string {
+    return error instanceof Error && error.message.length > 0
+      ? error.message
+      : "OpenCode event stream failed";
+  }
+
+  function flushPendingAccepts(
+    session: ThreadSession,
+    outbound: ThreadDelta[],
+    providerTurnId: string | undefined,
+  ): void {
+    if (session.pendingAccepts.length === 0) return;
+    const pending = session.pendingAccepts.splice(0, session.pendingAccepts.length);
+    for (const item of pending) {
+      if (item.timer !== null) clearTimeout(item.timer);
+      outbound.push({
+        kind: "input.accepted",
+        clientRequestId: item.clientRequestId,
+        ...(providerTurnId !== undefined ? { providerTurnId } : {}),
+      });
+    }
+  }
+
   function sendDeltas(threadId: string, deltas: readonly ThreadDelta[]): void {
-    if (deltas.length === 0) {
+    const session = sessions.get(threadId);
+    const outbound: ThreadDelta[] = [];
+    if (session === undefined) {
+      outbound.push(...deltas);
+    } else {
+      for (const delta of deltas) {
+        outbound.push(delta);
+        if (delta.kind === "turn.open" && delta.parentRef === undefined) {
+          session.turnOpen = true;
+          session.liveProviderTurnId = delta.providerTurnId;
+          flushPendingAccepts(session, outbound, delta.providerTurnId);
+        } else if (
+          delta.kind === "turn.boundary" &&
+          (delta.providerTurnId === undefined ||
+            delta.providerTurnId === session.liveProviderTurnId)
+        ) {
+          session.turnOpen = false;
+          session.liveProviderTurnId = undefined;
+        }
+      }
+    }
+    if (outbound.length === 0) {
       return;
     }
     send({
       jsonrpc: "2.0",
       method: THREAD_DELTA_NOTIFICATION_METHOD,
-      params: { threadId, deltas },
+      params: { threadId, deltas: outbound },
     });
+  }
+
+  function acceptDispatch(
+    session: ThreadSession,
+    clientRequestId: string,
+    zeroWork: boolean,
+    providerTurnId?: string,
+  ): void {
+    if (session.closed) return;
+    if (session.turnOpen) {
+      const turnId = providerTurnId ?? liveTurnIdOf(session);
+      sendDeltas(session.threadId, [
+        {
+          kind: "input.accepted",
+          clientRequestId,
+          ...(turnId !== undefined ? { providerTurnId: turnId } : {}),
+        },
+      ]);
+      return;
+    }
+    const pending = {
+      clientRequestId,
+      timer: null as ReturnType<typeof setTimeout> | null,
+    };
+    session.pendingAccepts.push(pending);
+    if (!zeroWork) return;
+    const timer = setTimeout(() => {
+      const index = session.pendingAccepts.indexOf(pending);
+      if (index < 0) return;
+      session.pendingAccepts.splice(index, 1);
+      if (session.closed) return;
+      if (session.turnOpen) {
+        const turnId = liveTurnIdOf(session);
+        sendDeltas(session.threadId, [
+          {
+            kind: "input.accepted",
+            clientRequestId,
+            ...(turnId !== undefined ? { providerTurnId: turnId } : {}),
+          },
+        ]);
+        return;
+      }
+      zeroWorkSerial += 1;
+      const settledId = `zero-work-${zeroWorkSerial}`;
+      sendDeltas(session.threadId, [
+        { kind: "turn.open", providerTurnId: settledId },
+        { kind: "input.accepted", clientRequestId, providerTurnId: settledId },
+        { kind: "turn.boundary", providerTurnId: settledId, status: "completed" },
+      ]);
+    }, UNOPENED_DISPATCH_GRACE_MS);
+    timer.unref?.();
+    pending.timer = timer;
+  }
+
+  function surfaceStreamFailure(session: ThreadSession, error: unknown): void {
+    const message = failureMessage(error);
+    const liveTurnId = liveTurnIdOf(session);
+    const deltas: ThreadDelta[] = [];
+    if (!session.turnOpen && session.pendingAccepts.length > 0) {
+      zeroWorkSerial += 1;
+      const providerTurnId = `zero-work-${zeroWorkSerial}`;
+      const pending = session.pendingAccepts.splice(0, session.pendingAccepts.length);
+      for (const item of pending) {
+        if (item.timer !== null) clearTimeout(item.timer);
+      }
+      deltas.push({ kind: "turn.open", providerTurnId });
+      for (const item of pending) {
+        deltas.push({
+          kind: "input.accepted",
+          clientRequestId: item.clientRequestId,
+          providerTurnId,
+        });
+      }
+      deltas.push({ kind: "provider.error", message, providerTurnId });
+      deltas.push({
+        kind: "turn.boundary",
+        providerTurnId,
+        status: "failed",
+        error: { message },
+      });
+    } else if (session.turnOpen) {
+      clearPendingAccept(session);
+      deltas.push({
+        kind: "provider.error",
+        message,
+        ...(liveTurnId !== undefined ? { providerTurnId: liveTurnId } : {}),
+      });
+      deltas.push({
+        kind: "turn.boundary",
+        status: "failed",
+        error: { message },
+        ...(liveTurnId !== undefined ? { providerTurnId: liveTurnId } : {}),
+      });
+    } else {
+      deltas.push({
+        kind: "provider.error",
+        message,
+        threadScoped: true,
+      });
+    }
+    sendDeltas(session.threadId, deltas);
   }
 
   function sendIdentity(threadId: string, providerThreadId: string): void {
@@ -307,6 +496,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       requestID: args.requestID,
       persistApprovals: args.session.persistApprovals,
       handle: handleForEvent(args.session, args.sessionID),
+      threadId: args.session.threadId,
     });
     send({
       jsonrpc: "2.0",
@@ -335,6 +525,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     const native: OpenCodeNativeEvent = wrapped.event;
+    if (
+      wrapped.sessionID === session.handle.id &&
+      PROVIDER_ACTIVITY.has(native.type)
+    ) {
+      noteProviderActivity(session);
+    }
     if (
       wrapped.parentID === session.handle.id &&
       wrapped.sessionID !== session.handle.id &&
@@ -395,15 +591,33 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
             session.handle.id,
             session.abort.signal,
           )) {
-            await enqueue(session, () => applyRuntimeEvent(session, event));
+            if (session.closed) return;
+            try {
+              await enqueue(session, () => applyRuntimeEvent(session, event));
+            } catch (error) {
+              if (session.closed || session.abort.signal.aborted) return;
+              const message = failureMessage(error);
+              const liveTurnId = liveTurnIdOf(session);
+              sendDeltas(session.threadId, [
+                {
+                  kind: "provider.error",
+                  message,
+                  ...(session.turnOpen && liveTurnId !== undefined
+                    ? { providerTurnId: liveTurnId }
+                    : session.turnOpen
+                      ? {}
+                      : { threadScoped: true }),
+                },
+              ]);
+            }
             if (session.closed) {
               return;
             }
           }
-        } catch {
-          if (session.closed) {
-            return;
-          }
+        } catch (error) {
+          if (session.closed || session.abort.signal.aborted) return;
+          surfaceStreamFailure(session, error);
+          return;
         }
         if (session.closed) {
           return;
@@ -481,6 +695,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       work: Promise.resolve(),
       childHandles: new Map(),
       catalog: [],
+      turnOpen: false,
+      liveProviderTurnId: undefined,
+      pendingAccepts: [],
     };
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
@@ -493,6 +710,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     session.closed = true;
+    clearPendingAccept(session);
+    prunePendingInteractions(session.threadId);
     session.abort.abort();
     sessions.delete(session.threadId);
     sessionsByProviderId.delete(session.handle.id);
@@ -555,6 +774,26 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
     const listed = await (await runtime()).agents({ directory: cwd });
     assertSelectableAgentId(agent, listed.agents);
+  }
+
+  async function assertRequestedSkills(
+    cwd: string,
+    skills: readonly { id: string }[],
+  ): Promise<void> {
+    if (skills.length === 0) return;
+    const listed = await (await runtime()).skills({ directory: cwd });
+    const known = new Set(listed.map((skill) => skill.id));
+    for (const skill of skills) {
+      if (!known.has(skill.id)) {
+        throw new Error(`Unknown OpenCode skill "${skill.id}"`);
+      }
+    }
+  }
+
+  function prunePendingInteractions(threadId: string): void {
+    for (const [id, pending] of pendingInteractions) {
+      if (pending.threadId === threadId) pendingInteractions.delete(id);
+    }
   }
 
   async function handleRequest(
@@ -734,20 +973,31 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           clientRequestId: request.params.clientRequestId,
           delivery,
         });
-        sendDeltas(request.params.threadId, [
-          { kind: "input.accepted", clientRequestId: request.params.clientRequestId },
-        ]);
-        if (turn.kind === "compact") {
-          await session.handle.compact();
-          sendResult(request.id, { threadId: request.params.threadId });
+        if (turn.kind === "prompt") {
+          await assertRequestedSkills(session.cwd, turn.prompt.skills ?? []);
+        }
+        try {
+          if (turn.kind === "compact") {
+            await session.handle.compact();
+          } else if (turn.kind === "command") {
+            await session.handle.command({ name: turn.name, text: turn.text });
+          } else {
+            await session.handle.prompt(turn.prompt);
+          }
+        } catch (error) {
+          sendError(
+            request.id,
+            BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
+            error instanceof Error ? error.message : "OpenCode turn dispatch failed",
+          );
           break;
         }
-        if (turn.kind === "command") {
-          await session.handle.command({ name: turn.name, text: turn.text });
-          sendResult(request.id, { threadId: request.params.threadId });
-          break;
-        }
-        await session.handle.prompt(turn.prompt);
+        acceptDispatch(
+          session,
+          request.params.clientRequestId,
+          turn.kind === "compact",
+          request.method === "turn/steer" ? request.params.expectedTurnId : undefined,
+        );
         sendResult(request.id, { threadId: request.params.threadId });
         break;
       }
@@ -791,39 +1041,109 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
   }
 
+  function rejectInteraction(
+    id: string | number,
+    message: string,
+  ): void {
+    sendError(id, BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS, message);
+  }
+
+  function deliverInteraction(
+    pending: PendingInteraction,
+    id: string,
+    sendReply: () => Promise<void>,
+  ): void {
+    void sendReply()
+      .then(() => {
+        if (pendingInteractions.get(id) === pending) {
+          pendingInteractions.delete(id);
+        }
+      })
+      .catch((error: unknown) => {
+        sendDeltas(pending.threadId, [
+          {
+            kind: "provider.error",
+            message:
+              error instanceof Error
+                ? error.message
+                : "OpenCode interaction reply failed",
+          },
+        ]);
+      });
+  }
+
+  function handleInteractionResponse(response: {
+    id: string | number;
+    result?: unknown;
+    error?: { code: number; message?: string };
+  }): void {
+    const id = String(response.id);
+    const pending = pendingInteractions.get(id);
+    if (pending === undefined) return;
+    if ("error" in response && response.error !== undefined) {
+      deliverInteraction(pending, id, async () => {
+        if (pending.kind === "permission") {
+          await pending.handle.replyPermission(pending.requestID, "reject");
+          return;
+        }
+        await pending.handle.cancelForm(pending.requestID);
+      });
+      return;
+    }
+    const resolution = pendingInteractionResolutionSchema.safeParse(response.result);
+    if (!resolution.success) {
+      rejectInteraction(response.id, "Invalid OpenCode interaction resolution");
+      return;
+    }
+    if (pending.kind === "permission") {
+      if (!isApprovalPendingInteractionResolution(resolution.data)) {
+        rejectInteraction(
+          response.id,
+          "OpenCode permission interaction expected an approval decision",
+        );
+        return;
+      }
+      const reply = mapApprovalToOpenCodeReply({
+        decision: resolution.data.decision,
+        persistApprovals: pending.persistApprovals,
+      });
+      deliverInteraction(pending, id, () =>
+        pending.handle.replyPermission(pending.requestID, reply),
+      );
+      return;
+    }
+    if (
+      !isUserQuestionPendingInteractionResolution(resolution.data) &&
+      !isExtensionResolution(resolution.data)
+    ) {
+      rejectInteraction(
+        response.id,
+        "OpenCode form interaction expected a form answer",
+      );
+      return;
+    }
+    let answer: Record<string, string | number | boolean | string[]>;
+    try {
+      answer = formAnswerFromResolution(resolution.data);
+    } catch (error) {
+      rejectInteraction(
+        response.id,
+        error instanceof Error
+          ? error.message
+          : "OpenCode form answer does not match the requested fields",
+      );
+      return;
+    }
+    deliverInteraction(pending, id, () =>
+      pending.handle.replyForm(pending.requestID, answer),
+    );
+  }
+
   function handleParsedMessage(parsed: unknown): void {
     const response = decodeBridgeJsonRpcResponse(parsed);
     if (response !== null) {
-      const pending = pendingInteractions.get(String(response.id));
-      if (pending !== undefined) {
-        pendingInteractions.delete(String(response.id));
-        if ("result" in response) {
-          const resolution = pendingInteractionResolutionSchema.safeParse(response.result);
-          if (resolution.success) {
-            void (async () => {
-              if (
-                pending.kind === "permission" &&
-                isApprovalPendingInteractionResolution(resolution.data)
-              ) {
-                await pending.handle.replyPermission(
-                  pending.requestID,
-                  mapApprovalToOpenCodeReply({
-                    decision: resolution.data.decision,
-                    persistApprovals: pending.persistApprovals,
-                  }),
-                );
-                return;
-              }
-              if (pending.kind === "form") {
-                await pending.handle.replyForm(
-                  pending.requestID,
-                  formAnswerFromResolution(resolution.data),
-                );
-              }
-            })();
-          }
-        }
-        return;
+      if (pendingInteractions.has(String(response.id))) {
+        handleInteractionResponse(response);
       }
       return;
     }
@@ -856,6 +1176,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     closed = true;
     const live = [...sessions.values()];
     await Promise.all(live.map((session) => detachSession(session)));
+    pendingInteractions.clear();
     if (runtimePromise !== null) {
       const oc = await runtimePromise.catch(() => null);
       await oc?.close();

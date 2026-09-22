@@ -9,6 +9,7 @@ const scan = scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), {
     /^@opencode\/client(?:\/promise|\/service)$/u,
     /^@get-bb\/plugin-sdk\/provider-bridge\/testing$/u,
     /^(?:\.\.\/)+vitest\.shared\.js$/u,
+    /^vitest$/u,
   ],
 });
 

@@ -1,8 +1,8 @@
 export class OpenCodeRuntimeError extends Error {
   readonly code: string;
 
-  constructor(code: string, message: string) {
-    super(message);
+  constructor(code: string, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "OpenCodeRuntimeError";
     this.code = code;
   }
@@ -43,8 +43,11 @@ export class OpenCodeInstructionReplaceError extends OpenCodeRuntimeError {
 }
 
 export class OpenCodeUnauthenticatedError extends OpenCodeRuntimeError {
-  constructor(message = "OpenCode rejected authentication") {
-    super("unauthenticated", message);
+  constructor(
+    message = "OpenCode rejected authentication",
+    options?: ErrorOptions,
+  ) {
+    super("unauthenticated", message, options);
     this.name = "OpenCodeUnauthenticatedError";
   }
 }
