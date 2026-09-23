@@ -354,6 +354,11 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "opencode",
+        logoUrl: "/api/v1/system/providers/opencode/logo",
+        icon: undefined,
+      },
+      {
         id: "acp-cursor",
         logoUrl: "/api/v1/system/providers/acp-cursor/logo",
         icon: undefined,
@@ -399,6 +404,7 @@ describe("buildPluginProviderRegistration", () => {
       codex: "collapse",
       "claude-code": "flat",
       pi: "collapse",
+      opencode: "collapse",
       "acp-cursor": "collapse",
       "acp-opencode": "collapse",
       "acp-omp": "collapse",

@@ -28,6 +28,7 @@ function readyHealth(providerId: string): ProviderHealth {
 }
 
 const INSTALLED_ONLY_PROVIDER_IDS = new Set([
+  "opencode",
   "acp-opencode",
   "acp-omp",
   "acp-grok",
@@ -317,7 +318,9 @@ describe("getProviderStates", () => {
 
       expect(result.providers[0]?.providerId).toBe("codex");
       expect(primaryCalls).toBe(0);
-      expect(healthCwds.filter((cwd) => cwd === undefined)).toHaveLength(4);
+      expect(healthCwds.filter((cwd) => cwd === undefined)).toHaveLength(
+        INSTALLED_ONLY_PROVIDER_IDS.size,
+      );
       expect(healthCwds.filter((cwd) => cwd !== undefined)).toEqual(
         Array(4).fill(environment.path),
       );

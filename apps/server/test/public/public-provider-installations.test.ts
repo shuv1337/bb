@@ -186,7 +186,7 @@ describe("public provider installation routes", () => {
               ? request.command.providerId
               : null,
           ),
-      ).toEqual([]);
+      ).toEqual(["opencode"]);
       expect(
         responder.requests
           .filter(

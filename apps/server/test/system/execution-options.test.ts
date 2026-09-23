@@ -360,7 +360,7 @@ describe("resolveSystemExecutionOptions", () => {
         expect.arrayContaining([
           expect.objectContaining({
             id: "acp-opencode",
-            displayName: "opencode",
+            displayName: "OpenCode (ACP)",
             available: true,
           }),
         ]),
@@ -370,7 +370,7 @@ describe("resolveSystemExecutionOptions", () => {
         responder.requests.filter(
           (request) => request.command.type === "provider.health",
         ),
-      ).toHaveLength(4);
+      ).toHaveLength(5);
       const modelRequest = responder.requests.find(
         (request) => request.command.type === "provider.list_models",
       );
@@ -380,7 +380,7 @@ describe("resolveSystemExecutionOptions", () => {
         bridgeLaunch: {
           providerOptions: {
             acpLaunchSpec: {
-              displayName: "opencode",
+              displayName: "OpenCode (ACP)",
               command: "opencode",
               args: ["acp"],
               env: {},
@@ -750,7 +750,7 @@ describe("resolveSystemExecutionOptions", () => {
             responder.requests.filter(
               (request) => request.command.type === "provider.health",
             ),
-          ).toHaveLength(failStatusRequest ? 0 : 4);
+          ).toHaveLength(failStatusRequest ? 0 : 5);
           expect(
             responder.requests.filter(
               (request) => request.command.type === "provider.list_models",
@@ -1259,7 +1259,7 @@ describe("resolveSystemExecutionOptions", () => {
           responder.requests.filter(
             (request) => request.command.type === "provider.health",
           ),
-        ).toHaveLength(4);
+        ).toHaveLength(5);
         const modelRequest = responder.requests.find(
           (request) => request.command.type === "provider.list_models",
         );
@@ -1383,7 +1383,7 @@ describe("resolveSystemExecutionOptions", () => {
         responder.requests.filter(
           (request) => request.command.type === "provider.health",
         ),
-      ).toHaveLength(4);
+      ).toHaveLength(5);
       const modelRequest = responder.requests.find(
         (request) => request.command.type === "provider.list_models",
       );
