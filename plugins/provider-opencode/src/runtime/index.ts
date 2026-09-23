@@ -26,6 +26,7 @@ export type {
   RuntimeNativeEvent,
   RuntimeResyncEvent,
   RuntimeSessionEvent,
+  RuntimeStreamErrorEvent,
   SessionHandle,
 } from "./types.js";
 export {

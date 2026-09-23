@@ -41,4 +41,51 @@ describe("context sanitization", () => {
   it("drops password keys", () => {
     expect(sanitizeUnknown({ password: "x", ok: 1 })).toEqual({ ok: 1 });
   });
+
+  it("redacts keys ending in a credential word and keeps keys that only start with one", () => {
+    expect(
+      sanitizeUnknown({
+        secretName: "prod-db",
+        passwordHint: "the usual",
+        authorizationUrl: "https://example.test/authorize",
+        Authorization: "Basic abc",
+        secret: "s",
+        client_secret: "cs",
+        clientSecret: "cs",
+        db_password: "dbp",
+        apiPassword: "ap",
+        "proxy-authorization": "Basic def",
+        proxyAuthorization: "Basic def",
+        secret_key: "sk",
+        api_key: "ak",
+        APIKey: "ak",
+        accessToken: "at",
+        thought_signature: "ts",
+        tokens: { input: 1, output: 2 },
+        nested: [{ PASSWORD: "p", thoughtSignature: "t", keep: true }],
+      }),
+    ).toEqual({
+      secretName: "prod-db",
+      passwordHint: "the usual",
+      authorizationUrl: "https://example.test/authorize",
+      tokens: { input: 1, output: 2 },
+      nested: [{ keep: true }],
+    });
+  });
+
+  it("keeps tool arguments whose names contain a redacted word", () => {
+    const message = messageFrom({
+      id: "msg_2",
+      type: "assistant",
+      content: [
+        {
+          type: "tool",
+          state: { input: { secretName: "api", password: "hunter2" } },
+        },
+      ],
+    });
+    expect(message?.content).toEqual([
+      { type: "tool", state: { input: { secretName: "api" } } },
+    ]);
+  });
 });

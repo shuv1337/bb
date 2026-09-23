@@ -9,6 +9,7 @@ import {
 import { messageFrom, sessionInfoFrom } from "./context.js";
 import {
   discoveryDepsFrom,
+  registrationStillLive,
   resolveAttachedRegistration,
   type LiveRegistration,
 } from "./discovery.js";
@@ -17,6 +18,7 @@ import {
   OpenCodeInstructionReplaceError,
   OpenCodeRuntimeNotReadyError,
   OpenCodeUnauthenticatedError,
+  OpenCodeUnknownCheckpointError,
   sanitizeErrorMessage,
 } from "./errors.js";
 import { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
@@ -190,7 +192,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     this.fetchImpl = input.fetchImpl;
     this.refreshAttachment = input.refreshAttachment;
     if (input.registration && usableUrl(input.registration.url)) {
-      this.replaceClient(input.registration);
+      this.attach(input.registration);
     }
   }
 
@@ -212,12 +214,14 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
   async health(): Promise<OpenCodeDiscoveryHealth> {
     this.assertOpen();
     const attached = await this.refreshAttachment();
+    this.assertOpen();
     if (
       attached.health.status === "ready" &&
       attached.registration &&
       usableUrl(attached.registration.url)
     ) {
-      this.replaceClient(attached.registration);
+      await this.replaceClient(attached.registration);
+      this.assertOpen();
       if (this.streamFailure === null) {
         this.healthSnapshot = attached.health;
       } else {
@@ -227,18 +231,32 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
           statusMessage: this.streamFailure.message,
         };
       }
-    } else {
-      await this.detachClient();
-      this.healthSnapshot =
-        attached.health.status === "ready"
-          ? {
-              ...attached.health,
-              status: "unknown",
-              statusMessage: "OpenCode service is not attached",
-            }
-          : attached.health;
+      return this.withStreamState(this.healthSnapshot);
     }
-    return this.healthSnapshot;
+    if (
+      attached.health.status === "unauthenticated" ||
+      attached.health.status === "expired"
+    ) {
+      await this.detachClient(
+        new OpenCodeUnauthenticatedError(
+          attached.health.statusMessage ?? "OpenCode rejected authentication",
+        ),
+      );
+      this.healthSnapshot = attached.health;
+      return this.healthSnapshot;
+    }
+    const reported: OpenCodeDiscoveryHealth =
+      attached.health.status === "ready"
+        ? {
+            ...attached.health,
+            status: "unknown",
+            statusMessage: "OpenCode service is not attached",
+          }
+        : attached.health;
+    if (this.client === null || this.healthSnapshot.status !== "ready") {
+      this.healthSnapshot = reported;
+    }
+    return reported;
   }
 
   async models(location: OpenCodeLocation): Promise<OpenCodeModel[]> {
@@ -258,9 +276,8 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
             providerID: def.data.providerID,
             id: def.data.id,
             variant:
-              "variant" in def.data &&
-              typeof (def.data as { variant?: unknown }).variant === "string"
-                ? (def.data as { variant: string }).variant
+              "variant" in def.data && typeof def.data.variant === "string"
+                ? def.data.variant
                 : undefined,
           };
         }
@@ -379,11 +396,18 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     }
     const info = sessionInfoFrom(created, input.location);
     const handle = this.handle(info);
-    if (input.instructions && input.instructions.text.trim().length > 0) {
-      await handle.setInstructions(input.instructions);
-    }
-    if (input.environment && Object.keys(input.environment).length > 0) {
-      await handle.setEnvironment(input.environment);
+    try {
+      if (input.instructions && input.instructions.text.trim().length > 0) {
+        await handle.setInstructions(input.instructions);
+      }
+      if (input.environment && Object.keys(input.environment).length > 0) {
+        await handle.setEnvironment(input.environment);
+      }
+    } catch (error) {
+      await client.session
+        .remove({ sessionID: info.id })
+        .catch(() => undefined);
+      throw error;
     }
     return handle;
   }
@@ -416,7 +440,9 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
 
   async close(): Promise<void> {
     this.closed = true;
-    await this.detachClient();
+    await this.detachClient(
+      new OpenCodeRuntimeNotReadyError("OpenCode runtime is closed"),
+    );
   }
 
   private handle(info: { id: string; location: OpenCodeLocation }): SessionHandle {
@@ -514,12 +540,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
           await runtime.requireConnectedPump();
           return runtime.handle(sessionInfoFrom(forked, location));
         } catch (error) {
-          if (
-            error instanceof Error &&
-            error.name === "OpenCodeUnknownCheckpointError"
-          ) {
-            throw error;
-          }
+          if (error instanceof OpenCodeUnknownCheckpointError) throw error;
           wrapClientError(error);
         }
       },
@@ -583,7 +604,22 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     };
   }
 
-  private replaceClient(registration: LiveRegistration): void {
+  private attach(registration: LiveRegistration): EventPump | null {
+    const previous = this.pump;
+    this.streamFailure = null;
+    this.registration = registration;
+    const client = clientFor(registration, this.fetchImpl);
+    this.client = client;
+    const pump = new EventPump((signal) => client.event.subscribe({ signal }), {
+      isFatal: isUnauthenticated,
+      describeError: (error) => classifyClientError(error).message,
+    });
+    this.pump = pump;
+    this.armPumpWatch(pump);
+    return previous;
+  }
+
+  private async replaceClient(registration: LiveRegistration): Promise<void> {
     if (
       this.client !== null &&
       this.registration?.url === registration.url &&
@@ -593,26 +629,39 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
       this.registration = registration;
       return;
     }
-    const previous = this.pump;
-    this.streamFailure = null;
-    this.registration = registration;
-    this.client = clientFor(registration, this.fetchImpl);
-    this.pump = new EventPump(
-      (signal) => this.requireClient().event.subscribe({ signal }),
-      isUnauthenticated,
-    );
-    this.armPumpWatch(this.pump);
-    void previous?.close();
+    const previous = this.attach(registration);
+    if (previous === null) return;
+    const next = this.requirePump();
+    const adopted = next.adoptSubscribers(previous);
+    await previous.close();
+    if (adopted > 0 && !this.closed && this.pump === next) this.watchPump(next);
   }
 
-  private async detachClient(): Promise<void> {
+  private async detachClient(failure: Error): Promise<void> {
     const previous = this.pump;
     this.streamFailure = null;
     this.watchedPump = null;
     this.pump = null;
     this.client = null;
     this.registration = null;
+    previous?.fail(failure);
     await previous?.close();
+  }
+
+  private withStreamState(
+    health: OpenCodeDiscoveryHealth,
+  ): OpenCodeDiscoveryHealth {
+    const pump = this.pump;
+    if (health.status !== "ready" || pump === null || pump.isConnected) {
+      return health;
+    }
+    const error = pump.lastDisconnectError;
+    if (error === null) return health;
+    return {
+      ...health,
+      status: "unknown",
+      statusMessage: `OpenCode event stream disconnected: ${classifyClientError(error).message}`,
+    };
   }
 
   private requireClient(): Client {
@@ -705,12 +754,35 @@ export async function createHttpOpenCodeRuntime(
 ): Promise<OpenCodeRuntime> {
   const deps = discoveryDepsFrom(options);
   const attached = await resolveAttachedRegistration(deps);
+  type Cached = {
+    health: OpenCodeDiscoveryHealth;
+    registration: LiveRegistration;
+    explicit: boolean;
+  };
+  const cacheOf = (
+    next: Awaited<ReturnType<typeof resolveAttachedRegistration>>,
+  ): Cached | null =>
+    next.health.status === "ready" && next.registration !== null
+      ? {
+          health: next.health,
+          registration: next.registration,
+          explicit: next.explicit,
+        }
+      : null;
+  let cached = cacheOf(attached);
   return new HttpOpenCodeRuntime({
     health: attached.health,
     registration: attached.registration,
     fetchImpl: deps.fetch,
     refreshAttachment: async () => {
+      if (
+        cached !== null &&
+        (await registrationStillLive(deps, cached.registration, cached.explicit))
+      ) {
+        return { health: cached.health, registration: cached.registration };
+      }
       const next = await resolveAttachedRegistration(deps);
+      cached = cacheOf(next);
       return { health: next.health, registration: next.registration };
     },
   });

@@ -1,14 +1,18 @@
-import { homedir as osHomedir } from "node:os";
+import { homedir as osHomedir, networkInterfaces } from "node:os";
 import { basename, delimiter, join } from "node:path";
-import { accessSync, constants } from "node:fs";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { accessSync, constants, statSync } from "node:fs";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type {
   CreateOpenCodeRuntimeOptions,
   OpenCodeDiscoveryHealth,
 } from "./types.js";
-import { INFO_PROBE_TIMEOUT_MS, VERSION_PROBE_TIMEOUT_MS } from "./types.js";
+import {
+  INFO_PROBE_TIMEOUT_MS,
+  REGISTRATION_PROBE_TIMEOUT_MS,
+  VERSION_PROBE_TIMEOUT_MS,
+} from "./types.js";
 import { sanitizeErrorMessage } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
@@ -25,11 +29,14 @@ export type LiveRegistration = {
 
 export type RegistrationProbeFailure =
   | "parse"
+  | "url"
   | "pid"
+  | "remote"
   | "dead"
   | "unauthenticated"
   | "mismatch"
-  | "unreachable";
+  | "unreachable"
+  | "skipped";
 
 export type RegistrationCandidate = LiveRegistration & {
   failure: RegistrationProbeFailure | null;
@@ -48,14 +55,23 @@ type DiscoveryDeps = {
   kill: (pid: number, signal: 0) => boolean;
   readFile: (path: string) => Promise<string>;
   readdir: (path: string) => Promise<string[]>;
-  statMtimeMs: (path: string) => Promise<number>;
+  regularFileMtimeMs: (path: string) => Promise<number | null>;
   realpath: (path: string) => Promise<string>;
   isDirectory: (path: string) => Promise<boolean>;
   execVersion: (
     binary: string,
   ) => Promise<{ stdout: string; status: number }>;
   which: (command: string) => string | undefined;
+  localAddresses: () => string[];
 };
+
+function hostInterfaceAddresses(): string[] {
+  const addresses: string[] = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) addresses.push(entry.address);
+  }
+  return addresses;
+}
 
 export function discoveryDepsFrom(
   options: CreateOpenCodeRuntimeOptions = {},
@@ -77,14 +93,18 @@ export function discoveryDepsFrom(
       }),
     readFile: options.readFile ?? ((path) => readFile(path, "utf8")),
     readdir: options.readdir ?? (async (path) => readdir(path)),
-    statMtimeMs:
-      options.statMtimeMs ?? (async (path) => (await stat(path)).mtimeMs),
+    regularFileMtimeMs:
+      options.regularFileMtimeMs ??
+      (async (path) => {
+        const info = await lstat(path);
+        return info.isFile() ? info.mtimeMs : null;
+      }),
     realpath: options.realpath ?? realpath,
     isDirectory:
       options.isDirectory ??
       (async (path) => {
         try {
-          return (await stat(path)).isDirectory();
+          return (await lstat(path)).isDirectory();
         } catch {
           return false;
         }
@@ -95,7 +115,7 @@ export function discoveryDepsFrom(
         try {
           const result = await execFileAsync(binary, ["--version"], {
             timeout: VERSION_PROBE_TIMEOUT_MS,
-            env: process.env,
+            env,
           });
           return { stdout: result.stdout, status: 0 };
         } catch (error) {
@@ -112,12 +132,12 @@ export function discoveryDepsFrom(
     which:
       options.which ??
       ((command) => {
-        const pathEnv = env.PATH ?? process.env.PATH ?? "";
-        const parts = pathEnv.split(delimiter);
+        const parts = (env.PATH ?? "").split(delimiter);
         for (const dir of parts) {
           if (!dir) continue;
           const candidate = join(dir, command);
           try {
+            if (!statSync(candidate).isFile()) continue;
             accessSync(candidate, constants.X_OK);
             return candidate;
           } catch {
@@ -126,7 +146,12 @@ export function discoveryDepsFrom(
         }
         return undefined;
       }),
+    localAddresses: options.localAddresses ?? hostInterfaceAddresses,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 export function basicAuthHeader(password: string): string {
@@ -175,10 +200,55 @@ export function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
+function httpHostname(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  const host = parsed.hostname;
+  return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+
+export function isLoopbackUrl(url: string): boolean {
+  const host = httpHostname(url);
+  if (host === null) return false;
+  if (host === "localhost" || host === "::1" || host === "::") return true;
+  if (host === "0.0.0.0") return true;
+  if (/^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(host)) return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+export function isHostLocalUrl(
+  url: string,
+  localAddresses: readonly string[],
+): boolean {
+  if (isLoopbackUrl(url)) return true;
+  const host = httpHostname(url);
+  if (host === null) return false;
+  return localAddresses.some((address) => address.toLowerCase() === host);
+}
+
+function isHttpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
 export async function probeInfo(
   url: string,
   password: string | undefined,
   fetchImpl: typeof globalThis.fetch,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{
   ok: boolean;
   status: number;
@@ -190,33 +260,37 @@ export async function probeInfo(
   if (password !== undefined) {
     headers.authorization = basicAuthHeader(password);
   }
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? INFO_PROBE_TIMEOUT_MS);
+  const signal =
+    options.signal === undefined
+      ? timeout
+      : AbortSignal.any([timeout, options.signal]);
   try {
     const response = await fetchImpl(new URL("/api/info", url), {
       headers,
-      signal: AbortSignal.timeout(INFO_PROBE_TIMEOUT_MS),
+      signal,
     });
     if (response.status === 401) {
+      await discardBody(response);
       return { ok: false, status: 401, unauthenticated: true };
     }
     if (!response.ok) {
+      await discardBody(response);
       return { ok: false, status: response.status, unauthenticated: false };
     }
     const body: unknown = await response.json();
     if (
-      typeof body !== "object" ||
-      body === null ||
-      !("pid" in body) ||
-      !isPositiveInteger((body as { pid: unknown }).pid) ||
-      !("version" in body) ||
-      typeof (body as { version: unknown }).version !== "string"
+      !isRecord(body) ||
+      !isPositiveInteger(body.pid) ||
+      typeof body.version !== "string"
     ) {
       return { ok: false, status: response.status, unauthenticated: false };
     }
     return {
       ok: true,
       status: response.status,
-      pid: (body as { pid: number }).pid,
-      version: (body as { version: string }).version,
+      pid: body.pid,
+      version: body.version,
       unauthenticated: false,
     };
   } catch {
@@ -227,21 +301,19 @@ export async function probeInfo(
 export async function pathBinaryAppId(
   deps: DiscoveryDeps,
 ): Promise<PathBinaryProbe> {
-  const probes: ParsedVersion[] = [];
-  for (const command of ["opencode", "shuvcode"] as const) {
-    const binary = deps.which(command);
-    if (binary === undefined) continue;
-    const result = await deps.execVersion(binary);
-    if (result.status !== 0) continue;
-    const parsed = parseVersionOutput(result.stdout);
-    if (parsed.appId === null && command === "shuvcode") {
-      probes.push({ ...parsed, appId: "shuvcode" });
-    } else if (parsed.appId === null && command === "opencode") {
-      probes.push({ ...parsed, appId: parsed.isV1 ? "opencode" : "opencode" });
-    } else {
-      probes.push(parsed);
-    }
-  }
+  const results = await Promise.all(
+    (["opencode", "shuvcode"] as const).map(async (command) => {
+      const binary = deps.which(command);
+      if (binary === undefined) return null;
+      const result = await deps.execVersion(binary);
+      if (result.status !== 0) return null;
+      const parsed = parseVersionOutput(result.stdout);
+      return parsed.appId === null ? { ...parsed, appId: command } : parsed;
+    }),
+  );
+  const probes = results.filter(
+    (probe): probe is ParsedVersion => probe !== null,
+  );
   const v2 = probes.find((probe) => !probe.isV1);
   const v1Only = probes.length > 0 && v2 === undefined;
   return {
@@ -251,40 +323,49 @@ export async function pathBinaryAppId(
   };
 }
 
+const STATE_ROOT_NAMES = [
+  "opencode",
+  "shuvcode",
+  join("opencode-next", "opencode"),
+] as const;
+
+function isPlainAppName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
+function requestedAppOf(deps: DiscoveryDeps): string | null {
+  const requested = deps.env.BB_OPENCODE_APP?.trim();
+  return requested !== undefined && requested.length > 0 ? requested : null;
+}
+
 async function collectStateRoots(deps: DiscoveryDeps): Promise<string[]> {
   const xdg =
     deps.env.XDG_STATE_HOME && deps.env.XDG_STATE_HOME.length > 0
       ? deps.env.XDG_STATE_HOME
       : join(deps.homedir, ".local", "state");
-  const ordered = [
-    join(xdg, "opencode"),
-    join(xdg, "shuvcode"),
-    join(xdg, "opencode-next", "opencode"),
-  ];
-  let names: string[] = [];
+  const names: string[] = [...STATE_ROOT_NAMES];
+  const requested = requestedAppOf(deps);
+  if (requested !== null && isPlainAppName(requested)) names.push(requested);
+  let xdgReal = xdg;
   try {
-    names = await deps.readdir(xdg);
+    xdgReal = await deps.realpath(xdg);
   } catch {
-    names = [];
-  }
-  for (const name of names) {
-    ordered.push(join(xdg, name, "opencode"));
-  }
-  for (const name of names) {
-    ordered.push(join(xdg, name));
+    return [];
   }
   const seen = new Set<string>();
   const roots: string[] = [];
-  for (const candidate of ordered) {
+  for (const name of names) {
+    const candidate = join(xdg, name);
     if (!(await deps.isDirectory(candidate))) continue;
-    let key = candidate;
+    let resolved: string;
     try {
-      key = await deps.realpath(candidate);
+      resolved = await deps.realpath(candidate);
     } catch {
-      key = candidate;
+      continue;
     }
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (resolved !== join(xdgReal, name)) continue;
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
     roots.push(candidate);
   }
   return roots;
@@ -295,10 +376,11 @@ function isServiceJsonName(name: string): boolean {
   return /^service.*\.json$/.test(name);
 }
 
-export async function scanRegistrations(
+async function listRegistrations(
   deps: DiscoveryDeps,
 ): Promise<RegistrationCandidate[]> {
   const roots = await collectStateRoots(deps);
+  const localAddresses = deps.localAddresses();
   const candidates: RegistrationCandidate[] = [];
   for (const root of roots) {
     let names: string[] = [];
@@ -311,87 +393,128 @@ export async function scanRegistrations(
     for (const name of names) {
       if (!isServiceJsonName(name)) continue;
       const file = join(root, name);
-      let mtimeMs = 0;
+      let mtimeMs: number | null = null;
       try {
-        mtimeMs = await deps.statMtimeMs(file);
+        mtimeMs = await deps.regularFileMtimeMs(file);
       } catch {
-        mtimeMs = 0;
+        continue;
       }
+      if (mtimeMs === null) continue;
+      const failed = (
+        failure: RegistrationProbeFailure,
+        fields: { url?: string; pid?: number } = {},
+      ): RegistrationCandidate => ({
+        appId,
+        file,
+        url: fields.url ?? "",
+        pid: fields.pid ?? 0,
+        mtimeMs: mtimeMs ?? 0,
+        failure,
+      });
       let raw: unknown;
       try {
         raw = JSON.parse(await deps.readFile(file));
       } catch {
-        candidates.push({
-          appId,
-          file,
-          url: "",
-          pid: 0,
-          mtimeMs,
-          failure: "parse",
-        });
+        candidates.push(failed("parse"));
         continue;
       }
-      if (typeof raw !== "object" || raw === null) {
-        candidates.push({
-          appId,
-          file,
-          url: "",
-          pid: 0,
-          mtimeMs,
-          failure: "parse",
-        });
+      if (!isRecord(raw)) {
+        candidates.push(failed("parse"));
         continue;
       }
-      const record = raw as Record<string, unknown>;
-      if (typeof record.url !== "string" || !isPositiveInteger(record.pid)) {
-        candidates.push({
-          appId,
-          file,
-          url: typeof record.url === "string" ? record.url : "",
-          pid: typeof record.pid === "number" ? record.pid : 0,
-          mtimeMs,
-          failure: "pid",
-        });
+      const rawUrl = typeof raw.url === "string" ? raw.url : undefined;
+      const rawPid = typeof raw.pid === "number" ? raw.pid : undefined;
+      if (rawUrl === undefined || !isHttpUrl(rawUrl)) {
+        candidates.push(failed("url", { url: rawUrl, pid: rawPid }));
         continue;
       }
-      const password =
-        typeof record.password === "string" ? record.password : undefined;
-      const version =
-        typeof record.version === "string" ? record.version : undefined;
+      if (!isPositiveInteger(raw.pid)) {
+        candidates.push(failed("pid", { url: rawUrl, pid: rawPid }));
+        continue;
+      }
       const base = {
         appId,
         file,
-        url: record.url,
-        pid: record.pid,
-        password,
-        version,
+        url: rawUrl,
+        pid: raw.pid,
+        password: typeof raw.password === "string" ? raw.password : undefined,
+        version: typeof raw.version === "string" ? raw.version : undefined,
         mtimeMs,
       };
-      if (!deps.kill(record.pid, 0)) {
+      if (!isHostLocalUrl(rawUrl, localAddresses)) {
+        candidates.push({ ...base, failure: "remote" });
+        continue;
+      }
+      if (!deps.kill(raw.pid, 0)) {
         candidates.push({ ...base, failure: "dead" });
         continue;
       }
-      const info = await probeInfo(record.url, password, deps.fetch);
-      if (info.unauthenticated) {
-        candidates.push({ ...base, failure: "unauthenticated" });
-        continue;
-      }
-      if (!info.ok) {
-        candidates.push({ ...base, failure: "unreachable" });
-        continue;
-      }
-      if (info.pid !== record.pid) {
-        candidates.push({ ...base, failure: "mismatch" });
-        continue;
-      }
-      candidates.push({
-        ...base,
-        version: version ?? info.version,
-        failure: null,
-      });
+      candidates.push({ ...base, failure: null });
     }
   }
   return candidates;
+}
+
+async function probeCandidate(
+  deps: DiscoveryDeps,
+  candidate: RegistrationCandidate,
+  signal: AbortSignal,
+): Promise<RegistrationCandidate> {
+  const info = await probeInfo(candidate.url, candidate.password, deps.fetch, {
+    timeoutMs: REGISTRATION_PROBE_TIMEOUT_MS,
+    signal,
+  });
+  if (info.unauthenticated) return { ...candidate, failure: "unauthenticated" };
+  if (!info.ok) return { ...candidate, failure: "unreachable" };
+  if (info.pid !== candidate.pid) return { ...candidate, failure: "mismatch" };
+  return {
+    ...candidate,
+    version: candidate.version ?? info.version,
+    failure: null,
+  };
+}
+
+async function probeRegistrations(
+  deps: DiscoveryDeps,
+  listed: readonly RegistrationCandidate[],
+  rank?: (candidate: RegistrationCandidate) => number,
+): Promise<RegistrationCandidate[]> {
+  const controller = new AbortController();
+  const probes = new Map<RegistrationCandidate, Promise<RegistrationCandidate>>();
+  for (const candidate of listed) {
+    if (candidate.failure !== null) continue;
+    probes.set(candidate, probeCandidate(deps, candidate, controller.signal));
+  }
+  const settled = new Map<RegistrationCandidate, RegistrationCandidate>();
+  if (rank === undefined) {
+    for (const [candidate, probe] of probes) settled.set(candidate, await probe);
+  } else {
+    const ordered = [...probes.keys()].sort(
+      (left, right) =>
+        rank(left) - rank(right) || right.mtimeMs - left.mtimeMs,
+    );
+    for (const candidate of ordered) {
+      const probe = probes.get(candidate);
+      if (probe === undefined) continue;
+      const result = await probe;
+      settled.set(candidate, result);
+      if (result.failure === null) break;
+    }
+    controller.abort();
+  }
+  return listed.map(
+    (candidate) =>
+      settled.get(candidate) ??
+      (candidate.failure === null
+        ? { ...candidate, failure: "skipped" }
+        : candidate),
+  );
+}
+
+export async function scanRegistrations(
+  deps: DiscoveryDeps,
+): Promise<RegistrationCandidate[]> {
+  return probeRegistrations(deps, await listRegistrations(deps));
 }
 
 export async function scanLiveRegistrations(
@@ -400,6 +523,18 @@ export async function scanLiveRegistrations(
   return (await scanRegistrations(deps)).filter(
     (candidate) => candidate.failure === null,
   );
+}
+
+export async function registrationStillLive(
+  deps: DiscoveryDeps,
+  registration: LiveRegistration,
+  explicit: boolean,
+): Promise<boolean> {
+  if (!explicit && !deps.kill(registration.pid, 0)) return false;
+  const info = await probeInfo(registration.url, registration.password, deps.fetch, {
+    timeoutMs: explicit ? INFO_PROBE_TIMEOUT_MS : REGISTRATION_PROBE_TIMEOUT_MS,
+  });
+  return info.ok && info.pid === registration.pid;
 }
 
 function newest(
@@ -510,10 +645,17 @@ export async function resolveAttachedRegistration(
     };
   }
 
-  const pathApp = await pathBinaryAppId(deps);
-  const candidates = await scanRegistrations(deps);
+  const [pathApp, listed] = await Promise.all([
+    pathBinaryAppId(deps),
+    listRegistrations(deps),
+  ]);
+  const requested = requestedAppOf(deps);
+  const candidates = await probeRegistrations(deps, listed, (candidate) => {
+    if (requested !== null && candidate.appId === requested) return 0;
+    if (pathApp.appId !== null && candidate.appId === pathApp.appId) return 1;
+    return 2;
+  });
   const live = candidates.filter((item) => item.failure === null);
-  const requested = deps.env.BB_OPENCODE_APP?.trim() || null;
   const selected = selectLiveRegistration(live, requested, pathApp.appId);
   if (selected) {
     return {
@@ -554,6 +696,25 @@ export async function resolveAttachedRegistration(
         url: unauthorized.url || null,
         registrationFile: unauthorized.file,
         pid: unauthorized.pid || null,
+        pathBinaryAppId: pathApp.appId,
+      },
+    };
+  }
+
+  const remote = candidates.find((item) => item.failure === "remote");
+  if (remote) {
+    return {
+      explicit: false,
+      registration: null,
+      health: {
+        status: "unknown",
+        statusMessage: `${remote.appId} is registered at a URL that is not on this host; set BB_OPENCODE_SERVER to attach to it`,
+        appId: remote.appId,
+        version: remote.version ?? pathApp.installedVersion,
+        installedVersion: pathApp.installedVersion,
+        url: remote.url,
+        registrationFile: remote.file,
+        pid: null,
         pathBinaryAppId: pathApp.appId,
       },
     };

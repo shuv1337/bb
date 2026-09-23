@@ -21,7 +21,6 @@ describe("createFakeOpenCodeRuntime", () => {
         }
       }
     })();
-    await new Promise((resolve) => setTimeout(resolve, 30));
     await session.setInstructions({ mode: "append", text: "hello" });
     await session.prompt({ text: "hi" });
     await consume;

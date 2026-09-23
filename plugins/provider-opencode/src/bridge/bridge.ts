@@ -682,6 +682,19 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     session: ThreadSession,
     wrapped: RuntimeSessionEvent,
   ): Promise<void> {
+    if (wrapped.kind === "stream.error") {
+      warn(
+        `OpenCode event stream for ${session.threadId} disconnected; reconnecting: ${wrapped.message}`,
+      );
+      sendDeltas(session.threadId, [
+        {
+          kind: "provider.warning",
+          summary: "OpenCode event stream disconnected; reconnecting",
+          details: wrapped.message,
+        },
+      ]);
+      return;
+    }
     if (wrapped.kind === "resync") {
       const messages = await session.handle.context();
       sendDeltas(
@@ -807,12 +820,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       if (session.closed || session.abort.signal.aborted) return;
       const message = failureMessage(error);
       warn(
-        `could not apply OpenCode ${event.kind === "native" ? event.event.type : "resync"} for ${session.threadId}: ${message}`,
+        `could not apply OpenCode ${event.kind === "native" ? event.event.type : event.kind} for ${session.threadId}: ${message}`,
       );
       sendDeltas(session.threadId, [
         { kind: "provider.error", message, ...errorScope(session) },
       ]);
-      if (event.kind === "resync") return;
+      if (event.kind !== "native") return;
       try {
         await enqueue(session, () => applyRuntimeEvent(session, resyncEvent(session)));
       } catch (resyncError) {

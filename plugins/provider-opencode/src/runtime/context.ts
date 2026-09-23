@@ -10,17 +10,54 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-const REDACT_KEY = /thoughtsignature|password|authorization|passwd|secret/i;
+const CREDENTIAL_WORDS = new Set([
+  "password",
+  "passwords",
+  "passwd",
+  "secret",
+  "secrets",
+  "authorization",
+  "token",
+  "apikey",
+  "secretkey",
+  "privatekey",
+  "thoughtsignature",
+]);
 
-export function sanitizeUnknown(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeUnknown);
-  if (!isRecord(value)) return value;
+function keyWords(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 0);
+}
+
+function isRedactedKey(key: string): boolean {
+  const words = keyWords(key);
+  const last = words.at(-1);
+  if (last === undefined) return false;
+  if (CREDENTIAL_WORDS.has(last)) return true;
+  return CREDENTIAL_WORDS.has(words.slice(-2).join(""));
+}
+
+function sanitizeRecord(value: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, nested] of Object.entries(value)) {
-    if (REDACT_KEY.test(key)) continue;
+    if (isRedactedKey(key)) continue;
     out[key] = sanitizeUnknown(nested);
   }
   return out;
+}
+
+export function sanitizeUnknown(
+  value: Record<string, unknown>,
+): Record<string, unknown>;
+export function sanitizeUnknown(value: unknown): unknown;
+export function sanitizeUnknown(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sanitizeUnknown(item));
+  if (!isRecord(value)) return value;
+  return sanitizeRecord(value);
 }
 
 function tokenUsageFrom(raw: unknown): OpenCodeTokenUsage | undefined {
@@ -82,9 +119,7 @@ export function sessionInfoFrom(
     title: typeof raw.title === "string" ? raw.title : undefined,
     agent: typeof raw.agent === "string" ? raw.agent : undefined,
     model: modelRefFrom(raw.model),
-    metadata: isRecord(raw.metadata)
-      ? (sanitizeUnknown(raw.metadata) as Record<string, unknown>)
-      : undefined,
+    metadata: isRecord(raw.metadata) ? sanitizeUnknown(raw.metadata) : undefined,
     location,
     tokens: tokenUsageFrom(raw.tokens),
     cost: typeof raw.cost === "number" ? raw.cost : undefined,
@@ -94,17 +129,16 @@ export function sessionInfoFrom(
 
 export function messageFrom(raw: unknown): OpenCodeSessionMessage | null {
   if (!isRecord(raw) || typeof raw.id !== "string") return null;
-  const sanitized = sanitizeUnknown(raw) as Record<string, unknown>;
   return {
     id: raw.id,
     type: typeof raw.type === "string" ? raw.type : "unknown",
-    text: typeof sanitized.text === "string" ? sanitized.text : undefined,
-    agent: typeof sanitized.agent === "string" ? sanitized.agent : undefined,
-    model: modelRefFrom(sanitized.model),
-    skill: typeof sanitized.skill === "string" ? sanitized.skill : undefined,
-    finish: typeof sanitized.finish === "string" ? sanitized.finish : undefined,
-    tokens: tokenUsageFrom(sanitized.tokens),
-    cost: typeof sanitized.cost === "number" ? sanitized.cost : undefined,
-    content: sanitized.content,
+    text: typeof raw.text === "string" ? raw.text : undefined,
+    agent: typeof raw.agent === "string" ? raw.agent : undefined,
+    model: modelRefFrom(raw.model),
+    skill: typeof raw.skill === "string" ? raw.skill : undefined,
+    finish: typeof raw.finish === "string" ? raw.finish : undefined,
+    tokens: tokenUsageFrom(raw.tokens),
+    cost: typeof raw.cost === "number" ? raw.cost : undefined,
+    content: sanitizeUnknown(raw.content),
   };
 }

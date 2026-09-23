@@ -181,7 +181,16 @@ export type RuntimeResyncEvent = {
   reason: "reconnect" | "overflow";
 };
 
-export type RuntimeSessionEvent = RuntimeNativeEvent | RuntimeResyncEvent;
+export type RuntimeStreamErrorEvent = {
+  kind: "stream.error";
+  sessionID: string;
+  message: string;
+};
+
+export type RuntimeSessionEvent =
+  | RuntimeNativeEvent
+  | RuntimeResyncEvent
+  | RuntimeStreamErrorEvent;
 
 export type CreateOpenCodeRuntimeOptions = {
   env?: NodeJS.ProcessEnv;
@@ -195,9 +204,10 @@ export type CreateOpenCodeRuntimeOptions = {
   kill?: (pid: number, signal: 0) => boolean;
   readFile?: (path: string) => Promise<string>;
   readdir?: (path: string) => Promise<string[]>;
-  statMtimeMs?: (path: string) => Promise<number>;
+  regularFileMtimeMs?: (path: string) => Promise<number | null>;
   realpath?: (path: string) => Promise<string>;
   isDirectory?: (path: string) => Promise<boolean>;
+  localAddresses?: () => string[];
 };
 
 export interface SessionHandle {
@@ -249,7 +259,11 @@ export interface OpenCodeRuntime {
 }
 
 export const BB_INSTRUCTION_ENTRY_KEY = "bb.instructions";
-export const SUBSCRIBER_BUFFER_LIMIT = 32;
+export const SUBSCRIBER_BUFFER_LIMIT = 1_024;
 export const INFO_PROBE_TIMEOUT_MS = 4_000;
+export const REGISTRATION_PROBE_TIMEOUT_MS = 1_500;
+export const EVENT_STREAM_BACKOFF_INITIAL_MS = 250;
+export const EVENT_STREAM_BACKOFF_MAX_MS = 8_000;
+export const EVENT_STREAM_STABLE_MS = 10_000;
 export const VERSION_PROBE_TIMEOUT_MS = 3_000;
 export const SSE_CONNECT_TIMEOUT_MS = 8_000;

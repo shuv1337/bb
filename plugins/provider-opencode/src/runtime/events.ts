@@ -1,8 +1,15 @@
-import { SSE_CONNECT_TIMEOUT_MS, SUBSCRIBER_BUFFER_LIMIT } from "./types.js";
+import {
+  EVENT_STREAM_BACKOFF_INITIAL_MS,
+  EVENT_STREAM_BACKOFF_MAX_MS,
+  EVENT_STREAM_STABLE_MS,
+  SSE_CONNECT_TIMEOUT_MS,
+  SUBSCRIBER_BUFFER_LIMIT,
+} from "./types.js";
 import type { OpenCodeNativeEvent, RuntimeSessionEvent } from "./types.js";
 
 type Subscriber = {
   sessionID: string;
+  owner: EventPump;
   push: (event: RuntimeSessionEvent) => void;
   close: () => void;
   fail: (error: unknown) => void;
@@ -11,6 +18,20 @@ type Subscriber = {
 export type EventSourceFactory = (
   signal: AbortSignal,
 ) => AsyncIterable<unknown>;
+
+export type EventPumpOptions = {
+  isFatal?: (error: unknown) => boolean;
+  describeError?: (error: unknown) => string;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  now?: () => number;
+  connectTimeoutMs?: number;
+};
+
+function describeUnknownError(error: unknown): string {
+  return error instanceof Error && error.message.length > 0
+    ? error.message
+    : "OpenCode event stream failed";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -66,21 +87,34 @@ export class EventPump {
   private readonly descendantsByAncestor = new Map<string, Set<string>>();
   private connection: AbortController | null = null;
   private running: Promise<void> | null = null;
+  private readonly adopted = new Set<Subscriber>();
   private connected = false;
   private closed = false;
-  private backoffMs = 250;
+  private backoffMs = EVENT_STREAM_BACKOFF_INITIAL_MS;
   private connectWaiters: Array<(ok: boolean) => void> = [];
   private streamError: unknown = null;
   private attemptError: unknown = null;
+  private disconnectError: unknown = null;
+  private disconnectReported = false;
   private stoppedSettled = false;
   private resolveStopped = (): void => {};
   private rejectStopped = (_error: unknown): void => {};
   private readonly stopped: Promise<void>;
+  private readonly isFatal: (error: unknown) => boolean;
+  private readonly describeError: (error: unknown) => string;
+  private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  private readonly now: () => number;
+  private readonly connectTimeoutMs: number;
 
   constructor(
     private readonly source: EventSourceFactory,
-    private readonly isFatal: (error: unknown) => boolean = () => false,
+    options: EventPumpOptions = {},
   ) {
+    this.isFatal = options.isFatal ?? (() => false);
+    this.describeError = options.describeError ?? describeUnknownError;
+    this.sleep = options.sleep ?? delay;
+    this.now = options.now ?? Date.now;
+    this.connectTimeoutMs = options.connectTimeoutMs ?? SSE_CONNECT_TIMEOUT_MS;
     this.stopped = new Promise((resolve, reject) => {
       this.resolveStopped = resolve;
       this.rejectStopped = reject;
@@ -96,7 +130,7 @@ export class EventPump {
     if (this.closed) throw new Error("event pump closed");
     if (this.connected) return;
     if (this.connection === null) this.start();
-    await this.waitUntilConnected(SSE_CONNECT_TIMEOUT_MS);
+    await this.waitUntilConnected(this.connectTimeoutMs);
   }
 
   fail(error: unknown): void {
@@ -108,10 +142,40 @@ export class EventPump {
     this.flushWaiters(false);
     for (const subscriber of this.subscribers) subscriber.fail(error);
     this.subscribers.clear();
+    this.adopted.clear();
   }
 
   get isConnected(): boolean {
     return this.connected;
+  }
+
+  get lastDisconnectError(): unknown {
+    return this.disconnectError;
+  }
+
+  get pendingConnectWaiters(): number {
+    return this.connectWaiters.length;
+  }
+
+  adoptSubscribers(previous: EventPump): number {
+    if (previous === this) return 0;
+    for (const [child, parent] of previous.parentByChild) {
+      this.rememberLineage(child, parent);
+    }
+    const moved = [...previous.subscribers];
+    previous.subscribers.clear();
+    previous.adopted.clear();
+    for (const subscriber of moved) {
+      subscriber.owner = this;
+      if (this.streamError !== null) {
+        subscriber.fail(this.streamError);
+        continue;
+      }
+      this.subscribers.add(subscriber);
+      this.adopted.add(subscriber);
+    }
+    if (this.connected) this.flushAdoptedResync();
+    return moved.length;
   }
 
   subscribe(
@@ -124,6 +188,7 @@ export class EventPump {
     let failure: Error | null = null;
     const subscriber: Subscriber = {
       sessionID,
+      owner: this,
       push: (event) => {
         if (done || failure !== null) return;
         if (queue.length >= SUBSCRIBER_BUFFER_LIMIT) {
@@ -157,7 +222,8 @@ export class EventPump {
       subscriber.fail(this.streamError);
     }
     const onAbort = () => {
-      this.subscribers.delete(subscriber);
+      subscriber.owner.subscribers.delete(subscriber);
+      subscriber.owner.adopted.delete(subscriber);
       signal.removeEventListener("abort", onAbort);
       subscriber.close();
     };
@@ -196,6 +262,7 @@ export class EventPump {
     this.flushWaiters(false);
     for (const subscriber of this.subscribers) subscriber.close();
     this.subscribers.clear();
+    this.adopted.clear();
     this.settleStopped();
     await this.running?.catch(() => undefined);
   }
@@ -210,17 +277,21 @@ export class EventPump {
     let reconnecting = false;
     while (!this.closed && !controller.signal.aborted) {
       this.connected = false;
+      let connectedAt: number | null = null;
       try {
         for await (const raw of this.source(controller.signal)) {
           if (this.closed || controller.signal.aborted) break;
           const event = decodeNativeEvent(raw);
           if (event === null) continue;
-          this.backoffMs = 250;
           if (event.type === "server.connected") {
+            connectedAt = this.now();
             this.markConnected(reconnecting);
             reconnecting = false;
           }
           this.dispatch(event);
+        }
+        if (!this.closed && !controller.signal.aborted) {
+          this.reportDisconnect(new Error("OpenCode event stream ended"));
         }
       } catch (error) {
         if (this.closed || controller.signal.aborted) break;
@@ -234,12 +305,33 @@ export class EventPump {
         this.attemptError = error;
         this.flushWaiters(false);
         this.attemptError = null;
+        this.reportDisconnect(error);
       }
       this.connected = false;
       if (this.closed || controller.signal.aborted) break;
+      if (
+        connectedAt !== null &&
+        this.now() - connectedAt >= EVENT_STREAM_STABLE_MS
+      ) {
+        this.backoffMs = EVENT_STREAM_BACKOFF_INITIAL_MS;
+      }
       reconnecting = true;
-      await delay(this.backoffMs, controller.signal);
-      this.backoffMs = Math.min(this.backoffMs * 2, 8_000);
+      await this.sleep(this.backoffMs, controller.signal);
+      this.backoffMs = Math.min(this.backoffMs * 2, EVENT_STREAM_BACKOFF_MAX_MS);
+    }
+  }
+
+  private reportDisconnect(error: unknown): void {
+    this.disconnectError = error;
+    if (this.disconnectReported) return;
+    this.disconnectReported = true;
+    const message = this.describeError(error);
+    for (const subscriber of this.subscribers) {
+      subscriber.push({
+        kind: "stream.error",
+        sessionID: subscriber.sessionID,
+        message,
+      });
     }
   }
 
@@ -252,18 +344,34 @@ export class EventPump {
 
   private markConnected(reconnecting: boolean): void {
     this.connected = true;
+    this.disconnectError = null;
+    this.disconnectReported = false;
     this.flushWaiters(true);
-    if (reconnecting) this.emitResync("reconnect");
+    if (reconnecting) {
+      this.adopted.clear();
+      this.emitResync("reconnect");
+      return;
+    }
+    this.flushAdoptedResync();
+  }
+
+  private flushAdoptedResync(): void {
+    const targets = [...this.adopted];
+    this.adopted.clear();
+    for (const subscriber of targets) {
+      subscriber.push({
+        kind: "resync",
+        sessionID: subscriber.sessionID,
+        reason: "reconnect",
+      });
+    }
   }
 
   private async waitUntilConnected(timeoutMs: number): Promise<void> {
     if (this.connected) return;
     if (this.streamError !== null) throw this.streamError;
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error("OpenCode event stream did not become ready"));
-      }, timeoutMs);
-      this.connectWaiters.push((ok) => {
+      const waiter = (ok: boolean): void => {
         clearTimeout(timer);
         if (ok) {
           resolve();
@@ -275,7 +383,14 @@ export class EventPump {
           return;
         }
         reject(new Error("OpenCode event stream closed"));
-      });
+      };
+      const timer = setTimeout(() => {
+        this.connectWaiters = this.connectWaiters.filter(
+          (pending) => pending !== waiter,
+        );
+        reject(new Error("OpenCode event stream did not become ready"));
+      }, timeoutMs);
+      this.connectWaiters.push(waiter);
     });
   }
 
@@ -331,10 +446,7 @@ export class EventPump {
   }
 
   private emitResync(reason: "reconnect" | "overflow"): void {
-    const seen = new Set<string>();
     for (const subscriber of this.subscribers) {
-      if (seen.has(subscriber.sessionID)) continue;
-      seen.add(subscriber.sessionID);
       subscriber.push({
         kind: "resync",
         sessionID: subscriber.sessionID,

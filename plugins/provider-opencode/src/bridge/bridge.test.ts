@@ -10,6 +10,7 @@ import { toOpenCodeModel } from "../models.js";
 import {
   createFakeOpenCodeRuntime,
   type OpenCodeRuntime,
+  type RuntimeSessionEvent,
   type SessionHandle,
 } from "../runtime/index.js";
 import {
@@ -1088,4 +1089,75 @@ it("backs off and resyncs when the event stream ends", async () => {
   expect(harness.warnings.some((warning) => warning.includes("resubscribing in 20ms"))).toBe(true);
   await new Promise((resolve) => setTimeout(resolve, 60));
   expect(subscribes).toBe(2);
+});
+
+it("surfaces a runtime stream.error as a warning and keeps the session attached", async () => {
+  let subscribes = 0;
+  await useHarness({
+    wrapRuntime: (fake) => ({
+      ...fake,
+      subscribe: (sessionID, signal) => {
+        subscribes += 1;
+        const events = fake.subscribe(sessionID, signal);
+        const disconnected: RuntimeSessionEvent = {
+          kind: "stream.error",
+          sessionID,
+          message: "connection refused",
+        };
+        return {
+          [Symbol.asyncIterator]() {
+            const iterator = events[Symbol.asyncIterator]();
+            let primed = false;
+            return {
+              async next() {
+                if (!primed) {
+                  primed = true;
+                  return { done: false, value: disconnected };
+                }
+                return iterator.next();
+              },
+              async return() {
+                await iterator.return?.();
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      },
+    }),
+  });
+  const threadId = "thr_stream_error";
+  const started = await harness.startThread(threadId);
+  expect(started.error).toBeUndefined();
+  await harness.waitFor(
+    () => harness.deltasOf(threadId).some((delta) => delta.kind === "provider.warning"),
+    "stream warning",
+  );
+  expect(
+    harness.deltasOf(threadId).filter((delta) => delta.kind === "provider.warning"),
+  ).toEqual([
+    {
+      kind: "provider.warning",
+      summary: "OpenCode event stream disconnected; reconnecting",
+      details: "connection refused",
+    },
+  ]);
+  expect(
+    harness.deltasOf(threadId).filter((delta) => delta.kind === "provider.error"),
+  ).toEqual([]);
+  expect(harness.warnings.some((warning) => warning.includes("connection refused"))).toBe(
+    true,
+  );
+  const turn = await harness.request("creq_zzzzzzzz22", "turn/start", {
+    threadId,
+    providerThreadId: providerThreadId(started),
+    clientRequestId: "creq_zzzzzzzz22",
+    input: [{ type: "text", text: "still attached", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(turn.error).toBeUndefined();
+  expect(harness.fake.calls.prompts.map((prompt) => prompt.text)).toEqual([
+    "still attached",
+  ]);
+  expect(subscribes).toBe(1);
 });
