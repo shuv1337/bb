@@ -20,7 +20,7 @@ Install action.
 
 ## Install from GitHub
 
-Requires bb 0.43.4 or newer with Plugin SDK 0.5.16 or newer (0.5.x).
+Requires bb 0.43.4 or newer with Plugin SDK 0.5.9 or newer (0.5.x).
 
 ```sh
 bb plugin install 'git:https://github.com/shuv1337/bb@main' --subdirectory plugins/provider-opencode --yes

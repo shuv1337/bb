@@ -36,7 +36,7 @@ describe("provider-opencode imports only the public SDK", () => {
     expect(manifest).toMatchObject({
       dependencies: {
         "@opencode/client": "2.0.10",
-        "@get-bb/plugin-sdk": "^0.5.16",
+        "@get-bb/plugin-sdk": "^0.5.9",
       },
     });
   });
