@@ -6,9 +6,11 @@ import {
 } from "@get-bb/plugin-sdk/host";
 import { createOpenCodeRuntime } from "./runtime/index.js";
 import {
+  createOpenCodeCommandCatalogStore,
   resolveOpenCodeNativeRoots,
   type OpenCodeCatalogCommand,
   type OpenCodeCatalogSkill,
+  type OpenCodeCommandCatalogStore,
 } from "./native-roots.js";
 
 export { experimental_providerBridge } from "./bridge/bridge.js";
@@ -76,6 +78,7 @@ export async function resolveOpenCodeHostNativeRoots(args: {
   env: Readonly<Record<string, string | undefined>>;
   cwd: string | null;
   discovery: OpenCodeHostDiscovery;
+  commandCatalogStore: OpenCodeCommandCatalogStore;
 }): Promise<ExperimentalNativeRootsResolveAnswer> {
   return resolveOpenCodeNativeRoots({
     homeDir: args.homeDir,
@@ -83,27 +86,47 @@ export async function resolveOpenCodeHostNativeRoots(args: {
     cwd: args.cwd,
     appId: args.discovery.appId ?? undefined,
     catalogSkills: args.discovery.catalogSkills,
-    catalogCommands: args.discovery.catalogCommands,
+    commandCatalog:
+      args.discovery.catalogCommands === null
+        ? null
+        : {
+            commands: args.discovery.catalogCommands,
+            store: args.commandCatalogStore,
+          },
   });
 }
 
-export default experimental_defineHostEntry({
-  contract: experimental_nativeRootsHostContract,
-  handlers: {
-    resolveNativeRoots: async (input) => {
-      const homeDir = homedir();
-      const env = process.env;
-      const discovery = await loadOpenCodeHostDiscovery({
-        cwd: input.cwd,
-        env,
-        homedir: homeDir,
-      });
-      return resolveOpenCodeHostNativeRoots({
-        homeDir,
-        env,
-        cwd: input.cwd,
-        discovery,
-      });
+export function createOpenCodeHostEntry() {
+  let commandCatalogStore: OpenCodeCommandCatalogStore | null = null;
+  return experimental_defineHostEntry({
+    contract: experimental_nativeRootsHostContract,
+    handlers: {
+      resolveNativeRoots: async (input, context) => {
+        const homeDir = homedir();
+        const env = process.env;
+        commandCatalogStore ??= createOpenCodeCommandCatalogStore({
+          dataDir: context.experimental_paths.dataDir,
+        });
+        const discovery = await loadOpenCodeHostDiscovery({
+          cwd: input.cwd,
+          env,
+          homedir: homeDir,
+        });
+        return resolveOpenCodeHostNativeRoots({
+          homeDir,
+          env,
+          cwd: input.cwd,
+          discovery,
+          commandCatalogStore,
+        });
+      },
     },
-  },
-});
+    dispose: async () => {
+      const store = commandCatalogStore;
+      commandCatalogStore = null;
+      await store?.dispose();
+    },
+  });
+}
+
+export default createOpenCodeHostEntry();

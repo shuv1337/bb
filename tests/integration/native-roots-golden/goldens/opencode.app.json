@@ -1,6 +1,6 @@
 {
   "providerId": "opencode",
-  "variant": "default",
+  "variant": "app",
   "workspace": {
     "commands": [
       {
@@ -127,7 +127,7 @@
       {
         "name": "opencode-config-skill",
         "description": "opencode-config-skill skill",
-        "filePath": "<home>/.config/opencode/skills/opencode-config-skill/SKILL.md",
+        "filePath": "<home>/.config/shuvcode/skills/opencode-config-skill/SKILL.md",
         "rootKind": "provider-user",
         "linked": false
       },
@@ -203,7 +203,7 @@
       {
         "name": "opencode-config-skill",
         "description": "opencode-config-skill skill",
-        "filePath": "<home>/.config/opencode/skills/opencode-config-skill/SKILL.md",
+        "filePath": "<home>/.config/shuvcode/skills/opencode-config-skill/SKILL.md",
         "rootKind": "provider-user",
         "linked": false
       }

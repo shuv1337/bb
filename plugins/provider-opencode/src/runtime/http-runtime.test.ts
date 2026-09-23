@@ -406,8 +406,8 @@ async function startFixture(input?: {
 
 function explicitEnv(fixture: { url: string; password: string }) {
   return {
-    BB_OPENCODE_SERVER: fixture.url,
-    BB_OPENCODE_PASSWORD: fixture.password,
+    OPENCODE_SERVER_URL: fixture.url,
+    OPENCODE_SERVER_PASSWORD: fixture.password,
   };
 }
 
@@ -416,8 +416,8 @@ describe("http runtime adapter", () => {
     const fixture = await startFixture();
     const runtime = await createOpenCodeRuntime({
       env: {
-        BB_OPENCODE_SERVER: fixture.url,
-        BB_OPENCODE_PASSWORD: fixture.password,
+        OPENCODE_SERVER_URL: fixture.url,
+        OPENCODE_SERVER_PASSWORD: fixture.password,
       },
     });
     const health = await runtime.health();
@@ -478,7 +478,7 @@ describe("http runtime adapter", () => {
 
   it("does not report ready on port 0 and can attach after a later health refresh", async () => {
     const runtime = await createOpenCodeRuntime({
-      env: { BB_OPENCODE_SERVER: "http://127.0.0.1:1" },
+      env: { OPENCODE_SERVER_URL: "http://127.0.0.1:1" },
       fetch: async () => {
         throw new Error("offline");
       },
@@ -494,8 +494,8 @@ describe("http runtime adapter", () => {
     const fixture = await startFixture({ bareUnauthorized: true });
     const runtime = await createOpenCodeRuntime({
       env: {
-        BB_OPENCODE_SERVER: fixture.url,
-        BB_OPENCODE_PASSWORD: fixture.password,
+        OPENCODE_SERVER_URL: fixture.url,
+        OPENCODE_SERVER_PASSWORD: fixture.password,
       },
     });
     let caught: unknown;
@@ -517,8 +517,8 @@ describe("http runtime adapter", () => {
     const fixture = await startFixture();
     const runtime = await createOpenCodeRuntime({
       env: {
-        BB_OPENCODE_SERVER: fixture.url,
-        BB_OPENCODE_PASSWORD: fixture.password,
+        OPENCODE_SERVER_URL: fixture.url,
+        OPENCODE_SERVER_PASSWORD: fixture.password,
       },
     });
     const sessionID = "ses_401abcd";
@@ -547,8 +547,8 @@ describe("http runtime adapter", () => {
     const fixture = await startFixture({ unauthorizedEvents: true });
     const runtime = await createOpenCodeRuntime({
       env: {
-        BB_OPENCODE_SERVER: fixture.url,
-        BB_OPENCODE_PASSWORD: fixture.password,
+        OPENCODE_SERVER_URL: fixture.url,
+        OPENCODE_SERVER_PASSWORD: fixture.password,
       },
     });
     try {
@@ -582,8 +582,8 @@ describe("http runtime adapter", () => {
     const fixture = await startFixture({ unauthorizedAfterConnect: true });
     const runtime = await createOpenCodeRuntime({
       env: {
-        BB_OPENCODE_SERVER: fixture.url,
-        BB_OPENCODE_PASSWORD: fixture.password,
+        OPENCODE_SERVER_URL: fixture.url,
+        OPENCODE_SERVER_PASSWORD: fixture.password,
       },
     });
     try {
@@ -616,8 +616,8 @@ describe("http runtime adapter", () => {
     const fixture = await startFixture({ unavailableOnce: true });
     const runtime = await createOpenCodeRuntime({
       env: {
-        BB_OPENCODE_SERVER: fixture.url,
-        BB_OPENCODE_PASSWORD: fixture.password,
+        OPENCODE_SERVER_URL: fixture.url,
+        OPENCODE_SERVER_PASSWORD: fixture.password,
       },
     });
     const ac = new AbortController();

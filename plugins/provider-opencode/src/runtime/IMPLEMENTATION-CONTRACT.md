@@ -11,14 +11,14 @@ createOpenCodeRuntime(options?: CreateOpenCodeRuntimeOptions): Promise<OpenCodeR
 createFakeOpenCodeRuntime(options?: CreateFakeOpenCodeRuntimeOptions): OpenCodeRuntime
 ```
 
-`createOpenCodeRuntime` attaches; it does not spawn. Order:
+`createOpenCodeRuntime` attaches; it does not spawn. The env names carry no `BB_` prefix: the host daemon forks the plugin host worker (`resolveNativeRoots`) with every inherited `BB_*` variable removed, so `BB_`-prefixed names would reach the bridge but never the host worker. Order:
 
-1. `BB_OPENCODE_SERVER` (+ optional `BB_OPENCODE_PASSWORD`) → explicit URL. No filesystem scan and no PATH `--version` probe.
+1. `OPENCODE_SERVER_URL` (+ optional `OPENCODE_SERVER_PASSWORD`) → explicit URL. No filesystem scan and no PATH `--version` probe.
 2. Else read-only scan of `$XDG_STATE_HOME` (default `~/.local/state`) `service*.json`.
 
 No auto-start. A runtime may be constructed while unhealthy. `health()` re-resolves and **reattaches** the HTTP client when a usable URL appears. `status: "ready"` is never returned without an attached client on a non-zero port. Session methods throw `OpenCodeRuntimeNotReadyError` until then.
 
-`health()` first re-probes the attached registration (`kill(pid, 0)` for scanned registrations, then `/api/info` with a matching pid). Only when that fails does it rescan the state roots and PATH. While the attached registration answers, `health()` returns the health cached from the last scan: a PATH change (`installedVersion`, `pathBinaryAppId`), a changed `BB_OPENCODE_APP`, or a newly started service of the preferred app is not picked up until the attached service stops answering or the runtime is recreated.
+`health()` first re-probes the attached registration (`kill(pid, 0)` for scanned registrations, then `/api/info` with a matching pid). Only when that fails does it rescan the state roots and PATH. While the attached registration answers, `health()` returns the health cached from the last scan: a PATH change (`installedVersion`, `pathBinaryAppId`), a changed `OPENCODE_APP`, or a newly started service of the preferred app is not picked up until the attached service stops answering or the runtime is recreated.
 
 What `health()` does to live subscriptions:
 
@@ -77,15 +77,15 @@ Glob `$XDG_STATE_HOME/<root>/service*.json`. Ignore `*.lock`, `*.bak`. Only thes
 1. `opencode/`
 2. `shuvcode/`
 3. `opencode-next/opencode/`
-4. `<BB_OPENCODE_APP>/` when that value is a plain name (no path separators)
+4. `<OPENCODE_APP>/` when that value is a plain name (no path separators)
 
 Roots and registration files are checked with `lstat`, and a root's realpath must equal `<realpath($XDG_STATE_HOME)>/<root>`. A root reached through any symlink, or a symlinked `service*.json`, is skipped.
 
-A registration needs an `http:`/`https:` `url` (else failure `url`) and a **positive integer** `pid` (else failure `pid`). A url whose host is not on this host is failure `remote` and is never probed, so its password is never sent. On this host means loopback (`localhost`, `127.0.0.0/8`, `[::1]`, IPv4-mapped `127.0.0.0/8`, `0.0.0.0`, `[::]`) or an IP literal equal to one of this host's own interface addresses (`os.networkInterfaces()`, injectable as `localAddresses`). Host names other than `localhost` are never resolved. To use a server on another host, set `BB_OPENCODE_SERVER` (+ `BB_OPENCODE_PASSWORD`).
+A registration needs an `http:`/`https:` `url` (else failure `url`) and a **positive integer** `pid` (else failure `pid`). A url whose host is not on this host is failure `remote` and is never probed, so its password is never sent. On this host means loopback (`localhost`, `127.0.0.0/8`, `[::1]`, IPv4-mapped `127.0.0.0/8`, `0.0.0.0`, `[::]`) or an IP literal equal to one of this host's own interface addresses (`os.networkInterfaces()`, injectable as `localAddresses`). Host names other than `localhost` are never resolved. To use a server on another host, set `OPENCODE_SERVER_URL` (+ `OPENCODE_SERVER_PASSWORD`).
 
 Live = `kill(pid, 0)` + `GET {url}/api/info` basic auth username `opencode` returns 200 and `body.pid === file.pid`. Registration probes run concurrently with a 1.5s timeout; the explicit server probe keeps 4s. Failed probe responses have their body cancelled.
 
-Several live, in order: `BB_OPENCODE_APP` (newest mtime **within that app**) else PATH v2 app (newest within that app) else newest overall. Probes are awaited in that preference order; the first live one wins and the rest are aborted (failure `skipped`). PATH probes **both** `opencode` and `shuvcode` concurrently; if the first is v1 (`1.x` bare or branded) and the second is v2, the v2 app wins. `--version` status must be 0. `which` searches only the injected `env.PATH`, skips non-files, and `--version` runs with the injected `env`. Never attach to two.
+Several live, in order: `OPENCODE_APP` (newest mtime **within that app**) else PATH v2 app (newest within that app) else newest overall. Probes are awaited in that preference order; the first live one wins and the rest are aborted (failure `skipped`). PATH probes **both** `opencode` and `shuvcode` concurrently; if the first is v1 (`1.x` bare or branded) and the second is v2, the v2 app wins. `--version` status must be 0. `which` searches only the injected `env.PATH`, skips non-files, and `--version` runs with the injected `env`. Never attach to two.
 
 ## `OpenCodeRuntime`
 
@@ -150,7 +150,7 @@ Append: put/remove entry key `bb.instructions` (`^[a-z0-9][a-z0-9._-]*$`). Empty
 
 ### Skills / commands
 
-Catalog ids from `skills()` / `commands()` only. `prompt.skills` is `{ id: string }[]`. Paths and unknown ids fail at the server. No `skills/configure` root registration. `resolveNativeRoots` calls both when health is ready. Command names have no path, so the host materializes them for the daemon. Filesystem command directories are only the fallback when `commands()` was not fetched.
+Catalog ids from `skills()` / `commands()` only. `prompt.skills` is `{ id: string }[]`. Paths and unknown ids fail at the server. No `skills/configure` root registration. `resolveNativeRoots` calls both when health is ready. Command names have no path, so the host materializes them for the daemon under `<experimental_paths.dataDir>/opencode-command-catalog/<app>/<sha256(cwd)[0:16]>`. Every segment below the data directory must be a plain directory (no symlink) and the leaf must `realpath` to itself; removals check the parent chain the same way before unlinking anything, so a swapped symlink never deletes outside the data directory. A catalog whose content hash matches the last write of this worker is not rewritten while its chain still passes that check and every expected `.md` file exists; in-place edits to those files are not detected until the command set changes or the worker restarts. Host entry `dispose` removes the directories the worker wrote. A crashed worker leaves its catalogs behind, so the first `materialize` of a worker removes every `<app>/<cwd hash>` entry it did not write; a concurrently running worker that loses its catalog this way rewrites it on its next resolve. A filesystem error while writing degrades only commands: skills still resolve and commands use the filesystem fallback. Filesystem command directories (`<app config>/commands`, then `command`, plus both under upstream `OPENCODE_CONFIG_DIR`) are the fallback when `commands()` was not fetched or could not be written. Project `.opencode/commands` and `.opencode/command` (ancestors, plural first) are static declarations and are always scanned, matching upstream's `{command,commands}/**/*.md` glob in every config directory.
 
 ### Permissions
 

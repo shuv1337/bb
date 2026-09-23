@@ -1,4 +1,14 @@
-import { describe, expect, it } from "vitest";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProviderHealthResult } from "@get-bb/plugin-sdk/provider-bridge";
 import type { OpenCodeDiscoveryHealth } from "../runtime/index.js";
 import {
@@ -44,7 +54,6 @@ function supportedHealth(result: ProviderHealthResult) {
 
 const emptyProbe = {
   resolveExecutablePath: async () => null,
-  npmLatestVersion: async () => "2.0.11",
   probeNpmGlobalPackage: async () => ({
     npmBin: null,
     npmGlobalPackageVersion: null,
@@ -54,7 +63,7 @@ const emptyProbe = {
 describe("chosen OpenCode install app", () => {
   it("defaults to upstream when nothing is present", () => {
     expect(chosenOpenCodeAppId({})).toBe("opencode");
-    expect(chosenOpenCodeAppId({ BB_OPENCODE_APP: "shuvcode" })).toBe(
+    expect(chosenOpenCodeAppId({ OPENCODE_APP: "shuvcode" })).toBe(
       "shuvcode",
     );
   });
@@ -68,7 +77,7 @@ describe("chosen OpenCode install app", () => {
     ).toBe("shuvcode");
     expect(
       chosenOpenCodeAppId(
-        { BB_OPENCODE_APP: "opencode" },
+        { OPENCODE_APP: "opencode" },
         health({ pathBinaryAppId: "shuvcode" }),
       ),
     ).toBe("shuvcode");
@@ -100,6 +109,14 @@ describe("openCodeInstallCommand", () => {
 
   it("does not return a shell installer for upstream OpenCode on Windows", () => {
     expect(openCodeInstallCommand("opencode", "win32")).toBeNull();
+  });
+
+  it("returns the npm plan for shuvcode on Windows", () => {
+    const fork = openCodeInstallCommand("shuvcode", "win32");
+    expect(fork?.command).toMatch(/npm/);
+    expect(fork?.args).toEqual(
+      expect.arrayContaining([`${SHUVCODE_NPM_PACKAGE}@latest`]),
+    );
   });
 });
 
@@ -196,7 +213,7 @@ describe("openCodeHealthResult", () => {
         health({
           status: "unknown",
           statusMessage:
-            "OpenCode server at BB_OPENCODE_SERVER did not answer /api/info",
+            "OpenCode server at OPENCODE_SERVER_URL did not answer /api/info",
           url: "http://127.0.0.1:4096",
         }),
       ),
@@ -228,9 +245,9 @@ describe("OpenCode installation plans", () => {
     }
   });
 
-  it("returns a shuvcode npm plan when BB_OPENCODE_APP selects it and nothing is present", async () => {
+  it("returns a shuvcode npm plan when OPENCODE_APP selects it and nothing is present", async () => {
     const deps = {
-      env: { BB_OPENCODE_APP: "shuvcode" },
+      env: { OPENCODE_APP: "shuvcode" },
       platform: "linux" as const,
       health: async () => health(),
       ...emptyProbe,
@@ -246,9 +263,9 @@ describe("OpenCode installation plans", () => {
     }
   });
 
-  it("does not replace a present shuvcode binary with upstream even if BB_OPENCODE_APP asks", async () => {
+  it("does not replace a present shuvcode binary with upstream even if OPENCODE_APP asks", async () => {
     const deps = {
-      env: { BB_OPENCODE_APP: "opencode" },
+      env: { OPENCODE_APP: "opencode" },
       platform: "linux" as const,
       health: async () =>
         health({
@@ -258,7 +275,6 @@ describe("OpenCode installation plans", () => {
         }),
       resolveExecutablePath: async (command: string) =>
         command === "shuvcode" ? "/usr/bin/shuvcode" : null,
-      npmLatestVersion: async () => null,
       probeNpmGlobalPackage: async () => ({
         npmBin: null,
         npmGlobalPackageVersion: null,
@@ -286,7 +302,6 @@ describe("OpenCode installation plans", () => {
         }),
       resolveExecutablePath: async (command: string) =>
         command === "coolcode" ? "/usr/bin/coolcode" : null,
-      npmLatestVersion: async () => null,
       probeNpmGlobalPackage: async () => ({
         npmBin: null,
         npmGlobalPackageVersion: null,
@@ -323,14 +338,14 @@ describe("OpenCode installation plans", () => {
 
   it("does not offer upstream install when an explicit URL probe fails", async () => {
     const deps = {
-      env: { BB_OPENCODE_SERVER: "http://127.0.0.1:4096" },
+      env: { OPENCODE_SERVER_URL: "http://127.0.0.1:4096" },
       platform: "linux" as const,
       health: async () =>
         health({
           status: "unknown",
           url: "http://127.0.0.1:4096",
           statusMessage:
-            "OpenCode server at BB_OPENCODE_SERVER did not answer /api/info",
+            "OpenCode server at OPENCODE_SERVER_URL did not answer /api/info",
         }),
       ...emptyProbe,
     };
@@ -338,6 +353,23 @@ describe("OpenCode installation plans", () => {
     expect(failedUrl.canInstall).toBe(false);
     const run = await getOpenCodeProviderInstallationRun("install", deps);
     expect(run.available).toBe(false);
+  });
+
+  it("returns a shuvcode npm plan on Windows when OPENCODE_APP selects it", async () => {
+    const deps = {
+      env: { OPENCODE_APP: "shuvcode" },
+      platform: "win32" as const,
+      health: async () => health(),
+      ...emptyProbe,
+    };
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.command).toMatch(/npm/);
+      expect(run.command.args).toEqual(
+        expect.arrayContaining([`${SHUVCODE_NPM_PACKAGE}@latest`]),
+      );
+    }
   });
 
   it("returns an unsupported message instead of a shell installer on Windows", async () => {
@@ -379,7 +411,6 @@ describe("OpenCode installation plans", () => {
         }),
       resolveExecutablePath: async (command: string) =>
         command === "shuvcode" ? "/opt/bin/shuvcode" : null,
-      npmLatestVersion: async () => "2.0.11",
       probeNpmGlobalPackage: async () => ({
         npmBin: null,
         npmGlobalPackageVersion: null,
@@ -403,5 +434,188 @@ describe("OpenCode installation requirements", () => {
       OPENCODE_REWIND_MINIMUM_SUPPORTED_VERSION,
     );
     expect(status.versionUnsupported).toBe(true);
+  });
+});
+
+describe("OpenCode installation probes", () => {
+  it("probes discovery once per install run", async () => {
+    let probes = 0;
+    const run = await getOpenCodeProviderInstallationRun("install", {
+      env: {},
+      platform: "linux",
+      health: async () => {
+        probes += 1;
+        return health();
+      },
+      ...emptyProbe,
+    });
+    expect(run.available).toBe(true);
+    expect(probes).toBe(1);
+  });
+
+  it("does not query the npm registry for a latest version", async () => {
+    let registryQueries = 0;
+    const deps = {
+      env: {},
+      platform: "linux" as const,
+      health: async () => health({ status: "ready", version: "2.0.8" }),
+      ...emptyProbe,
+      npmLatestVersion: async () => {
+        registryQueries += 1;
+        return "2.0.11";
+      },
+    };
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.latestVersion).toBeNull();
+    expect(registryQueries).toBe(0);
+  });
+});
+
+describe("OpenCode install source", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = realpathSync(
+      mkdtempSync(join(tmpdir(), "bb-opencode-install-source-")),
+    );
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function readyDeps(args: {
+    appId: "opencode" | "shuvcode";
+    executablePath: string;
+    npmGlobalPackageVersion: string | null;
+    platform?: NodeJS.Platform;
+  }) {
+    return {
+      env: {},
+      platform: args.platform ?? "linux",
+      health: async () =>
+        health({
+          status: "ready",
+          version: "2.0.8",
+          appId: args.appId,
+          pathBinaryAppId: args.appId,
+        }),
+      resolveExecutablePath: async (command: string) =>
+        command === args.appId ? args.executablePath : null,
+      probeNpmGlobalPackage: async () => ({
+        npmBin: join(root, "prefix", "bin"),
+        npmGlobalPackageVersion: args.npmGlobalPackageVersion,
+      }),
+    };
+  }
+
+  it("reports npmGlobal when the binary resolves into the npm global package", async () => {
+    const target = join(
+      root,
+      "prefix",
+      "lib",
+      "node_modules",
+      SHUVCODE_NPM_PACKAGE,
+      "bin",
+      "shuvcode.js",
+    );
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, "");
+    mkdirSync(join(root, "prefix", "bin"), { recursive: true });
+    const link = join(root, "prefix", "bin", "shuvcode");
+    symlinkSync(target, link);
+    const status = await getOpenCodeProviderInstallationStatus(
+      readyDeps({
+        appId: "shuvcode",
+        executablePath: link,
+        npmGlobalPackageVersion: "2.0.8",
+      }),
+    );
+    expect(status.installSource).toBe("npmGlobal");
+  });
+
+  it("reports external for an installer binary that only sits in the npm bin directory", async () => {
+    mkdirSync(join(root, "prefix", "bin"), { recursive: true });
+    const binary = join(root, "prefix", "bin", "opencode");
+    writeFileSync(binary, "");
+    const status = await getOpenCodeProviderInstallationStatus(
+      readyDeps({
+        appId: "opencode",
+        executablePath: binary,
+        npmGlobalPackageVersion: "2.0.8",
+      }),
+    );
+    expect(status.installSource).toBe("external");
+  });
+
+  it("reports external when npm does not list the package globally", async () => {
+    const target = join(
+      root,
+      "prefix",
+      "lib",
+      "node_modules",
+      SHUVCODE_NPM_PACKAGE,
+      "bin",
+      "shuvcode.js",
+    );
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, "");
+    mkdirSync(join(root, "prefix", "bin"), { recursive: true });
+    const link = join(root, "prefix", "bin", "shuvcode");
+    symlinkSync(target, link);
+    const status = await getOpenCodeProviderInstallationStatus(
+      readyDeps({
+        appId: "shuvcode",
+        executablePath: link,
+        npmGlobalPackageVersion: null,
+      }),
+    );
+    expect(status.installSource).toBe("external");
+  });
+
+  it("reports npmGlobal when the npm prefix is reached through a symlink", async () => {
+    const target = join(
+      root,
+      "real-prefix",
+      "lib",
+      "node_modules",
+      SHUVCODE_NPM_PACKAGE,
+      "bin",
+      "shuvcode.js",
+    );
+    mkdirSync(join(target, ".."), { recursive: true });
+    writeFileSync(target, "");
+    mkdirSync(join(root, "real-prefix", "bin"), { recursive: true });
+    symlinkSync(target, join(root, "real-prefix", "bin", "shuvcode"));
+    symlinkSync(join(root, "real-prefix"), join(root, "prefix"));
+    const status = await getOpenCodeProviderInstallationStatus(
+      readyDeps({
+        appId: "shuvcode",
+        executablePath: join(root, "prefix", "bin", "shuvcode"),
+        npmGlobalPackageVersion: "2.0.8",
+      }),
+    );
+    expect(status.installSource).toBe("npmGlobal");
+  });
+
+  it("reports npmGlobal on Windows only for a shim inside the npm bin directory", async () => {
+    const inside = await getOpenCodeProviderInstallationStatus(
+      readyDeps({
+        appId: "shuvcode",
+        executablePath: join(root, "prefix", "bin", "shuvcode.cmd"),
+        npmGlobalPackageVersion: "2.0.8",
+        platform: "win32",
+      }),
+    );
+    expect(inside.installSource).toBe("npmGlobal");
+    const outside = await getOpenCodeProviderInstallationStatus(
+      readyDeps({
+        appId: "shuvcode",
+        executablePath: join(root, "elsewhere", "shuvcode.cmd"),
+        npmGlobalPackageVersion: "2.0.8",
+        platform: "win32",
+      }),
+    );
+    expect(outside.installSource).toBe("external");
   });
 });

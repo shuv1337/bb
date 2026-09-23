@@ -1,6 +1,6 @@
 ---
 name: opencode-provider
-description: "Inspect BB OpenCode provider defaultAgent, defaultVariant, BB_OPENCODE_SERVER, BB_OPENCODE_APP, BB_OPENCODE_PASSWORD, native skills and commands, and compaction."
+description: "Inspect BB OpenCode provider defaultAgent, defaultVariant, OPENCODE_SERVER_URL, OPENCODE_APP, OPENCODE_SERVER_PASSWORD, native skills and commands, and compaction."
 ---
 
 # OpenCode provider
@@ -29,12 +29,13 @@ These ride `providerOptions` as `{ agent, variant }`.
 
 ## Environment
 
-Passthrough on the host daemon:
+Set on the host daemon's environment. No `BB_` prefix, so the host worker
+that resolves skills and commands keeps them:
 
-- `BB_OPENCODE_SERVER` — attach to this v2 URL; no registration scan.
-- `BB_OPENCODE_PASSWORD` — basic auth password; username is `opencode`. Wrong
-  password → `unauthenticated`.
-- `BB_OPENCODE_APP` — prefer this app id (`opencode`, `shuvcode`, …) among
+- `OPENCODE_SERVER_URL` — attach to this v2 URL; no registration scan.
+- `OPENCODE_SERVER_PASSWORD` — basic auth password; username is `opencode`.
+  Wrong password → `unauthenticated`.
+- `OPENCODE_APP` — prefer this app id (`opencode`, `shuvcode`, …) among
   live registrations and as the install target when nothing is installed.
 
 PATH `opencode` may be a symlink; identity is `--version` output.
@@ -43,7 +44,9 @@ PATH `opencode` may be a symlink; identity is `--version` output.
 
 `bb skill list` shows OpenCode nested skills from `GET /api/skill` when the
 service is up, and from filesystem roots when it is down. The `/` menu
-prefers `GET /api/command` the same way. A picked command runs
+prefers `GET /api/command` the same way; when the service is down it reads
+`.opencode/commands` and `.opencode/command` in the workspace and
+`~/.config/<app>/commands` and `command`. A picked command runs
 `session.command`, not a pasted prompt. OpenCode (ACP) does not call these
 catalogs. Compact is `bb thread compact` (OpenCode compact RPC, not
 `/compact`). Fork is checkpoint rewind. Deleting a bb thread does not remove

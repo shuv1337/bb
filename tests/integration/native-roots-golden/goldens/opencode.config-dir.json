@@ -4,6 +4,13 @@
   "workspace": {
     "commands": [
       {
+        "name": "custom-opencode-command",
+        "source": "command",
+        "origin": "user",
+        "description": "User command in OPENCODE_CONFIG_DIR",
+        "argumentHint": null
+      },
+      {
         "name": "custom-opencode-skill",
         "source": "skill",
         "origin": "user",
@@ -22,6 +29,13 @@
         "source": "skill",
         "origin": "project",
         "description": "cwd-claude-skill skill",
+        "argumentHint": null
+      },
+      {
+        "name": "cwd-opencode-command",
+        "source": "command",
+        "origin": "project",
+        "description": "Project command in the plural directory",
         "argumentHint": null
       },
       {
@@ -46,6 +60,13 @@
         "argumentHint": null
       },
       {
+        "name": "opencode-config-command",
+        "source": "command",
+        "origin": "user",
+        "description": "User command in the app config directory",
+        "argumentHint": null
+      },
+      {
         "name": "opencode-config-skill",
         "source": "skill",
         "origin": "user",
@@ -64,6 +85,13 @@
         "source": "skill",
         "origin": "project",
         "description": "ws-agents-skill skill",
+        "argumentHint": null
+      },
+      {
+        "name": "ws-opencode-command",
+        "source": "command",
+        "origin": "project",
+        "description": "Project command in the singular directory",
         "argumentHint": null
       },
       {
@@ -150,6 +178,13 @@
   "userOnly": {
     "commands": [
       {
+        "name": "custom-opencode-command",
+        "source": "command",
+        "origin": "user",
+        "description": "User command in OPENCODE_CONFIG_DIR",
+        "argumentHint": null
+      },
+      {
         "name": "custom-opencode-skill",
         "source": "skill",
         "origin": "user",
@@ -168,6 +203,13 @@
         "source": "skill",
         "origin": "user",
         "description": "home-claude-skill skill",
+        "argumentHint": null
+      },
+      {
+        "name": "opencode-config-command",
+        "source": "command",
+        "origin": "user",
+        "description": "User command in the app config directory",
         "argumentHint": null
       },
       {

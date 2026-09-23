@@ -320,6 +320,25 @@ describe("process utils", () => {
     });
   });
 
+  it("keeps the OpenCode host worker env and strips BB-prefixed names", () => {
+    const env: NodeJS.ProcessEnv = {
+      OPENCODE_SERVER_URL: "http://127.0.0.1:4096",
+      OPENCODE_SERVER_PASSWORD: "fixture-password",
+      OPENCODE_APP: "shuvcode",
+      BB_OPENCODE_SERVER: "http://127.0.0.1:4096",
+      PATH: "/bin",
+    };
+
+    const sanitizedEnv = sanitizeInheritedChildProcessEnv({ env });
+    expect(sanitizedEnv).toEqual({
+      OPENCODE_SERVER_URL: "http://127.0.0.1:4096",
+      OPENCODE_SERVER_PASSWORD: "fixture-password",
+      OPENCODE_APP: "shuvcode",
+      PATH: "/bin",
+    });
+    expect("BB_OPENCODE_SERVER" in sanitizedEnv).toBe(false);
+  });
+
   it("does not mutate the inherited env", () => {
     const env: NodeJS.ProcessEnv = {
       BB_DATA_DIR: "/tmp/bb-data",

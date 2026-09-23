@@ -144,7 +144,7 @@ describe("discovery", () => {
       res.end();
     });
     const deps = discoveryDepsFrom({
-      env: { BB_OPENCODE_SERVER: url, BB_OPENCODE_PASSWORD: "wrong" },
+      env: { OPENCODE_SERVER_URL: url, OPENCODE_SERVER_PASSWORD: "wrong" },
       which: () => {
         throw new Error("PATH should not be probed for explicit URL");
       },
@@ -321,7 +321,7 @@ describe("discovery", () => {
     const requested = await resolveAttachedRegistration(
       discoveryDepsFrom({
         ...base,
-        env: { XDG_STATE_HOME: state, BB_OPENCODE_APP: "evil" },
+        env: { XDG_STATE_HOME: state, OPENCODE_APP: "evil" },
       }),
     );
     expect(requested.health.status).toBe("ready");
@@ -387,7 +387,7 @@ describe("discovery", () => {
     expect(requests).toEqual([]);
     expect(attached.registration).toBeNull();
     expect(attached.health.status).toBe("unknown");
-    expect(attached.health.statusMessage).toContain("BB_OPENCODE_SERVER");
+    expect(attached.health.statusMessage).toContain("OPENCODE_SERVER_URL");
     expect(isLoopbackUrl("http://127.0.0.1:4096")).toBe(true);
     expect(isLoopbackUrl("http://localhost:4096")).toBe(true);
     expect(isLoopbackUrl("http://[::1]:4096")).toBe(true);
@@ -447,7 +447,7 @@ describe("discovery", () => {
     try {
       const attached = await resolveAttachedRegistration(
         discoveryDepsFrom({
-          env: { XDG_STATE_HOME: state, BB_OPENCODE_APP: "shuvcode" },
+          env: { XDG_STATE_HOME: state, OPENCODE_APP: "shuvcode" },
           homedir: root,
           kill: () => true,
           which: () => undefined,

@@ -1,15 +1,16 @@
+import { realpath } from "node:fs/promises";
+import path from "node:path";
 import {
   type ProviderHealthResult,
   type ProviderInstallationCommand,
   type ProviderInstallationRequirement,
   type ProviderInstallationRunResult,
+  type ProviderInstallationSource,
   type ProviderInstallationStatus,
   experimental_downloadedInstallerCommand as downloadedInstallerCommand,
   experimental_formatCommand as formatCommand,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
-  experimental_npmGlobalInstallSource as npmGlobalInstallSource,
-  experimental_npmLatestVersion as npmLatestVersion,
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
   experimental_resolveExecutablePath as resolveExecutablePath,
 } from "@get-bb/plugin-sdk/provider-bridge";
@@ -36,8 +37,8 @@ export type OpenCodeMaintenanceDeps = {
   platform?: NodeJS.Platform;
   health?: () => Promise<OpenCodeDiscoveryHealth>;
   resolveExecutablePath?: typeof resolveExecutablePath;
-  npmLatestVersion?: typeof npmLatestVersion;
   probeNpmGlobalPackage?: typeof probeNpmGlobalPackage;
+  realpath?: (filePath: string) => Promise<string>;
   requirement?: ProviderInstallationRequirement;
 };
 
@@ -77,7 +78,7 @@ export function chosenOpenCodeAppId(
   env: Readonly<Record<string, string | undefined>>,
   health?: Pick<OpenCodeDiscoveryHealth, "appId" | "pathBinaryAppId">,
 ): string {
-  const requested = env.BB_OPENCODE_APP?.trim() ?? "";
+  const requested = env.OPENCODE_APP?.trim() ?? "";
   const present = health === undefined ? null : presentOpenCodeAppId(health);
   if (present !== null) return present;
   if (requested.length > 0) return requested;
@@ -85,14 +86,14 @@ export function chosenOpenCodeAppId(
 }
 
 export function unsupportedOpenCodeForkMessage(appId: string): string {
-  return `bb does not install "${appId}". Start it with \`${appId} serve --service\` or set BB_OPENCODE_SERVER to that service. Never replace a fork with upstream OpenCode.`;
+  return `bb does not install "${appId}". Start it with \`${appId} serve --service\` or set OPENCODE_SERVER_URL to that service. Never replace a fork with upstream OpenCode.`;
 }
 
 export function replacePresentAppMessage(
   present: string,
   requested: string,
 ): string {
-  return `bb will not replace "${present}" with "${requested}". Start \`${present} serve --service\` or set BB_OPENCODE_APP=${present}.`;
+  return `bb will not replace "${present}" with "${requested}". Start \`${present} serve --service\` or set OPENCODE_APP=${present}.`;
 }
 
 export function startServiceMessage(appId: string): string {
@@ -164,7 +165,7 @@ function installBlockMessage(
   if (forkMessage !== null) return forkMessage;
   if (!shouldOfferInstall(health)) return null;
   const installApp = chosenOpenCodeAppId(env, health);
-  const requested = env.BB_OPENCODE_APP?.trim() ?? "";
+  const requested = env.OPENCODE_APP?.trim() ?? "";
   const present = presentOpenCodeAppId(health);
   if (
     present !== null &&
@@ -223,14 +224,56 @@ export async function getOpenCodeProviderHealth(
   );
 }
 
-export async function getOpenCodeProviderInstallationStatus(
-  deps: OpenCodeMaintenanceDeps = {},
+function isPathInside(parent: string, child: string): boolean {
+  const relativePath = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+  );
+}
+
+async function openCodeInstallSource(args: {
+  installed: boolean;
+  executablePath: string | null;
+  npmPackageName: string | null;
+  npmBin: string | null;
+  npmGlobalPackageVersion: string | null;
+  platform: NodeJS.Platform;
+  realpath: (filePath: string) => Promise<string>;
+}): Promise<ProviderInstallationSource> {
+  if (!args.installed) return "notInstalled";
+  if (
+    args.executablePath === null ||
+    args.npmPackageName === null ||
+    args.npmBin === null ||
+    args.npmGlobalPackageVersion === null ||
+    !isPathInside(args.npmBin, args.executablePath)
+  ) {
+    return "external";
+  }
+  if (args.platform === "win32") return "npmGlobal";
+  const packageDirectory = path.join(
+    path.dirname(args.npmBin),
+    "lib",
+    "node_modules",
+    args.npmPackageName,
+  );
+  const target = await args.realpath(args.executablePath).catch(() => null);
+  const realPackageDirectory = await args
+    .realpath(packageDirectory)
+    .catch(() => packageDirectory);
+  return target !== null && isPathInside(realPackageDirectory, target)
+    ? "npmGlobal"
+    : "external";
+}
+
+async function installationStatusFor(
+  deps: OpenCodeMaintenanceDeps,
+  health: OpenCodeDiscoveryHealth,
 ): Promise<ProviderInstallationStatus> {
   const env = envOf(deps);
   const platform = platformOf(deps);
-  const health = await readHealth(deps);
   const resolvePath = deps.resolveExecutablePath ?? resolveExecutablePath;
-  const latest = deps.npmLatestVersion ?? npmLatestVersion;
   const probeNpm = deps.probeNpmGlobalPackage ?? probeNpmGlobalPackage;
   const installApp = chosenOpenCodeAppId(env, health);
   const executableName = presentOpenCodeAppId(health) ?? installApp;
@@ -243,12 +286,10 @@ export async function getOpenCodeProviderInstallationStatus(
       ? openCodeInstallCommand(installApp, platform)
       : null;
   const npmPackageName = npmPackageForApp(executableName);
-  const [latestVersion, npmGlobal] = await Promise.all([
-    npmPackageName === null ? Promise.resolve(null) : latest(npmPackageName),
+  const npmGlobal =
     npmPackageName === null
-      ? Promise.resolve({ npmBin: null, npmGlobalPackageVersion: null })
-      : probeNpm(npmPackageName),
-  ]);
+      ? { npmBin: null, npmGlobalPackageVersion: null }
+      : await probeNpm(npmPackageName);
   const installed =
     executablePath !== null ||
     health.version !== null ||
@@ -260,13 +301,17 @@ export async function getOpenCodeProviderInstallationStatus(
     executableName,
     executablePath,
     installed,
-    installSource: npmGlobalInstallSource({
+    installSource: await openCodeInstallSource({
       installed,
       executablePath,
+      npmPackageName,
       npmBin: npmGlobal.npmBin,
+      npmGlobalPackageVersion: npmGlobal.npmGlobalPackageVersion,
+      platform,
+      realpath: deps.realpath ?? realpath,
     }),
     currentVersion: health.installedVersion ?? health.version,
-    latestVersion,
+    latestVersion: null,
     minimumSupportedVersion: minimumSupportedOpenCodeVersion(deps.requirement),
     npmPackageName,
     npmGlobalPackageVersion: npmGlobal.npmGlobalPackageVersion,
@@ -283,6 +328,12 @@ export async function getOpenCodeProviderInstallationStatus(
   };
 }
 
+export async function getOpenCodeProviderInstallationStatus(
+  deps: OpenCodeMaintenanceDeps = {},
+): Promise<ProviderInstallationStatus> {
+  return installationStatusFor(deps, await readHealth(deps));
+}
+
 export async function getOpenCodeProviderInstallationRun(
   action: "install" | "update",
   deps: OpenCodeMaintenanceDeps = {},
@@ -295,7 +346,7 @@ export async function getOpenCodeProviderInstallationRun(
     return { available: false, message: block };
   }
   const installApp = chosenOpenCodeAppId(env, health);
-  const status = await getOpenCodeProviderInstallationStatus(deps);
+  const status = await installationStatusFor(deps, health);
   if (status.installAction?.kind !== action) {
     return {
       available: false,

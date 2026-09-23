@@ -9,9 +9,9 @@ import { OPENCODE_SIGN_IN_HINT } from "./strings.js";
 export const OPENCODE_PROVIDER_ID = "opencode";
 
 export const OPENCODE_ENV_PASSTHROUGH = [
-  "BB_OPENCODE_SERVER",
-  "BB_OPENCODE_PASSWORD",
-  "BB_OPENCODE_APP",
+  "OPENCODE_SERVER_URL",
+  "OPENCODE_SERVER_PASSWORD",
+  "OPENCODE_APP",
 ] as const;
 
 export type OpenCodeProviderOptions = {

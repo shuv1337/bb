@@ -3,14 +3,17 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { experimental_nativeRootsResolveOutputSchema } from "@get-bb/plugin-sdk/host";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import {
+  createOpenCodeCommandCatalogStore,
   openCodeCommandCatalogDirectory,
   resolveOpenCodeNativeRoots,
 } from "./native-roots.js";
@@ -33,10 +36,9 @@ async function resolvedRoots(
     catalogSkills?: Parameters<
       typeof resolveOpenCodeNativeRoots
     >[0]["catalogSkills"];
-    catalogCommands?: Parameters<
+    commandCatalog?: Parameters<
       typeof resolveOpenCodeNativeRoots
-    >[0]["catalogCommands"];
-    commandCatalogDir?: string;
+    >[0]["commandCatalog"];
   } = {},
 ) {
   const answer = await resolveOpenCodeNativeRoots({
@@ -44,8 +46,7 @@ async function resolvedRoots(
     env,
     cwd: extra.cwd,
     catalogSkills: extra.catalogSkills ?? [],
-    catalogCommands: extra.catalogCommands,
-    commandCatalogDir: extra.commandCatalogDir,
+    commandCatalog: extra.commandCatalog,
     appId: extra.appId,
   });
   return experimental_nativeRootsResolveOutputSchema.parse(answer);
@@ -78,17 +79,17 @@ it("adds the upstream config skills directory by default", async () => {
   ]);
 });
 
-it("uses a discovered app id without BB_OPENCODE_APP", async () => {
+it("uses a discovered app id without OPENCODE_APP", async () => {
   const skills = await resolvedSkills({}, { appId: "shuvcode" });
   expect(skills.map((root) => root.path)).toEqual([
     join(homeDir, ".config", "shuvcode", "skills"),
   ]);
 });
 
-it("uses BB_OPENCODE_APP and XDG_CONFIG_HOME for the app root", async () => {
+it("uses OPENCODE_APP and XDG_CONFIG_HOME for the app root", async () => {
   const xdg = join(homeDir, "xdg");
   const skills = await resolvedSkills({
-    BB_OPENCODE_APP: "shuvcode",
+    OPENCODE_APP: "shuvcode",
     XDG_CONFIG_HOME: xdg,
   });
   expect(skills.map((root) => root.path)).toEqual([
@@ -181,7 +182,7 @@ it("keeps a configured .agents/skills path that is not a declared home or worksp
   ]);
 });
 
-it("falls back to filesystem command directories when the command catalog was not fetched", async () => {
+it("falls back to both user command spellings when the command catalog was not fetched", async () => {
   const cwd = join(homeDir, "proj");
   mkdirSync(cwd, { recursive: true });
   writeFileSync(join(cwd, ".git"), "gitdir: ignored");
@@ -194,13 +195,9 @@ it("falls back to filesystem command directories when the command catalog was no
     join(homeDir, ".config", "opencode", "command"),
     join(homeDir, "opencode-custom", "commands"),
     join(homeDir, "opencode-custom", "command"),
-    join(cwd, ".opencode", "command"),
   ]);
   expect(answer.commands.every((root) => root.shape === "commands")).toBe(true);
-  expect(answer.commands.at(-1)?.origin).toBe("project");
-  expect(
-    existsSync(openCodeCommandCatalogDirectory({ appId: "opencode", cwd })),
-  ).toBe(false);
+  expect(answer.commands.every((root) => root.origin === "user")).toBe(true);
 });
 
 it("does not apply OPENCODE_CONFIG_DIR command directories for a fork", async () => {
@@ -214,28 +211,49 @@ it("does not apply OPENCODE_CONFIG_DIR command directories for a fork", async ()
   expect(answer.commands.map((root) => root.path)).toEqual([
     join(homeDir, ".config", "shuvcode", "commands"),
     join(homeDir, ".config", "shuvcode", "command"),
-    join(cwd, ".opencode", "command"),
   ]);
 });
 
-it("prefers GET /api/command names over filesystem command directories", async () => {
+function catalogStore(dataDir: string) {
+  const warnings: string[] = [];
+  const store = createOpenCodeCommandCatalogStore({
+    dataDir,
+    warn: (message) => warnings.push(message),
+  });
+  return { store, warnings };
+}
+
+it("materializes GET /api/command names under the plugin data directory", async () => {
   const cwd = join(homeDir, "proj");
   mkdirSync(cwd, { recursive: true });
-  const catalogDir = join(homeDir, "command-catalog");
+  const dataDir = join(homeDir, "plugin-data");
+  const { store, warnings } = catalogStore(dataDir);
   const answer = await resolvedRoots(
     {},
     {
       cwd,
-      commandCatalogDir: catalogDir,
-      catalogCommands: [
-        { name: "team/review", description: 'Review "the" diff' },
-        { name: "init" },
-        { name: "../secret" },
-        { name: "a:b" },
-        { name: "team/review", description: "duplicate" },
-      ],
+      commandCatalog: {
+        store,
+        commands: [
+          { name: "team/review", description: 'Review "the" diff' },
+          { name: "init" },
+          { name: "../secret" },
+          { name: "a:b" },
+          { name: "team/review", description: "duplicate" },
+        ],
+      },
     },
   );
+  const catalogDir = openCodeCommandCatalogDirectory({
+    dataDir: realpathSync(dataDir),
+    appId: "opencode",
+    cwd,
+  });
+  expect(
+    catalogDir.startsWith(
+      join(realpathSync(dataDir), "opencode-command-catalog"),
+    ),
+  ).toBe(true);
   expect(answer.commands).toEqual([
     {
       path: catalogDir,
@@ -252,29 +270,285 @@ it("prefers GET /api/command names over filesystem command directories", async (
   expect(readFileSync(join(catalogDir, "init.md"), "utf8")).toBe("\n");
   expect(existsSync(join(homeDir, "secret.md"))).toBe(false);
   expect(existsSync(join(catalogDir, "a:b.md"))).toBe(false);
-  expect(answer.commands.some((root) => root.path.includes(".opencode"))).toBe(
-    false,
+  expect(warnings).toEqual([]);
+});
+
+it("skips rewriting an unchanged command catalog and rewrites a changed one", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const { store } = catalogStore(join(homeDir, "plugin-data"));
+  const first = await store.materialize({
+    appId: "opencode",
+    cwd,
+    commands: [{ name: "review", description: "Review" }],
+  });
+  if (first.status !== "ready") throw new Error("catalog was not written");
+  const marker = join(first.directory, "marker.txt");
+  writeFileSync(marker, "kept");
+  const unchanged = await store.materialize({
+    appId: "opencode",
+    cwd,
+    commands: [{ name: "review", description: "Review" }],
+  });
+  expect(unchanged).toEqual(first);
+  expect(existsSync(marker)).toBe(true);
+  const changed = await store.materialize({
+    appId: "opencode",
+    cwd,
+    commands: [{ name: "review", description: "Review again" }],
+  });
+  expect(changed).toEqual(first);
+  expect(existsSync(marker)).toBe(false);
+  expect(readFileSync(join(first.directory, "review.md"), "utf8")).toContain(
+    "Review again",
   );
 });
 
-it("drops a command catalog that cannot be written and an empty catalog", async () => {
-  const outside = "/bb-opencode-outside-tmp";
-  const refused = await resolvedRoots(
+it("rewrites an unchanged catalog whose directory was removed", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const { store } = catalogStore(join(homeDir, "plugin-data"));
+  const commands = [{ name: "review" }];
+  const first = await store.materialize({ appId: "opencode", cwd, commands });
+  if (first.status !== "ready") throw new Error("catalog was not written");
+  rmSync(first.directory, { recursive: true, force: true });
+  await store.materialize({ appId: "opencode", cwd, commands });
+  expect(existsSync(join(first.directory, "review.md"))).toBe(true);
+});
+
+it("refuses a catalog root that is a symlink out of the data directory and falls back to filesystem commands", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const dataDir = join(homeDir, "plugin-data");
+  mkdirSync(dataDir, { recursive: true });
+  const outside = join(homeDir, "outside");
+  const victim = join(outside, "opencode", "keep.md");
+  mkdirSync(join(outside, "opencode"), { recursive: true });
+  writeFileSync(victim, "keep");
+  const staleDir = join(
+    outside,
+    "opencode",
+    basename(
+      openCodeCommandCatalogDirectory({
+        dataDir: realpathSync(dataDir),
+        appId: "opencode",
+        cwd,
+      }),
+    ),
+  );
+  mkdirSync(staleDir, { recursive: true });
+  writeFileSync(join(staleDir, "old.md"), "old");
+  symlinkSync(outside, join(dataDir, "opencode-command-catalog"));
+  const { store, warnings } = catalogStore(dataDir);
+  const answer = await resolvedRoots(
     {},
     {
-      catalogCommands: [{ name: "review", description: "Review" }],
-      commandCatalogDir: outside,
+      cwd,
+      commandCatalog: { store, commands: [{ name: "review" }] },
     },
   );
-  expect(refused.commands).toEqual([]);
-  expect(existsSync(outside)).toBe(false);
-  const catalogDir = join(homeDir, "command-catalog");
-  mkdirSync(catalogDir, { recursive: true });
-  writeFileSync(join(catalogDir, "old.md"), "old");
+  expect(answer.commands.map((root) => root.path)).toEqual([
+    join(homeDir, ".config", "opencode", "commands"),
+    join(homeDir, ".config", "opencode", "command"),
+  ]);
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+  expect(readFileSync(join(staleDir, "old.md"), "utf8")).toBe("old");
+  expect(existsSync(join(staleDir, "review.md"))).toBe(false);
+  expect(warnings).toHaveLength(1);
+});
+
+it("keeps skills and falls back to filesystem commands when the catalog cannot be written", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const dataDir = join(homeDir, "plugin-data-is-a-file");
+  writeFileSync(dataDir, "not a directory");
+  const skillDir = join(homeDir, "extra", "team");
+  mkdirSync(skillDir, { recursive: true });
+  const skillFile = join(skillDir, "SKILL.md");
+  writeFileSync(skillFile, "---\nname: team\n---\n");
+  const { store, warnings } = catalogStore(dataDir);
+  const answer = await resolvedRoots(
+    {},
+    {
+      cwd,
+      catalogSkills: [{ id: "team", path: skillFile }],
+      commandCatalog: { store, commands: [{ name: "review" }] },
+    },
+  );
+  expect(answer.skills.map((root) => root.path)).toEqual([
+    join(homeDir, ".config", "opencode", "skills"),
+    skillFile,
+  ]);
+  expect(answer.commands.map((root) => root.path)).toEqual([
+    join(homeDir, ".config", "opencode", "commands"),
+    join(homeDir, ".config", "opencode", "command"),
+  ]);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain("OpenCode command catalog");
+});
+
+it("drops an empty command catalog and removes its directory", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const { store } = catalogStore(join(homeDir, "plugin-data"));
+  const first = await store.materialize({
+    appId: "opencode",
+    cwd,
+    commands: [{ name: "review" }],
+  });
+  if (first.status !== "ready") throw new Error("catalog was not written");
   const empty = await resolvedRoots(
     {},
-    { catalogCommands: [], commandCatalogDir: catalogDir },
+    { cwd, commandCatalog: { store, commands: [{ name: "../bad" }] } },
   );
   expect(empty.commands).toEqual([]);
-  expect(existsSync(catalogDir)).toBe(false);
+  expect(existsSync(first.directory)).toBe(false);
+});
+
+it("removes written catalogs on dispose", async () => {
+  const dataDir = join(homeDir, "plugin-data");
+  const { store } = catalogStore(dataDir);
+  const one = await store.materialize({
+    appId: "opencode",
+    cwd: join(homeDir, "one"),
+    commands: [{ name: "review" }],
+  });
+  const two = await store.materialize({
+    appId: "shuvcode",
+    cwd: join(homeDir, "two"),
+    commands: [{ name: "init" }],
+  });
+  if (one.status !== "ready" || two.status !== "ready") {
+    throw new Error("catalogs were not written");
+  }
+  const unrelated = join(dataDir, "unrelated.json");
+  writeFileSync(unrelated, "{}");
+  await store.dispose();
+  expect(existsSync(one.directory)).toBe(false);
+  expect(existsSync(two.directory)).toBe(false);
+  expect(existsSync(unrelated)).toBe(true);
+  expect(
+    await store.materialize({
+      appId: "opencode",
+      cwd: join(homeDir, "one"),
+      commands: [{ name: "review" }],
+    }),
+  ).toEqual({ status: "failed" });
+  expect(existsSync(one.directory)).toBe(false);
+});
+
+it("rewrites an unchanged catalog whose command file was removed", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const { store } = catalogStore(join(homeDir, "plugin-data"));
+  const commands = [{ name: "review" }, { name: "init" }];
+  const first = await store.materialize({ appId: "opencode", cwd, commands });
+  if (first.status !== "ready") throw new Error("catalog was not written");
+  rmSync(join(first.directory, "init.md"));
+  expect(await store.materialize({ appId: "opencode", cwd, commands })).toEqual(
+    first,
+  );
+  expect(existsSync(join(first.directory, "init.md"))).toBe(true);
+});
+
+function swapCatalogRootForSymlink(dataDir: string, cwd: string) {
+  const outside = join(homeDir, "outside");
+  mkdirSync(join(outside, "opencode"), { recursive: true });
+  const victim = join(
+    outside,
+    "opencode",
+    basename(
+      openCodeCommandCatalogDirectory({
+        dataDir: realpathSync(dataDir),
+        appId: "opencode",
+        cwd,
+      }),
+    ),
+  );
+  rmSync(join(dataDir, "opencode-command-catalog"), {
+    recursive: true,
+    force: true,
+  });
+  symlinkSync(outside, join(dataDir, "opencode-command-catalog"));
+  return victim;
+}
+
+it("does not return an unchanged catalog whose parent became a symlink out of the data directory", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const dataDir = join(homeDir, "plugin-data");
+  const { store, warnings } = catalogStore(dataDir);
+  const commands = [{ name: "review" }];
+  const first = await store.materialize({ appId: "opencode", cwd, commands });
+  if (first.status !== "ready") throw new Error("catalog was not written");
+  const victim = swapCatalogRootForSymlink(dataDir, cwd);
+  mkdirSync(victim, { recursive: true });
+  writeFileSync(join(victim, "review.md"), "outside");
+  expect(await store.materialize({ appId: "opencode", cwd, commands })).toEqual({
+    status: "failed",
+  });
+  expect(readFileSync(join(victim, "review.md"), "utf8")).toBe("outside");
+  expect(warnings).toHaveLength(1);
+});
+
+it("never unlinks a file outside the data directory through a symlinked catalog root", async () => {
+  const cwd = join(homeDir, "proj");
+  mkdirSync(cwd, { recursive: true });
+  const dataDir = join(homeDir, "plugin-data");
+  const { store: disposing } = catalogStore(dataDir);
+  const written = await disposing.materialize({
+    appId: "opencode",
+    cwd,
+    commands: [{ name: "review" }],
+  });
+  if (written.status !== "ready") throw new Error("catalog was not written");
+  const victim = swapCatalogRootForSymlink(dataDir, cwd);
+  writeFileSync(victim, "keep");
+  const { store, warnings } = catalogStore(dataDir);
+  expect(
+    await store.materialize({
+      appId: "opencode",
+      cwd,
+      commands: [{ name: "review" }],
+    }),
+  ).toEqual({ status: "failed" });
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+  expect(
+    await store.materialize({ appId: "opencode", cwd, commands: [] }),
+  ).toEqual({ status: "failed" });
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+  expect(warnings).toHaveLength(2);
+  const { store: emptyFirst } = catalogStore(dataDir);
+  expect(
+    await emptyFirst.materialize({ appId: "opencode", cwd, commands: [] }),
+  ).toEqual({ status: "failed" });
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+  await disposing.dispose();
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+});
+
+it("sweeps catalogs left by an earlier worker on first use", async () => {
+  const dataDir = join(homeDir, "plugin-data");
+  const orphan = join(dataDir, "opencode-command-catalog", "opencode", "0123");
+  mkdirSync(orphan, { recursive: true });
+  writeFileSync(join(orphan, "old.md"), "old");
+  const unrelated = join(dataDir, "unrelated.json");
+  writeFileSync(unrelated, "{}");
+  const { store, warnings } = catalogStore(dataDir);
+  const first = await store.materialize({
+    appId: "shuvcode",
+    cwd: join(homeDir, "one"),
+    commands: [{ name: "review" }],
+  });
+  if (first.status !== "ready") throw new Error("catalog was not written");
+  expect(existsSync(orphan)).toBe(false);
+  expect(existsSync(unrelated)).toBe(true);
+  const second = await store.materialize({
+    appId: "shuvcode",
+    cwd: join(homeDir, "two"),
+    commands: [{ name: "init" }],
+  });
+  if (second.status !== "ready") throw new Error("catalog was not written");
+  expect(existsSync(join(first.directory, "review.md"))).toBe(true);
+  expect(warnings).toEqual([]);
 });

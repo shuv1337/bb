@@ -23,8 +23,9 @@ Declared roots (`experimental_nativeSkillRoots` / `experimental_nativeCommandRoo
   `.agents/skills`, recursive.
 - `project` skills: `.opencode/skills`, `.claude/skills`, `.agents/skills`,
   recursive with ancestors.
-- `project` commands: `.opencode/commands` with ancestors. This root is
-  always scanned, whether or not the service is up.
+- `project` commands: `.opencode/commands` and `.opencode/command` with
+  ancestors, plural first. Upstream OpenCode reads both spellings. These
+  roots are always scanned, whether or not the service is up.
 
 Host `resolveNativeRoots` prefers the live catalog and falls back to the
 filesystem when that request did not succeed:
@@ -37,16 +38,21 @@ filesystem when that request did not succeed:
   are skipped. Nested catalog ids become skill-file fallback names.
 - Commands: `GET /api/command` at the workspace. The payload is
   `{ name, description? }` with no path, so each safe name is written as
-  markdown under a temporary catalog directory and that directory is the
-  commands root. Nested names keep `/` as directories. bb's scanner joins
-  those directories with `:`; `session.command` sends `/` again.
-- Command fallback, only when `GET /api/command` was not fetched:
-  `~/.config/<app>/commands`, legacy `command`, upstream
-  `OPENCODE_CONFIG_DIR` copies of both, and `.opencode/command` on
-  workspace ancestors.
+  markdown under `<plugin dataDir>/opencode-command-catalog/<app>/<cwd hash>`
+  and that directory is the commands root. Every path segment below the
+  data directory must be a plain directory, not a symlink, and the result
+  must `realpath` to itself. An unchanged catalog is not rewritten. The
+  host worker removes the directories it wrote when it is disposed, and
+  on first use removes catalogs left by a worker that crashed. Nested
+  names keep `/` as directories. bb's scanner joins those directories with
+  `:`; `session.command` sends `/` again.
+- Command fallback, when `GET /api/command` was not fetched or the catalog
+  could not be written: `~/.config/<app>/commands` and `command`, plus
+  upstream `OPENCODE_CONFIG_DIR` copies of both. A write failure never
+  drops skills.
 
 Discovery `health.appId` selects `<app>` (`opencode`, `shuvcode`, …), using
-`XDG_CONFIG_HOME` when set. `BB_OPENCODE_APP` is the fallback when discovery
+`XDG_CONFIG_HOME` when set. `OPENCODE_APP` is the fallback when discovery
 has none. `OPENCODE_CONFIG_DIR` is honored only for upstream `opencode`.
 
 bb cannot register extra skill roots on the session (`skills/configure` is
@@ -54,18 +60,25 @@ off). Only skills already in OpenCode's catalog can be activated.
 
 ## Environment
 
-`BB_OPENCODE_SERVER`, `BB_OPENCODE_PASSWORD`, and `BB_OPENCODE_APP` are
-passthrough so a value set on the host daemon reaches the bridge. Username
-for explicit URL auth is always `opencode`. A 401 is `unauthenticated`.
+`OPENCODE_SERVER_URL`, `OPENCODE_SERVER_PASSWORD`, and `OPENCODE_APP` are
+read from the host daemon's environment. They are declared passthrough so
+they reach the bridge, and they have no `BB_` prefix so they also survive the
+host worker's `BB_*` strip, which is where `resolveNativeRoots` runs.
+Username for explicit URL auth is always `opencode`. A 401 is
+`unauthenticated`.
 
 PATH `opencode` may be a symlink; app identity comes from `--version`
 (`shuvcode v2.0.8` → `shuvcode`). The installer runs only when no
 v2-capable binary and no registration exist. A discovered app (PATH branding
-or registration) is the install target; `BB_OPENCODE_APP` cannot replace a
+or registration) is the install target; `OPENCODE_APP` cannot replace a
 present binary. Default when nothing is present is upstream OpenCode via
-`https://opencode.ai/v2/install` (`@opencode/cli`). `BB_OPENCODE_APP=shuvcode`
-selects `npm install -g shuvcode`. Windows has no package-manager install;
-download the CLI from the v2 docs. bb never replaces a fork with upstream.
+`https://opencode.ai/v2/install` (`@opencode/cli`). `OPENCODE_APP=shuvcode`
+selects `npm install -g shuvcode` on every platform, Windows included.
+Upstream OpenCode has no Windows install plan; download the Windows CLI
+from the v2 docs. bb never replaces a fork with upstream. Install status
+reports `npmGlobal` only when npm lists the package globally and the binary
+on PATH resolves into that package; it does not query the npm registry for
+a latest version.
 
 ## Agents and variants
 

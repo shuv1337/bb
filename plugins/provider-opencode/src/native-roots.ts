@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
 import {
@@ -31,7 +38,10 @@ export const OPENCODE_NATIVE_ROOTS_DECLARATION: Pick<
     ],
   },
   experimental_nativeCommandRoots: {
-    project: [{ path: ".opencode/commands", ancestors: true }],
+    project: [
+      { path: ".opencode/commands", ancestors: true },
+      { path: ".opencode/command", ancestors: true },
+    ],
   },
   experimental_resolvesNativeRoots: true,
 };
@@ -49,14 +59,30 @@ export type OpenCodeCatalogCommand = {
   description?: string;
 };
 
+export type OpenCodeCommandCatalogResult =
+  | { status: "ready"; directory: string }
+  | { status: "empty" }
+  | { status: "failed" };
+
+export interface OpenCodeCommandCatalogStore {
+  materialize(args: {
+    appId: string;
+    cwd: string;
+    commands: readonly OpenCodeCatalogCommand[];
+  }): Promise<OpenCodeCommandCatalogResult>;
+  dispose(): Promise<void>;
+}
+
 export interface ResolveOpenCodeNativeRootsArgs {
   homeDir: string;
   env: Readonly<Record<string, string | undefined>>;
   cwd?: string | null;
   appId?: string;
   catalogSkills?: readonly OpenCodeCatalogSkill[];
-  catalogCommands?: readonly OpenCodeCatalogCommand[] | null;
-  commandCatalogDir?: string;
+  commandCatalog?: {
+    commands: readonly OpenCodeCatalogCommand[];
+    store: OpenCodeCommandCatalogStore;
+  } | null;
 }
 
 type ResolvedSkillRoot = NonNullable<
@@ -68,8 +94,10 @@ type ResolvedCommandRoot = NonNullable<
 >[number];
 
 const COMMAND_CATALOG_FILE_CAP = 256;
+const COMMAND_CATALOG_ROOT = "opencode-command-catalog";
 
 export function openCodeCommandCatalogDirectory(args: {
+  dataDir: string;
   appId: string;
   cwd: string;
 }): string {
@@ -80,17 +108,11 @@ export function openCodeCommandCatalogDirectory(args: {
     .update(path.resolve(args.cwd))
     .digest("hex")
     .slice(0, 16);
-  return path.join(tmpdir(), "bb-opencode-command-catalog", safe, digest);
-}
-
-function isUnderTemporaryDirectory(directory: string): boolean {
-  const root = path.resolve(tmpdir());
-  const resolved = path.resolve(directory);
-  const relativePath = path.relative(root, resolved);
-  return (
-    relativePath !== "" &&
-    !relativePath.startsWith("..") &&
-    !path.isAbsolute(relativePath)
+  return path.join(
+    path.resolve(args.dataDir),
+    COMMAND_CATALOG_ROOT,
+    safe,
+    digest,
   );
 }
 
@@ -129,19 +151,12 @@ function commandMarkdown(description: string | undefined): string {
   return `---\ndescription: "${escaped}"\n---\n`;
 }
 
-async function replaceCatalogCommandFiles(
-  directory: string,
+type CatalogFile = { segments: string[]; body: string };
+
+function catalogFiles(
   commands: readonly OpenCodeCatalogCommand[],
-): Promise<boolean> {
-  if (!isUnderTemporaryDirectory(directory)) {
-    console.warn(
-      `resolveNativeRoots: refused to materialize OpenCode commands outside the temporary directory (${directory})`,
-    );
-    return false;
-  }
-  const resolved = path.resolve(directory);
-  await rm(resolved, { recursive: true, force: true });
-  const files: { filePath: string; body: string }[] = [];
+): CatalogFile[] {
+  const files: CatalogFile[] = [];
   const seen = new Set<string>();
   for (const command of commands) {
     if (files.length >= COMMAND_CATALOG_FILE_CAP) break;
@@ -150,48 +165,264 @@ async function replaceCatalogCommandFiles(
     const key = segments.join("/");
     if (seen.has(key)) continue;
     seen.add(key);
-    files.push({
-      filePath: `${path.join(resolved, ...segments)}.md`,
-      body: commandMarkdown(command.description),
-    });
+    files.push({ segments, body: commandMarkdown(command.description) });
   }
-  if (files.length === 0) return false;
-  await mkdir(resolved, { recursive: true });
-  for (const file of files) {
-    await mkdir(path.dirname(file.filePath), { recursive: true });
-    await writeFile(file.filePath, file.body, "utf8");
+  return files;
+}
+
+function catalogHash(files: readonly CatalogFile[]): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(files.map((file) => [file.segments.join("/"), file.body])),
+    )
+    .digest("hex");
+}
+
+function isStrictlyInside(parent: string, child: string): boolean {
+  const relativePath = path.relative(parent, child);
+  return (
+    relativePath !== "" &&
+    !relativePath.startsWith("..") &&
+    !path.isAbsolute(relativePath)
+  );
+}
+
+function errorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return null;
+  }
+  return typeof error.code === "string" ? error.code : null;
+}
+
+async function lstatOrNull(target: string) {
+  return lstat(target).catch((error: unknown) => {
+    if (errorCode(error) === "ENOENT") return null;
+    throw error;
+  });
+}
+
+async function plainDirectoryChain(
+  realDataDir: string,
+  directory: string,
+  create: boolean,
+): Promise<boolean> {
+  if (!isStrictlyInside(realDataDir, directory)) {
+    throw new Error(
+      `OpenCode command catalog ${directory} is outside ${realDataDir}`,
+    );
+  }
+  let current = realDataDir;
+  for (const segment of path.relative(realDataDir, directory).split(path.sep)) {
+    current = path.join(current, segment);
+    const info = await lstatOrNull(current);
+    if (info === null) {
+      if (!create) return false;
+      await mkdir(current, { mode: 0o700 });
+      continue;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(
+        `OpenCode command catalog path ${current} is not a plain directory`,
+      );
+    }
+  }
+  const resolved = await realpath(directory);
+  if (resolved !== directory || !isStrictlyInside(realDataDir, resolved)) {
+    throw new Error(
+      `OpenCode command catalog ${directory} resolves to ${resolved}`,
+    );
   }
   return true;
 }
 
-async function filesystemCommandRoots(args: {
+async function removeCatalogEntry(
+  realDataDir: string,
+  directory: string,
+): Promise<void> {
+  if (!(await plainDirectoryChain(realDataDir, path.dirname(directory), false))) {
+    return;
+  }
+  const info = await lstatOrNull(directory);
+  if (info === null) return;
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    await rm(directory, { force: true });
+    return;
+  }
+  await plainDirectoryChain(realDataDir, directory, false);
+  await rm(directory, { recursive: true, force: true });
+}
+
+async function catalogIntact(
+  realDataDir: string,
+  directory: string,
+  files: readonly CatalogFile[],
+): Promise<boolean> {
+  try {
+    if (!(await plainDirectoryChain(realDataDir, directory, false))) {
+      return false;
+    }
+    for (const file of files) {
+      const info = await lstatOrNull(
+        `${path.join(directory, ...file.segments)}.md`,
+      );
+      if (info === null || !info.isFile()) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function createOpenCodeCommandCatalogStore(options: {
+  dataDir: string;
+  warn?: (message: string) => void;
+}): OpenCodeCommandCatalogStore {
+  const warn = options.warn ?? console.warn;
+  const written = new Map<string, string>();
+  let disposed = false;
+  let swept = false;
+
+  async function realDataDirectory(): Promise<string> {
+    const dataDir = path.resolve(options.dataDir);
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    return realpath(dataDir);
+  }
+
+  async function removeDirectory(
+    realDataDir: string,
+    directory: string,
+  ): Promise<void> {
+    written.delete(directory);
+    await removeCatalogEntry(realDataDir, directory);
+  }
+
+  async function sweepOrphans(realDataDir: string): Promise<void> {
+    if (swept) return;
+    const root = path.join(realDataDir, COMMAND_CATALOG_ROOT);
+    if (await plainDirectoryChain(realDataDir, root, false)) {
+      for (const app of await readdir(root, { withFileTypes: true })) {
+        const appDirectory = path.join(root, app.name);
+        if (!app.isDirectory()) {
+          await removeCatalogEntry(realDataDir, appDirectory);
+          continue;
+        }
+        if (!(await plainDirectoryChain(realDataDir, appDirectory, false))) {
+          continue;
+        }
+        for (const entry of await readdir(appDirectory)) {
+          const directory = path.join(appDirectory, entry);
+          if (!written.has(directory)) {
+            await removeCatalogEntry(realDataDir, directory);
+          }
+        }
+      }
+    }
+    swept = true;
+  }
+
+  let queue: Promise<unknown> = Promise.resolve();
+  function serialized<Result>(task: () => Promise<Result>): Promise<Result> {
+    const run = queue.then(task, task);
+    queue = run.catch(() => undefined);
+    return run;
+  }
+
+  async function materialize(args: {
+    appId: string;
+    cwd: string;
+    commands: readonly OpenCodeCatalogCommand[];
+  }): Promise<OpenCodeCommandCatalogResult> {
+    if (disposed) return { status: "failed" };
+    const files = catalogFiles(args.commands);
+    try {
+      const realDataDir = await realDataDirectory();
+      await sweepOrphans(realDataDir);
+      const directory = openCodeCommandCatalogDirectory({
+        dataDir: realDataDir,
+        appId: args.appId,
+        cwd: args.cwd,
+      });
+      if (files.length === 0) {
+        await removeDirectory(realDataDir, directory);
+        return { status: "empty" };
+      }
+      const hash = catalogHash(files);
+      if (
+        written.get(directory) === hash &&
+        (await catalogIntact(realDataDir, directory, files))
+      ) {
+        return { status: "ready", directory };
+      }
+      await removeDirectory(realDataDir, directory);
+      await plainDirectoryChain(realDataDir, directory, true);
+      for (const file of files) {
+        const filePath = `${path.join(directory, ...file.segments)}.md`;
+        await mkdir(path.dirname(filePath), { recursive: true });
+        await writeFile(filePath, file.body, "utf8");
+      }
+      written.set(directory, hash);
+      return { status: "ready", directory };
+    } catch (error) {
+      warn(
+        `resolveNativeRoots: could not materialize the OpenCode command catalog; using filesystem command roots (${error instanceof Error ? error.message : String(error)})`,
+      );
+      return { status: "failed" };
+    }
+  }
+
+  async function removeWritten(): Promise<void> {
+    if (written.size === 0) return;
+    let realDataDir: string;
+    try {
+      realDataDir = await realpath(path.resolve(options.dataDir));
+    } catch (error) {
+      warn(
+        `OpenCode command catalog cleanup failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+      return;
+    }
+    for (const directory of [...written.keys()]) {
+      try {
+        await removeDirectory(realDataDir, directory);
+      } catch (error) {
+        warn(
+          `OpenCode command catalog cleanup failed for ${directory} (${error instanceof Error ? error.message : String(error)})`,
+        );
+      }
+    }
+  }
+
+  return {
+    materialize: (args) => serialized(() => materialize(args)),
+    dispose: () => {
+      disposed = true;
+      return serialized(removeWritten);
+    },
+  };
+}
+
+function filesystemCommandRoots(args: {
   homeDir: string;
   env: Readonly<Record<string, string | undefined>>;
-  cwd: string | null | undefined;
   appId: string;
   appConfigDir: string;
-}): Promise<ResolvedCommandRoot[]> {
+}): ResolvedCommandRoot[] {
   const roots: ResolvedCommandRoot[] = [];
   const seen = new Set<string>();
-  const push = (rootPath: string, origin: "user" | "project") => {
+  const push = (rootPath: string) => {
     const resolved = path.resolve(rootPath);
     if (seen.has(resolved)) return;
     seen.add(resolved);
-    roots.push({ path: resolved, origin, shape: "commands" });
+    roots.push({ path: resolved, origin: "user", shape: "commands" });
   };
-  push(path.join(args.appConfigDir, "commands"), "user");
-  push(path.join(args.appConfigDir, "command"), "user");
+  push(path.join(args.appConfigDir, "commands"));
+  push(path.join(args.appConfigDir, "command"));
   if (args.appId === DEFAULT_OPENCODE_APP_ID) {
     const customDir = args.env.OPENCODE_CONFIG_DIR?.trim();
     if (customDir) {
       const base = resolveStoredPath(args.homeDir, customDir);
-      push(path.join(base, "commands"), "user");
-      push(path.join(base, "command"), "user");
-    }
-  }
-  if (args.cwd) {
-    for (const ancestor of await projectAncestorDirectories(args.cwd)) {
-      push(path.join(ancestor, ".opencode", "command"), "project");
+      push(path.join(base, "commands"));
+      push(path.join(base, "command"));
     }
   }
   return roots;
@@ -209,7 +440,7 @@ export function resolveOpenCodeAppId(
 ): string {
   const explicit = override?.trim();
   if (explicit) return explicit;
-  const preferred = env.BB_OPENCODE_APP?.trim();
+  const preferred = env.OPENCODE_APP?.trim();
   if (preferred) return preferred;
   return DEFAULT_OPENCODE_APP_ID;
 }
@@ -382,32 +613,25 @@ export async function resolveOpenCodeNativeRoots(
     seen.add(root.path);
     skills.push(root);
   }
-  const commands: ResolvedCommandRoot[] = [];
-  if (args.catalogCommands == null) {
-    commands.push(
-      ...(await filesystemCommandRoots({
-        homeDir: args.homeDir,
-        env: args.env,
-        cwd: args.cwd,
-        appId,
-        appConfigDir,
-      })),
-    );
-  } else {
-    const directory =
-      args.commandCatalogDir ??
-      openCodeCommandCatalogDirectory({
-        appId,
-        cwd: args.cwd ?? "",
-      });
-    if (await replaceCatalogCommandFiles(directory, args.catalogCommands)) {
-      commands.push({
-        path: path.resolve(directory),
-        origin: "user",
-        shape: "commands",
-      });
-    }
-  }
+  const catalog: OpenCodeCommandCatalogResult =
+    args.commandCatalog == null
+      ? { status: "failed" }
+      : await args.commandCatalog.store.materialize({
+          appId,
+          cwd: args.cwd ?? "",
+          commands: args.commandCatalog.commands,
+        });
+  const commands: ResolvedCommandRoot[] =
+    catalog.status === "ready"
+      ? [{ path: catalog.directory, origin: "user", shape: "commands" }]
+      : catalog.status === "empty"
+        ? []
+        : filesystemCommandRoots({
+            homeDir: args.homeDir,
+            env: args.env,
+            appId,
+            appConfigDir,
+          });
   const filtered = experimental_filterResolvedNativeRoots(
     { skills, commands },
     { warn: console.warn },

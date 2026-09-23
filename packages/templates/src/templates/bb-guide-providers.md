@@ -95,8 +95,8 @@ Native skills and slash commands prefer that service's `GET /api/skill` and
 agent with
 `bb plugin config provider-opencode set defaultAgent <name>` and a catalog
 variant with `bb plugin config provider-opencode set defaultVariant <id>`.
-Host env passthrough: `BB_OPENCODE_SERVER`, `BB_OPENCODE_PASSWORD`,
-`BB_OPENCODE_APP`.
+Host daemon env: `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_PASSWORD`,
+`OPENCODE_APP`.
 
 Known ACP agents can appear automatically when their CLI is installed on the
 host. For example, opencode, omp, Grok Build's grok CLI, or Hermes' hermes CLI

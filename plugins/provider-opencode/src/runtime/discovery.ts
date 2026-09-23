@@ -334,7 +334,7 @@ function isPlainAppName(value: string): boolean {
 }
 
 function requestedAppOf(deps: DiscoveryDeps): string | null {
-  const requested = deps.env.BB_OPENCODE_APP?.trim();
+  const requested = deps.env.OPENCODE_APP?.trim();
   return requested !== undefined && requested.length > 0 ? requested : null;
 }
 
@@ -580,9 +580,9 @@ export async function resolveAttachedRegistration(
   registration: LiveRegistration | null;
   explicit: boolean;
 }> {
-  const server = deps.env.BB_OPENCODE_SERVER?.trim();
+  const server = deps.env.OPENCODE_SERVER_URL?.trim();
   if (server !== undefined && server.length > 0) {
-    const password = deps.env.BB_OPENCODE_PASSWORD;
+    const password = deps.env.OPENCODE_SERVER_PASSWORD;
     const info = await probeInfo(server, password, deps.fetch);
     if (info.unauthenticated) {
       return {
@@ -608,7 +608,7 @@ export async function resolveAttachedRegistration(
         health: {
           status: "unknown",
           statusMessage: sanitizeErrorMessage(
-            "OpenCode server at BB_OPENCODE_SERVER did not answer /api/info",
+            "OpenCode server at OPENCODE_SERVER_URL did not answer /api/info",
           ),
           appId: null,
           version: null,
@@ -708,7 +708,7 @@ export async function resolveAttachedRegistration(
       registration: null,
       health: {
         status: "unknown",
-        statusMessage: `${remote.appId} is registered at a URL that is not on this host; set BB_OPENCODE_SERVER to attach to it`,
+        statusMessage: `${remote.appId} is registered at a URL that is not on this host; set OPENCODE_SERVER_URL to attach to it`,
         appId: remote.appId,
         version: remote.version ?? pathApp.installedVersion,
         installedVersion: pathApp.installedVersion,

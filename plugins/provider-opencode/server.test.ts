@@ -52,9 +52,9 @@ describe("the OpenCode plugin", () => {
     const { host, declaration } = registeredDeclaration();
     expect(declaration.env).toEqual({
       passthrough: [
-        "BB_OPENCODE_SERVER",
-        "BB_OPENCODE_PASSWORD",
-        "BB_OPENCODE_APP",
+        "OPENCODE_SERVER_URL",
+        "OPENCODE_SERVER_PASSWORD",
+        "OPENCODE_APP",
       ],
     });
     expect(host.harness.registrations.settingsDescriptors).toMatchObject({
@@ -80,7 +80,7 @@ describe("the OpenCode plugin", () => {
     ).toEqual([".opencode/skills", ".claude/skills", ".agents/skills"]);
     expect(
       rootPaths(declaration.experimental_nativeCommandRoots?.project),
-    ).toEqual([".opencode/commands"]);
+    ).toEqual([".opencode/commands", ".opencode/command"]);
     expect(declaration.experimental_resolvesNativeRoots).toBe(true);
   });
 });
