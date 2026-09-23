@@ -298,6 +298,10 @@ export function createFakeOpenCodeRuntime(
         assertOpen();
         calls.compacts += 1;
         await queueEvent({
+          type: "session.execution.started",
+          data: { sessionID: id },
+        });
+        await queueEvent({
           type: "session.compaction.started",
           data: { sessionID: id, reason: "manual" },
         });

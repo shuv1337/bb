@@ -14,15 +14,19 @@ import {
   type JsonValue,
   type ThreadDelta,
   type ThreadEventTokenUsageBreakdown,
-  USER_QUESTION_MAX_OPTIONS,
-  USER_QUESTION_MAX_QUESTIONS,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { PendingInteractionPayload } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  openCodeFormPage,
+  openCodeFormQuestionPayload,
+  parseOpenCodeFormFields,
+  type OpenCodeFormField,
+} from "./forms.js";
+import {
+  OPENCODE_AGENT_EXTENSION_KIND,
+  OPENCODE_MODEL_EXTENSION_KIND,
+} from "./extension-kinds.js";
 import type { OpenCodeNativeEvent, OpenCodeSessionMessage } from "./runtime/index.js";
-
-const OPENCODE_AGENT_KIND = "provider-opencode/agent";
-const OPENCODE_FORM_KIND = "provider-opencode/form";
-const OPENCODE_MODEL_KIND = "provider-opencode/model";
 
 const AGENT_MESSAGE_PRESENTATION: DeltaPresentation = {
   label: { pending: "Writing", completed: "Wrote" },
@@ -53,6 +57,7 @@ const IGNORED_EVENT_TYPES = new Set([
   "permission.replied",
   "form.replied",
   "session.step.streamed",
+  "session.step.ended",
   "session.tool.input.ended",
 ]);
 
@@ -136,6 +141,8 @@ interface ChildState {
 }
 
 interface NativeSessionState {
+  sessionID: string;
+  turnSerial: number;
   turnOpen: boolean;
   executionTurnId: string | undefined;
   lastCheckpointId: string | undefined;
@@ -149,8 +156,10 @@ interface NativeSessionState {
   compactionOpen: boolean;
 }
 
-function emptyNativeState(): NativeSessionState {
+function emptyNativeState(sessionID: string): NativeSessionState {
   return {
+    sessionID,
+    turnSerial: 0,
     turnOpen: false,
     executionTurnId: undefined,
     lastCheckpointId: undefined,
@@ -172,20 +181,28 @@ export interface OpenCodeTranslateContext {
   parentID?: string;
   cwd: string;
   modelContextWindow: number | null;
+  persistApprovals: boolean;
 }
 
-export interface OpenCodeInteraction {
-  requestID: string;
-  sessionID: string;
-  payload: PendingInteractionPayload;
-}
+export type OpenCodeInteraction =
+  | {
+      kind: "permission";
+      requestID: string;
+      sessionID: string;
+      payload: PendingInteractionPayload;
+    }
+  | {
+      kind: "form";
+      requestID: string;
+      sessionID: string;
+      fields: OpenCodeFormField[];
+      payload: PendingInteractionPayload;
+    };
 
 export interface OpenCodeTranslateResult {
   deltas: ThreadDelta[];
   interactions: OpenCodeInteraction[];
   gap: boolean;
-  checkpointId: string | undefined;
-  executionTurnId: string | undefined;
 }
 
 function keyFor(
@@ -299,7 +316,7 @@ function parseTokens(value: unknown): ThreadEventTokenUsageBreakdown | null {
   const cacheRead = asNumber(cache?.read) ?? 0;
   const cacheWrite = asNumber(cache?.write) ?? 0;
   return {
-    totalTokens: input + output + reasoning + cacheRead + cacheWrite,
+    totalTokens: input + output + cacheRead + cacheWrite,
     inputTokens: input,
     cachedInputTokens: cacheRead,
     cacheReadInputTokens: cacheRead,
@@ -346,107 +363,30 @@ function modelKey(data: Record<string, unknown>): string | undefined {
   return `${providerID}/${id}`;
 }
 
-interface FormField {
-  key: string;
-  title: string;
-  type: string;
-  required: boolean;
-  options?: { value: string; label: string }[];
-}
-
-function parseFormFields(fields: unknown): FormField[] | null {
-  if (!Array.isArray(fields)) {
-    return null;
-  }
-  const parsed: FormField[] = [];
-  for (const field of fields) {
-    const record = asRecord(field);
-    const key = asString(record?.key);
-    if (key === undefined) {
-      return null;
-    }
-    const type = asString(record?.type) ?? "string";
-    const title = asString(record?.title) ?? key;
-    const optionsRaw = record?.options;
-    let options: { value: string; label: string }[] | undefined;
-    if (Array.isArray(optionsRaw)) {
-      options = [];
-      for (const option of optionsRaw) {
-        const optionRecord = asRecord(option);
-        const value = asString(optionRecord?.value);
-        const label = asString(optionRecord?.label) ?? value;
-        if (value === undefined || label === undefined) {
-          return null;
-        }
-        options.push({ value, label });
-      }
-    }
-    parsed.push({
-      key,
-      title,
-      type,
-      required: record?.required === true,
-      options: options !== undefined && options.length > 0 ? options : undefined,
-    });
-  }
-  return parsed;
-}
-
-function formFitsUserQuestion(fields: FormField[]): boolean {
-  if (fields.length === 0 || fields.length > USER_QUESTION_MAX_QUESTIONS) {
-    return false;
-  }
-  return fields.every(
-    (field) =>
-      field.type === "string" &&
-      (field.options === undefined || field.options.length <= USER_QUESTION_MAX_OPTIONS),
-  );
-}
-
-function userQuestionPayload(fields: FormField[]): PendingInteractionPayload {
-  return {
-    kind: "user_question",
-    questions: fields.map((field) => ({
-      id: field.key,
-      prompt: field.title,
-      multiSelect: false,
-      allowFreeText: field.options === undefined,
-      ...(field.options !== undefined ? { options: field.options } : {}),
-    })),
-  };
-}
-
 function approvalPayload(args: {
   requestID: string;
   action: string;
   resources: string[];
   toolId: string | undefined;
+  persistApprovals: boolean;
 }): PendingInteractionPayload {
   const resource = args.resources[0] ?? args.action;
-  if (args.action === "read") {
-    return {
-      kind: "approval",
-      subject: {
-        kind: "file_change",
-        itemId: args.toolId ?? args.requestID,
-        writeScope: null,
-        sessionGrant: null,
-      },
-      reason: `OpenCode asked to ${args.action} ${resource}`,
-      availableDecisions: ["allow_once", "allow_for_session", "deny"],
-    };
-  }
+  const itemId = args.toolId ?? args.requestID;
+  const availableDecisions: ("allow_once" | "allow_for_session" | "deny")[] =
+    args.persistApprovals
+      ? ["allow_once", "allow_for_session", "deny"]
+      : ["allow_once", "deny"];
   if (args.action === "edit" || args.action === "write") {
     return {
       kind: "approval",
       subject: {
         kind: "file_change",
-        itemId: args.toolId ?? args.requestID,
+        itemId,
         writeScope: resource,
         sessionGrant: null,
       },
       reason: `OpenCode asked to ${args.action} ${resource}`,
-      availableDecisions: ["allow_once", "allow_for_session", "deny"],
+      availableDecisions,
     };
   }
   if (args.action === "shell" || args.action === "bash") {
@@ -454,26 +394,39 @@ function approvalPayload(args: {
       kind: "approval",
       subject: {
         kind: "command",
-        itemId: args.toolId ?? args.requestID,
+        itemId,
         command: resource,
         cwd: null,
         actions: [{ type: "unknown", command: resource }],
         sessionGrant: null,
       },
       reason: `OpenCode asked to run ${resource}`,
-      availableDecisions: ["allow_once", "allow_for_session", "deny"],
+      availableDecisions,
+    };
+  }
+  if (args.action === "read") {
+    return {
+      kind: "approval",
+      subject: {
+        kind: "tool_use",
+        itemId,
+        tool: args.action,
+        presentation: fileReadPresentation(resource),
+      },
+      reason: `OpenCode asked to read ${resource}`,
+      availableDecisions,
     };
   }
   return {
     kind: "approval",
     subject: {
       kind: "tool_use",
-      itemId: args.toolId ?? args.requestID,
+      itemId,
       tool: args.action,
       presentation: toolPresentation(args.action),
     },
     reason: `OpenCode asked for ${args.action}`,
-    availableDecisions: ["allow_once", "allow_for_session", "deny"],
+    availableDecisions,
   };
 }
 
@@ -485,6 +438,10 @@ function ensureTurnOpen(
     return [];
   }
   state.turnOpen = true;
+  if (state.executionTurnId === undefined) {
+    state.turnSerial += 1;
+    state.executionTurnId = `turn:${state.sessionID}:${state.turnSerial}`;
+  }
   return [
     {
       kind: "turn.open",
@@ -501,9 +458,12 @@ function closeTurn(
   status: "completed" | "interrupted" | "failed",
 ): ThreadDelta[] {
   if (!state.turnOpen) {
+    state.executionTurnId = undefined;
     return [];
   }
   state.turnOpen = false;
+  const providerTurnId = state.executionTurnId;
+  state.executionTurnId = undefined;
   return [
     {
       kind: "turn.boundary",
@@ -511,9 +471,7 @@ function closeTurn(
       ...(state.lastCheckpointId !== undefined
         ? { providerCheckpointId: state.lastCheckpointId }
         : {}),
-      ...(state.executionTurnId !== undefined
-        ? { providerTurnId: state.executionTurnId }
-        : {}),
+      ...(providerTurnId !== undefined ? { providerTurnId } : {}),
     },
   ];
 }
@@ -560,13 +518,17 @@ export function createOpenCodeDeltaTranslator() {
     if (existing !== undefined) {
       return existing;
     }
-    const created = emptyNativeState();
+    const created = emptyNativeState(sessionID);
     natives.set(sessionID, created);
     return created;
   }
 
   function reset(sessionID: string): void {
-    natives.set(sessionID, emptyNativeState());
+    natives.set(sessionID, emptyNativeState(sessionID));
+  }
+
+  function forget(sessionID: string): void {
+    natives.delete(sessionID);
   }
 
   function checkpoint(sessionID: string): string | undefined {
@@ -575,13 +537,6 @@ export function createOpenCodeDeltaTranslator() {
 
   function executionTurnId(sessionID: string): string | undefined {
     return natives.get(sessionID)?.executionTurnId;
-  }
-
-  function markTurnClosed(sessionID: string): void {
-    const state = natives.get(sessionID);
-    if (state !== undefined) {
-      state.turnOpen = false;
-    }
   }
 
   function reconcileAfterResync(
@@ -638,13 +593,7 @@ export function createOpenCodeDeltaTranslator() {
   ): OpenCodeTranslateResult {
     const parsed = nativeEventSchema.safeParse(raw);
     if (!parsed.success) {
-      return {
-        deltas: [],
-        interactions: [],
-        gap: false,
-        checkpointId: checkpoint(ctx.ownedSessionID),
-        executionTurnId: executionTurnId(ctx.ownedSessionID),
-      };
+      return { deltas: [], interactions: [], gap: false };
     }
     const event = parsed.data;
     const data = event.data ?? {};
@@ -664,13 +613,7 @@ export function createOpenCodeDeltaTranslator() {
       seqState.lastSeq = seq;
     }
     if (IGNORED_EVENT_TYPES.has(event.type)) {
-      return {
-        deltas: [],
-        interactions: [],
-        gap,
-        checkpointId: owner.lastCheckpointId,
-        executionTurnId: owner.executionTurnId,
-      };
+      return { deltas: [], interactions: [], gap };
     }
     const deltas: ThreadDelta[] = [];
     const interactions: OpenCodeInteraction[] = [];
@@ -716,7 +659,9 @@ export function createOpenCodeDeltaTranslator() {
           }
           break;
         }
-        native.executionTurnId = `exec:${eventSessionID}:${seq ?? 0}`;
+        if (!native.turnOpen) {
+          native.executionTurnId = `exec:${eventSessionID}:${seq ?? 0}`;
+        }
         deltas.push(...ensureTurnOpen(native, undefined));
         break;
       }
@@ -726,7 +671,6 @@ export function createOpenCodeDeltaTranslator() {
           break;
         }
         deltas.push(...closeTurn(native, "completed"));
-        native.executionTurnId = undefined;
         break;
       }
       case "session.execution.failed": {
@@ -735,7 +679,6 @@ export function createOpenCodeDeltaTranslator() {
           break;
         }
         deltas.push(...closeTurn(native, "failed"));
-        native.executionTurnId = undefined;
         break;
       }
       case "session.execution.interrupted": {
@@ -744,7 +687,6 @@ export function createOpenCodeDeltaTranslator() {
           break;
         }
         deltas.push(...closeTurn(native, "interrupted"));
-        native.executionTurnId = undefined;
         break;
       }
       case "session.step.started": {
@@ -758,7 +700,7 @@ export function createOpenCodeDeltaTranslator() {
           owner.agent = agent;
           deltas.push({
             kind: "extension.state",
-            extensionKind: OPENCODE_AGENT_KIND,
+            extensionKind: OPENCODE_AGENT_EXTENSION_KIND,
             payload: { agent },
           });
         }
@@ -766,7 +708,7 @@ export function createOpenCodeDeltaTranslator() {
           owner.modelKey = nextModel;
           deltas.push({
             kind: "extension.state",
-            extensionKind: OPENCODE_MODEL_KIND,
+            extensionKind: OPENCODE_MODEL_EXTENSION_KIND,
             payload: { model: nextModel },
           });
         }
@@ -826,7 +768,7 @@ export function createOpenCodeDeltaTranslator() {
         const classified = classifyTool(name, tool?.input, ctx.cwd);
         const resultText = toolResultText(data.content);
         if (tool?.opened !== true) {
-          deltas.push({
+          deltas.push(...ensureTurnOpen(isChild ? owner : native, parentRef), {
             kind: "item.open",
             key: keyFor(id, parentRef),
             item: classified.item,
@@ -881,6 +823,7 @@ export function createOpenCodeDeltaTranslator() {
           : [];
         const source = asRecord(data.source);
         interactions.push({
+          kind: "permission",
           requestID,
           sessionID: eventSessionID,
           payload: approvalPayload({
@@ -888,6 +831,7 @@ export function createOpenCodeDeltaTranslator() {
             action,
             resources,
             toolId: asString(source?.id),
+            persistApprovals: ctx.persistApprovals,
           }),
         });
         break;
@@ -992,48 +936,39 @@ export function createOpenCodeDeltaTranslator() {
       case "form.created": {
         const form = asRecord(data.form) ?? data;
         const formID = asString(form.id);
-        const title = asString(form.title) ?? "Question";
-        const fields = parseFormFields(form.fields);
+        const fields = parseOpenCodeFormFields(form.fields);
         if (formID === undefined || fields === null) {
           break;
         }
-        if (formFitsUserQuestion(fields)) {
-          interactions.push({
-            requestID: formID,
-            sessionID: eventSessionID,
-            payload: userQuestionPayload(fields),
-          });
-        } else {
-          interactions.push({
-            requestID: formID,
-            sessionID: eventSessionID,
-            payload: {
-              kind: OPENCODE_FORM_KIND,
-              title,
-              data: stripThoughtSignature(form) as JsonValue,
-            },
-          });
-        }
+        interactions.push({
+          kind: "form",
+          requestID: formID,
+          sessionID: eventSessionID,
+          fields,
+          payload: openCodeFormQuestionPayload(openCodeFormPage(fields, 0)),
+        });
         break;
       }
       case "session.compaction.started": {
         native.compactionOpen = true;
-        deltas.push(...ensureTurnOpen(native, parentRef), {
+        deltas.push(...ensureTurnOpen(isChild ? owner : native, parentRef), {
           kind: "item.open",
-          key: { providerItemId: "compaction" },
+          key: keyFor("compaction", parentRef),
           item: { type: "compaction" },
           presentation: COMPACTION_PRESENTATION,
+          ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
         });
         break;
       }
       case "session.compaction.delta": {
         if (!native.compactionOpen) {
           native.compactionOpen = true;
-          deltas.push({
+          deltas.push(...ensureTurnOpen(isChild ? owner : native, parentRef), {
             kind: "item.open",
-            key: { providerItemId: "compaction" },
+            key: keyFor("compaction", parentRef),
             item: { type: "compaction" },
             presentation: COMPACTION_PRESENTATION,
+            ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
           });
         }
         break;
@@ -1042,14 +977,18 @@ export function createOpenCodeDeltaTranslator() {
         if (native.compactionOpen) {
           deltas.push({
             kind: "item.close",
-            key: { providerItemId: "compaction" },
+            key: keyFor("compaction", parentRef),
             status: "completed",
             item: { type: "compaction" },
             presentation: COMPACTION_PRESENTATION,
+            ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
           });
           native.compactionOpen = false;
         }
-        deltas.push({ kind: "context.compacted" });
+        deltas.push({
+          kind: "context.compacted",
+          ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
+        });
         const tokens = parseTokens(data.tokens);
         if (tokens !== null) {
           const last = subtractUsage(tokens, native.usageTotal);
@@ -1059,9 +998,9 @@ export function createOpenCodeDeltaTranslator() {
             total: tokens,
             last,
             modelContextWindow: ctx.modelContextWindow,
+            ...(turnId() !== undefined ? { providerTurnId: turnId() } : {}),
           });
         }
-        deltas.push(...closeTurn(native, "completed"));
         break;
       }
       default: {
@@ -1079,21 +1018,15 @@ export function createOpenCodeDeltaTranslator() {
       }
     }
 
-    return {
-      deltas,
-      interactions,
-      gap,
-      checkpointId: owner.lastCheckpointId,
-      executionTurnId: owner.executionTurnId,
-    };
+    return { deltas, interactions, gap };
   }
 
   return {
     translate,
     reset,
+    forget,
     checkpoint,
     executionTurnId,
-    markTurnClosed,
     reconcileAfterResync,
   };
 }

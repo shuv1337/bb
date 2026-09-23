@@ -32,14 +32,19 @@ import {
   turnStartParamsSchema,
   turnSteerParamsSchema,
   type InitializeResult,
-  type JsonValue,
   type PendingInteractionPayload,
-  type PendingInteractionResolution,
   type ProviderBridgeContext,
   type ThreadDelta,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { toAvailableModels } from "../models.js";
 import { createOpenCodeDeltaTranslator } from "../delta-translation.js";
+import {
+  openCodeFormPage,
+  openCodeFormPageAnswer,
+  openCodeFormQuestionPayload,
+  type OpenCodeFormField,
+  type OpenCodeFormValue,
+} from "../forms.js";
 import {
   classifyOpenCodeTurn,
   knobsFromExecution,
@@ -121,48 +126,27 @@ export interface OpenCodeBridgeDeps {
 
 type OwnerRecord = { threadId: string; cwd: string };
 
-function isExtensionResolution(
-  resolution: PendingInteractionResolution,
-): resolution is { kind: "request_answer"; value: JsonValue } {
-  return "kind" in resolution && resolution.kind === "request_answer";
+interface PendingForm {
+  fields: OpenCodeFormField[];
+  offset: number;
+  answer: Record<string, OpenCodeFormValue>;
 }
 
-function formAnswerFromResolution(
-  resolution: PendingInteractionResolution,
-): Record<string, string | number | boolean | string[]> {
-  if (isUserQuestionPendingInteractionResolution(resolution)) {
-    const answer: Record<string, string | number | boolean | string[]> = {};
-    for (const [key, entry] of Object.entries(resolution.answers)) {
-      if (entry.freeText !== undefined && entry.selected.length === 0) {
-        answer[key] = entry.freeText;
-      } else if (entry.selected.length === 1 && entry.freeText === undefined) {
-        answer[key] = entry.selected[0] ?? "";
-      } else if (entry.selected.length > 1) {
-        answer[key] = [...entry.selected];
-      } else if (entry.freeText !== undefined) {
-        answer[key] = entry.freeText;
-      }
+type PendingInteraction =
+  | {
+      kind: "permission";
+      requestID: string;
+      persistApprovals: boolean;
+      handle: SessionHandle;
+      threadId: string;
     }
-    return answer;
-  }
-  if (
-    isExtensionResolution(resolution) &&
-    resolution.value !== null &&
-    typeof resolution.value === "object" &&
-    !Array.isArray(resolution.value)
-  ) {
-    return resolution.value as Record<string, string | number | boolean | string[]>;
-  }
-  throw new Error("OpenCode form answer does not match the requested fields");
-}
-
-interface PendingInteraction {
-  kind: "permission" | "form";
-  requestID: string;
-  persistApprovals: boolean;
-  handle: SessionHandle;
-  threadId: string;
-}
+  | {
+      kind: "form";
+      requestID: string;
+      form: PendingForm;
+      handle: SessionHandle;
+      threadId: string;
+    };
 
 interface ThreadSession {
   threadId: string;
@@ -484,20 +468,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
 
   function sendInteraction(args: {
     session: ThreadSession;
-    sessionID: string;
-    kind: "permission" | "form";
-    requestID: string;
+    pending: PendingInteraction;
     payload: PendingInteractionPayload;
   }): void {
     interactionSerial += 1;
     const id = `oc-int-${interactionSerial}`;
-    pendingInteractions.set(id, {
-      kind: args.kind,
-      requestID: args.requestID,
-      persistApprovals: args.session.persistApprovals,
-      handle: handleForEvent(args.session, args.sessionID),
-      threadId: args.session.threadId,
-    });
+    pendingInteractions.set(id, args.pending);
     send({
       jsonrpc: "2.0",
       id,
@@ -550,6 +526,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       parentID: wrapped.parentID,
       cwd: session.cwd,
       modelContextWindow: null,
+      persistApprovals: session.persistApprovals,
     });
     if (translated.gap) {
       const messages = await handleForEvent(session, wrapped.sessionID).context();
@@ -560,12 +537,26 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
     sendDeltas(session.threadId, translated.deltas);
     for (const interaction of translated.interactions) {
+      const handle = handleForEvent(session, interaction.sessionID);
       sendInteraction({
         session,
-        sessionID: interaction.sessionID,
-        kind: interaction.payload.kind === "approval" ? "permission" : "form",
-        requestID: interaction.requestID,
         payload: interaction.payload,
+        pending:
+          interaction.kind === "permission"
+            ? {
+                kind: "permission",
+                requestID: interaction.requestID,
+                persistApprovals: session.persistApprovals,
+                handle,
+                threadId: session.threadId,
+              }
+            : {
+                kind: "form",
+                requestID: interaction.requestID,
+                form: { fields: interaction.fields, offset: 0, answer: {} },
+                handle,
+                threadId: session.threadId,
+              },
       });
     }
     if (wrapped.sessionID !== session.handle.id) {
@@ -716,6 +707,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sessions.delete(session.threadId);
     sessionsByProviderId.delete(session.handle.id);
     await session.work.catch(() => undefined);
+    translator.forget(session.handle.id);
+    for (const childId of session.childHandles.keys()) {
+      translator.forget(childId);
+    }
   }
 
   function announce(id: string | number, threadId: string, providerThreadId: string): void {
@@ -945,8 +940,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           break;
         }
         if (request.method === "turn/steer") {
-          const liveTurn = translator.executionTurnId(session.handle.id);
-          if (!session.busy || liveTurn !== request.params.expectedTurnId) {
+          const liveTurn = liveTurnIdOf(session);
+          if (
+            !(session.busy || session.turnOpen) ||
+            liveTurn !== request.params.expectedTurnId
+          ) {
             throw new experimental_BridgeRecoveryError({
               code: BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN,
               message: "No active turn to steer",
@@ -1112,19 +1110,20 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       );
       return;
     }
-    if (
-      !isUserQuestionPendingInteractionResolution(resolution.data) &&
-      !isExtensionResolution(resolution.data)
-    ) {
+    if (!isUserQuestionPendingInteractionResolution(resolution.data)) {
       rejectInteraction(
         response.id,
         "OpenCode form interaction expected a form answer",
       );
       return;
     }
-    let answer: Record<string, string | number | boolean | string[]>;
+    const form = pending.form;
+    let pageAnswer: Record<string, OpenCodeFormValue>;
     try {
-      answer = formAnswerFromResolution(resolution.data);
+      pageAnswer = openCodeFormPageAnswer(
+        openCodeFormPage(form.fields, form.offset),
+        resolution.data.answers,
+      );
     } catch (error) {
       rejectInteraction(
         response.id,
@@ -1132,6 +1131,19 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           ? error.message
           : "OpenCode form answer does not match the requested fields",
       );
+      return;
+    }
+    const answer = { ...form.answer, ...pageAnswer };
+    const nextOffset = form.offset + openCodeFormPage(form.fields, form.offset).length;
+    const session = sessions.get(pending.threadId);
+    if (nextOffset < form.fields.length && session !== undefined) {
+      pendingInteractions.delete(id);
+      const nextForm = { fields: form.fields, offset: nextOffset, answer };
+      sendInteraction({
+        session,
+        payload: openCodeFormQuestionPayload(openCodeFormPage(form.fields, nextOffset)),
+        pending: { ...pending, form: nextForm },
+      });
       return;
     }
     deliverInteraction(pending, id, () =>

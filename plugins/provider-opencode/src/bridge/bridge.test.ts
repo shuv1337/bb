@@ -259,12 +259,23 @@ it("compaction runs and reaches a boundary", async () => {
   });
   await harness.rpc.flushWork();
   await harness.waitFor(
+    () => deltaKinds(threadId).includes("context.compacted"),
+    "compaction ended",
+  );
+  expect(deltaKinds(threadId)).not.toContain("turn.boundary");
+  await harness.fake.play({
+    type: "session.execution.succeeded",
+    data: { sessionID: sessionId },
+  });
+  await harness.waitFor(
     () => deltaKinds(threadId).includes("turn.boundary"),
     "compaction boundary",
   );
-  expect(deltaKinds(threadId)).toEqual(
-    expect.arrayContaining(["turn.open", "input.accepted", "turn.boundary", "context.compacted"]),
-  );
+  const kinds = deltaKinds(threadId);
+  expect(kinds.filter((kind) => kind === "turn.open")).toHaveLength(1);
+  expect(kinds.filter((kind) => kind === "turn.boundary")).toHaveLength(1);
+  expect(kinds.indexOf("context.compacted")).toBeLessThan(kinds.indexOf("turn.boundary"));
+  expect(kinds).toContain("input.accepted");
 });
 
 it("thread/fork returns a new session", async () => {
@@ -373,5 +384,116 @@ it("form reply reaches OpenCode", async () => {
   await harness.waitFor(() => harness.fake.calls.formReplies.length === 1, "form reply");
   expect(harness.fake.calls.formReplies).toEqual([
     { formID: "FORM_1", answer: { choice: "blue" } },
+  ]);
+});
+
+it("accepts a steer into a turn a child session opened before execution", async () => {
+  const threadId = "thr_child_steer";
+  const started = await harness.startThread(threadId);
+  expect(started.error).toBeUndefined();
+  const sessionId = providerThreadId(started);
+  const child = await harness.fake.createSession({
+    location: { directory: harness.workspaceDir },
+  });
+  await harness.fake.play({
+    type: "session.created",
+    data: { sessionID: child.id, parentID: sessionId, title: "helper" },
+  });
+  await harness.fake.play({
+    type: "session.execution.started",
+    data: { sessionID: sessionId },
+  });
+  await harness.waitFor(
+    () => deltaKinds(threadId).includes("turn.open"),
+    "child-opened turn",
+  );
+  const opens = harness
+    .deltasOf(threadId)
+    .filter((delta) => delta.kind === "turn.open" && delta.parentRef === undefined);
+  expect(opens).toHaveLength(1);
+  const open = opens[0];
+  if (open === undefined || typeof open.providerTurnId !== "string") {
+    throw new Error("child-opened turn has no provider turn id");
+  }
+  const response = await harness.request("creq_9abcdef234", "turn/steer", {
+    threadId,
+    providerThreadId: sessionId,
+    clientRequestId: "creq_9abcdef234",
+    expectedTurnId: open.providerTurnId,
+    input: [{ type: "text", text: "steer this", mentions: [] }],
+    options: {
+      permissionMode: "full",
+      permissionScope: "full",
+      approvalReviewer: null,
+      permissionEscalation: null,
+    },
+  });
+  expect(response.error).toBeUndefined();
+  expect(harness.fake.calls.prompts.map((prompt) => prompt.text)).toEqual(["steer this"]);
+});
+
+it("pages a form that does not fit one question and replies once", async () => {
+  const threadId = "thr_form_pages";
+  const started = await harness.startThread(threadId);
+  expect(started.error).toBeUndefined();
+  const sessionId = providerThreadId(started);
+  harness.fake.emit({
+    type: "form.created",
+    data: {
+      form: {
+        id: "FORM_2",
+        sessionID: sessionId,
+        title: "Setup",
+        fields: [
+          { key: "a", type: "string", required: true },
+          { key: "b", type: "number" },
+          { key: "c", type: "boolean" },
+          { key: "d", type: "string" },
+          { key: "e", type: "string", required: true },
+        ],
+      },
+    },
+  });
+  const requests = () =>
+    harness.rpc.messages.filter(
+      (message) => message.method === "interaction/request" && message.id !== undefined,
+    );
+  await harness.waitFor(() => requests().length === 1, "first form page");
+  const first = requests()[0];
+  if (first?.id === undefined) throw new Error("missing first form page");
+  harness.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: first.id,
+      result: {
+        kind: "user_answer",
+        answers: {
+          a: { selected: [], freeText: "alpha" },
+          b: { selected: [], freeText: "2.5" },
+          c: { selected: ["false"] },
+        },
+      },
+    }),
+  );
+  await harness.waitFor(() => requests().length === 2, "second form page");
+  expect(harness.fake.calls.formReplies).toEqual([]);
+  const second = requests()[1];
+  if (second?.id === undefined || !isRecord(second.params)) {
+    throw new Error("missing second form page");
+  }
+  expect(second.params.payload).toMatchObject({
+    kind: "user_question",
+    questions: [{ id: "e" }],
+  });
+  harness.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: second.id,
+      result: { kind: "user_answer", answers: { e: { selected: [], freeText: "echo" } } },
+    }),
+  );
+  await harness.waitFor(() => harness.fake.calls.formReplies.length === 1, "form reply");
+  expect(harness.fake.calls.formReplies).toEqual([
+    { formID: "FORM_2", answer: { a: "alpha", b: 2.5, c: false, e: "echo" } },
   ]);
 });

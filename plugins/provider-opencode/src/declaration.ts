@@ -2,6 +2,7 @@ import type {
   PluginProviderDeclaration,
   PluginProviderOptionsContext,
 } from "@get-bb/plugin-sdk";
+import { opencodeExtensionKinds } from "./extension-kinds.js";
 import { OPENCODE_NATIVE_ROOTS_DECLARATION } from "./native-roots.js";
 
 export const OPENCODE_PROVIDER_ID = "opencode";
@@ -78,5 +79,6 @@ export function opencodeProviderDeclaration(): PluginProviderDeclaration {
     ...OPENCODE_NATIVE_ROOTS_DECLARATION,
     composerActions: ["plan"],
     deriveProviderOptions: deriveOpenCodeProviderOptions,
+    extensionKinds: opencodeExtensionKinds,
   };
 }

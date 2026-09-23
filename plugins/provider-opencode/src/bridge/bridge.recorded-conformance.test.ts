@@ -241,6 +241,7 @@ function projectRecorded(
         eventSessionID,
         cwd,
         modelContextWindow: null,
+        persistApprovals: false,
         ...(parentID !== undefined ? { parentID } : {}),
       });
       const reconciled = translated.gap
