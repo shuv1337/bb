@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createOpenCodeRuntime } from "./index.js";
+import { startOpenCodeBridgeHarness } from "../bridge/test-support.js";
 import {
   OpenCodeUnauthenticatedError,
   OpenCodeUnknownCheckpointError,
@@ -888,6 +889,87 @@ describe("http runtime adapter", () => {
       ).toEqual([]);
     } finally {
       await runtime.close();
+    }
+  });
+
+  it("recovers bridge requests when the service starts after the first request", async () => {
+    const fixture = await startFixture();
+    let online = false;
+    const runtime = await createOpenCodeRuntime({
+      env: explicitEnv(fixture),
+      fetch: async (input, init) => {
+        if (!online) throw new Error("offline");
+        return fetch(input, init);
+      },
+    });
+    const bridge = await startOpenCodeBridgeHarness({
+      wrapRuntime: () => runtime,
+    });
+    try {
+      const offline = await bridge.request(101, "model/list", {
+        cwd: "/workspace",
+      });
+      expect(offline.error).toBeDefined();
+      online = true;
+      const recovered = await bridge.request(102, "model/list", {
+        cwd: "/workspace",
+      });
+      expect(recovered.error).toBeUndefined();
+      expect(recovered.result).toMatchObject({
+        models: [expect.objectContaining({ displayName: "Gemini" })],
+      });
+      expect((await bridge.startThread("late-service")).error).toBeUndefined();
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it("rediscovers a restarted service through the same bridge", async () => {
+    const previous = await startFixture();
+    const next = await startFixture({ password: "rotated-fixture-password" });
+    next.state.pid = 4343;
+    const root = await mkdtemp(join(tmpdir(), "oc-bridge-recovery-"));
+    const state = join(root, "state");
+    await mkdir(join(state, "opencode"), { recursive: true });
+    const registration = join(state, "opencode", "service.json");
+    await writeFile(
+      registration,
+      JSON.stringify({
+        url: previous.url,
+        pid: 4242,
+        password: previous.password,
+      }),
+    );
+    const runtime = await createOpenCodeRuntime({
+      env: { XDG_STATE_HOME: state },
+      homedir: root,
+      kill: (pid) => pid === 4242 || pid === 4343,
+      which: () => undefined,
+    });
+    const bridge = await startOpenCodeBridgeHarness({
+      wrapRuntime: () => runtime,
+    });
+    try {
+      expect(
+        (await bridge.request(101, "model/list", { cwd: "/workspace" })).error,
+      ).toBeUndefined();
+      previous.state.infoStatus = 503;
+      await writeFile(
+        registration,
+        JSON.stringify({ url: next.url, pid: 4343, password: next.password }),
+      );
+      const recovered = await bridge.request(102, "model/list", {
+        cwd: "/workspace",
+      });
+      expect(recovered.error).toBeUndefined();
+      expect(
+        next.requests.some((request) => request.url.startsWith("/api/model")),
+      ).toBe(true);
+      expect(
+        (await bridge.startThread("restarted-service")).error,
+      ).toBeUndefined();
+    } finally {
+      await bridge.teardown();
     }
   });
 

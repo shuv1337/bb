@@ -18,7 +18,7 @@ createFakeOpenCodeRuntime(options?: CreateFakeOpenCodeRuntimeOptions): OpenCodeR
 
 No auto-start. A runtime may be constructed while unhealthy. `health()` re-resolves and **reattaches** the HTTP client when a usable URL appears. `status: "ready"` is never returned without an attached client on a non-zero port. Session methods throw `OpenCodeRuntimeNotReadyError` until then.
 
-**Production gap.** The bridge never calls `health()` on its live runtime. `bridge.ts` builds the runtime once and keeps it for the bridge's lifetime; `provider/health` goes through provider-maintenance's `resolveAttachedRegistration`, and `host.ts` builds a short-lived runtime of its own. So the reattach and subscriber-moving behavior below runs only in tests today. A bridge started while the service is down keeps throwing `OpenCodeRuntimeNotReadyError`, and a service restart with a new pid or password makes the pump reconnect to the old URL with the old password, get a 401, and detach its sessions with `authRequired`. Both cases need a bridge restart until the bridge calls `health()` itself.
+The bridge keeps one runtime and calls its `health()` before model listing, thread creation/resume/fork/rename, turn dispatch, and interaction replies. Overlapping refreshes share one probe. `provider/health` also refreshes an existing runtime before reporting provider-maintenance health. A service that starts later or replaces its registration is discovered on the next such operation without restarting the bridge. Stop/discard and installation operations do not wait for discovery. Failed operations are not automatically replayed. Between requests the event pump reconnects to its current registration; if rejected credentials have already detached a session, resume it after the service is available again. `host.ts` builds a separate short-lived runtime for native roots.
 
 `health()` first re-probes the attached registration (`kill(pid, 0)` for scanned registrations, then `/api/info` with a matching pid). Only when that fails does it rescan the state roots and PATH. While the attached registration answers, `health()` returns the health cached from the last scan: a PATH change (`installedVersion`, `pathBinaryAppId`), a changed `OPENCODE_APP`, or a newly started service of the preferred app is not picked up until the attached service stops answering or the runtime is recreated.
 
@@ -212,7 +212,7 @@ How a subscription ends:
 | `health()` finds `unauthenticated` / `expired` | throws `OpenCodeUnauthenticatedError` |
 | `runtime.close()` | throws `OpenCodeRuntimeNotReadyError` |
 | Transient stream error or clean SSE end | does not end: `stream.error` once, then `resync`/`reconnect` after the next `server.connected` |
-| `health()` attaches a different registration | does not end: moves to the new pump, then `resync`/`reconnect` (tests only; the bridge never calls `health()` on its live runtime) |
+| `health()` attaches a different registration | does not end: moves to the new pump, then `resync`/`reconnect` |
 
 ### Bridge handling
 

@@ -33,6 +33,40 @@ afterEach(async () => {
   await harness.teardown();
 });
 
+it("shares overlapping attachment probes and retries after a failed probe", async () => {
+  let probes = 0;
+  let rejectProbe: (error: Error) => void = () => undefined;
+  const held = new Promise<never>((_resolve, reject) => {
+    rejectProbe = reject;
+  });
+  await useHarness({
+    wrapRuntime: (fake) => ({
+      ...fake,
+      health: async () => {
+        probes += 1;
+        if (probes === 1) return held;
+        return fake.health();
+      },
+    }),
+  });
+  const first = harness.request(101, "model/list", {
+    cwd: harness.workspaceDir,
+  });
+  const second = harness.request(102, "model/list", {
+    cwd: harness.workspaceDir,
+  });
+  await harness.waitFor(() => probes > 0, "attachment probe");
+  expect(probes).toBe(1);
+  rejectProbe(new Error("discovery unavailable"));
+  const failed = await Promise.all([first, second]);
+  expect(failed.every((response) => response.error !== undefined)).toBe(true);
+  const retry = await harness.request(103, "model/list", {
+    cwd: harness.workspaceDir,
+  });
+  expect(retry.error).toBeUndefined();
+  expect(probes).toBe(2);
+});
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

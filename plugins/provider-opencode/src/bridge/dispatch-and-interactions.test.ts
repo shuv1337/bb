@@ -892,6 +892,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
       const answer = { result: { decision: "allow_once", grantedPermissions: null } };
       tools.reply(id, answer);
       tools.reply(id, answer);
+      await waitFor(() => tools.permissionReplyAttempts.length === 1);
       expect(tools.permissionReplyAttempts).toEqual(["per_dup"]);
       release();
       await waitFor(() => tools.permissionReplies.length === 1);

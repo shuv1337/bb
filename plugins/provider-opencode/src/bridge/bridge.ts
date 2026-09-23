@@ -231,6 +231,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   const replyingInteractions = new Set<string>();
   const owners = new Map<string, OwnerRecord>();
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
+  let runtimeRefresh: Promise<void> | null = null;
   let ownersPath: string | null = null;
   let ownersWrite: Promise<void> = Promise.resolve();
   let interactionSerial = 0;
@@ -558,6 +559,18 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         : createOpenCodeRuntime();
     }
     return runtimePromise;
+  }
+
+  async function refreshRuntime(): Promise<void> {
+    if (runtimeRefresh === null) {
+      runtimeRefresh = (async () => {
+        const oc = await runtime();
+        await oc.health();
+      })().finally(() => {
+        runtimeRefresh = null;
+      });
+    }
+    await runtimeRefresh;
   }
 
   function enqueue(session: ThreadSession, work: () => Promise<void>): Promise<void> {
@@ -1190,6 +1203,20 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     request: OpenCodeCommand & { id: string | number },
   ): Promise<void> {
     switch (request.method) {
+      case "model/list":
+      case "thread/start":
+      case "thread/resume":
+      case "thread/fork":
+      case "thread/name/set":
+      case "turn/start":
+      case "turn/steer":
+        await refreshRuntime();
+        break;
+      case "provider/health":
+        if (runtimePromise !== null) await refreshRuntime();
+        break;
+    }
+    switch (request.method) {
       case "initialize": {
         const result: InitializeResult = {
           protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
@@ -1518,7 +1545,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sendReply: () => Promise<void>,
   ): void {
     replyingInteractions.add(id);
-    void sendReply()
+    void refreshRuntime()
+      .then(sendReply)
       .then(() => {
         replyingInteractions.delete(id);
         if (pendingInteractions.get(id) === pending) {
