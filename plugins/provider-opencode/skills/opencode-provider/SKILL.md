@@ -40,6 +40,13 @@ that resolves skills and commands keeps them:
   Wrong password → `unauthenticated`.
 - `OPENCODE_APP` — prefer this app id (`opencode`, `shuvcode`, …) among
   live registrations and as the install target when nothing is installed.
+  Unset, Install installs `shuvcode` (`npm install -g shuvcode`);
+  `OPENCODE_APP=opencode` installs upstream OpenCode v2. An installed app of
+  either kind is used as is and never replaced. A PATH OpenCode v1 is offered
+  the upstream v2 installer, not `shuvcode`.
+
+The provider is listed on every host, so the Install action is reachable
+where OpenCode is missing.
 
 Without `OPENCODE_SERVER_URL`, bb reads `service*.json` registrations under
 `$XDG_STATE_HOME` (default `~/.local/state`) and never starts a service. A

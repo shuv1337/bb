@@ -450,6 +450,16 @@ attaches to a live OpenCode v2 service on the host (upstream `opencode`,
 `shuvcode`, or another app) and talks HTTP. `acp-opencode` remains as
 **OpenCode (ACP)** for OpenCode 1.x and as an escape hatch.
 
+**OpenCode** is listed on every host, installed or not. On a host with
+neither app, its Install action runs `npm install -g shuvcode@latest` on every
+platform, Windows included. Set `OPENCODE_APP=opencode` to install upstream
+OpenCode v2 instead (`curl -fsSL https://opencode.ai/v2/install | bash`,
+which installs `@opencode/cli`; not available on Windows, so download the
+Windows CLI from the v2 docs). An existing install of either app is used as
+is: bb attaches to it and never replaces it with the other. A host whose only
+PATH binary is OpenCode v1 is offered the upstream v2 installer (or the
+Windows download message) unless `OPENCODE_APP=shuvcode` is set.
+
 Host environment (set on the daemon environment). The names carry no `BB_`
 prefix because the host worker that resolves skills and commands drops every
 `BB_*` variable it inherits:
@@ -459,12 +469,9 @@ prefix because the host worker that resolves skills and commands drops every
   `opencode`. A 401 is reported as `unauthenticated`.
 - `OPENCODE_APP` — prefer this app id among live registrations
   (`opencode`, `shuvcode`, …). When nothing is installed, it also selects
-  the install plan (`shuvcode` → `npm install -g shuvcode`, on every
-  platform; default is `curl -fsSL https://opencode.ai/v2/install | bash`,
-  which installs `@opencode/cli`). A discovered binary or registration wins
-  over this value; bb never replaces a fork with upstream. Upstream
-  OpenCode has no Windows install plan; download the Windows CLI from the
-  v2 docs.
+  what Install installs: unset or `shuvcode` → `npm install -g shuvcode`;
+  `opencode` → the upstream v2 install script. A discovered binary or
+  registration wins over this value; bb never replaces an installed app.
 
 Without `OPENCODE_SERVER_URL`, bb reads the `service*.json` registrations
 under `$XDG_STATE_HOME` (default `~/.local/state`) and never starts a

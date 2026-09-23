@@ -28,7 +28,6 @@ function readyHealth(providerId: string): ProviderHealth {
 }
 
 const INSTALLED_ONLY_PROVIDER_IDS = new Set([
-  "opencode",
   "acp-opencode",
   "acp-omp",
   "acp-grok",
@@ -65,6 +64,7 @@ describe("getProviderStates", () => {
         "codex",
         "claude-code",
         "pi",
+        "opencode",
         "acp-cursor",
       ]);
       expect(result.providers).toEqual(
@@ -178,6 +178,7 @@ describe("getProviderStates", () => {
         "codex",
         "claude-code",
         "pi",
+        "opencode",
         "acp-cursor",
         "acp-opencode",
       ]);
@@ -322,7 +323,7 @@ describe("getProviderStates", () => {
         INSTALLED_ONLY_PROVIDER_IDS.size,
       );
       expect(healthCwds.filter((cwd) => cwd !== undefined)).toEqual(
-        Array(4).fill(environment.path),
+        Array(5).fill(environment.path),
       );
     });
   });

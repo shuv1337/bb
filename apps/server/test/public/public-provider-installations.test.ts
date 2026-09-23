@@ -71,6 +71,26 @@ function registerInstallationProviders(
 }
 
 function installationStatus(providerId: string) {
+  if (providerId === "opencode") {
+    return {
+      executableName: "shuvcode",
+      executablePath: null,
+      installed: false,
+      installSource: "notInstalled" as const,
+      currentVersion: null,
+      latestVersion: null,
+      minimumSupportedVersion: "2.0.0",
+      npmPackageName: "shuvcode",
+      npmGlobalPackageVersion: null,
+      installAction: {
+        kind: "install" as const,
+        label: "Install" as const,
+        command: "npm install -g shuvcode@latest",
+      },
+      needsUpdate: false,
+      versionUnsupported: false,
+    };
+  }
   const executableName =
     providerId === "claude-code"
       ? "claude"
@@ -170,14 +190,17 @@ describe("public provider installation routes", () => {
         "codex",
         "claude-code",
         "pi",
+        "opencode",
         "acp-cursor",
       ]);
       expect(Object.values(body).map((status) => status.displayName)).toEqual([
         "Codex",
         "Claude Code",
         "Pi",
+        "OpenCode",
         "Cursor",
       ]);
+      expect(body.opencode?.installed).toBe(false);
       expect(
         responder.requests
           .filter((request) => request.command.type === "provider.health")
@@ -186,7 +209,7 @@ describe("public provider installation routes", () => {
               ? request.command.providerId
               : null,
           ),
-      ).toEqual(["opencode"]);
+      ).toEqual([]);
       expect(
         responder.requests
           .filter(
@@ -198,7 +221,7 @@ describe("public provider installation routes", () => {
               ? request.command.providerId
               : null,
           ),
-      ).toEqual(["codex", "claude-code", "pi", "acp-cursor"]);
+      ).toEqual(["codex", "claude-code", "pi", "opencode", "acp-cursor"]);
     });
   });
 
@@ -233,10 +256,11 @@ describe("public provider installation routes", () => {
 
       expect(response.status).toBe(200);
       const body = (await readJson(response)) as ProviderCliStatusResponse;
-      expect(Object.keys(body)).toEqual(["codex", "pi", "acp-cursor"]);
+      expect(Object.keys(body)).toEqual(["codex", "pi", "opencode", "acp-cursor"]);
       expect(Object.values(body).map((status) => status.displayName)).toEqual([
         "Codex",
         "Pi",
+        "OpenCode",
         "Cursor",
       ]);
       expect(warn).toHaveBeenCalledWith(

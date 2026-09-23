@@ -26,8 +26,9 @@ export const OPENCODE_NPM_PACKAGE = "@opencode/cli";
 export const SHUVCODE_NPM_PACKAGE = "shuvcode";
 export const OPENCODE_INSTALL_SCRIPT_URL = "https://opencode.ai/v2/install";
 export const KNOWN_OPENCODE_APPS = ["opencode", "shuvcode"] as const;
+export const OPENCODE_INSTALL_DEFAULT_APP_ID = "shuvcode";
 export const WINDOWS_OPENCODE_INSTALL_MESSAGE =
-  "OpenCode does not support Windows package managers. Download the Windows CLI from https://opencode.ai/v2/docs/";
+  "bb cannot install upstream OpenCode on Windows. Download the Windows CLI from https://opencode.ai/v2/docs/";
 
 export type KnownOpenCodeAppId = (typeof KNOWN_OPENCODE_APPS)[number];
 
@@ -76,12 +77,15 @@ export function presentOpenCodeAppId(
 
 export function chosenOpenCodeAppId(
   env: Readonly<Record<string, string | undefined>>,
-  health?: Pick<OpenCodeDiscoveryHealth, "appId" | "pathBinaryAppId">,
+  health?: Pick<OpenCodeDiscoveryHealth, "status" | "appId" | "pathBinaryAppId">,
 ): string {
   const requested = env.OPENCODE_APP?.trim() ?? "";
   const present = health === undefined ? null : presentOpenCodeAppId(health);
   if (present !== null) return present;
   if (requested.length > 0) return requested;
+  if (health === undefined || health.status === "not_installed") {
+    return OPENCODE_INSTALL_DEFAULT_APP_ID;
+  }
   return "opencode";
 }
 
@@ -94,6 +98,15 @@ export function replacePresentAppMessage(
   requested: string,
 ): string {
   return `bb will not replace "${present}" with "${requested}". Start \`${present} serve --service\` or set OPENCODE_APP=${present}.`;
+}
+
+export function windowsOpenCodeInstallMessage(
+  health: Pick<OpenCodeDiscoveryHealth, "status" | "appId" | "pathBinaryAppId">,
+): string {
+  return health.status === "not_installed" &&
+    presentOpenCodeAppId(health) === null
+    ? `${WINDOWS_OPENCODE_INSTALL_MESSAGE}, or unset OPENCODE_APP to install shuvcode with npm.`
+    : WINDOWS_OPENCODE_INSTALL_MESSAGE;
 }
 
 export function startServiceMessage(appId: string): string {
@@ -138,8 +151,21 @@ async function readHealth(
   return deps.health ? deps.health() : defaultHealth(deps);
 }
 
-function loginCommandFor(health: OpenCodeDiscoveryHealth): string {
-  return `${presentOpenCodeAppId(health) ?? "opencode"} auth login`;
+function loginCommandFor(
+  health: OpenCodeDiscoveryHealth,
+  env: Readonly<Record<string, string | undefined>>,
+): string {
+  return `${chosenOpenCodeAppId(env, health)} auth login`;
+}
+
+export function notInstalledOpenCodeMessage(
+  installApp: string,
+  command: ProviderInstallationCommand,
+): string {
+  const install = `No OpenCode v2 service or binary found. Install runs \`${command.displayCommand}\`.`;
+  return installApp === OPENCODE_INSTALL_DEFAULT_APP_ID
+    ? `${install} Set OPENCODE_APP=opencode to install upstream OpenCode v2 instead.`
+    : install;
 }
 
 function shouldOfferInstall(health: OpenCodeDiscoveryHealth): boolean {
@@ -178,7 +204,7 @@ function installBlockMessage(
     return unsupportedOpenCodeForkMessage(installApp);
   }
   if (installApp === "opencode" && platform === "win32") {
-    return WINDOWS_OPENCODE_INSTALL_MESSAGE;
+    return windowsOpenCodeInstallMessage(health);
   }
   if (openCodeInstallCommand(installApp, platform) === null) {
     return unsupportedOpenCodeForkMessage(installApp);
@@ -198,18 +224,22 @@ export function openCodeHealthResult(
       ? openCodeInstallCommand(installApp, platform)
       : null;
   const canInstall = installCommand !== null;
+  const installMessage =
+    installCommand !== null && health.status === "not_installed"
+      ? notInstalledOpenCodeMessage(installApp, installCommand)
+      : null;
   return {
     supported: true,
     health: {
       status: health.status,
-      statusMessage: block ?? health.statusMessage,
+      statusMessage: block ?? installMessage ?? health.statusMessage,
       accountEmail: null,
       planLabel: null,
       installedVersion: health.installedVersion ?? health.version,
       minimumSupportedVersion: OPENCODE_MINIMUM_SUPPORTED_VERSION,
       canInstall,
       canUpdate: false,
-      loginCommand: loginCommandFor(health),
+      loginCommand: loginCommandFor(health, env),
     },
   };
 }
@@ -276,10 +306,13 @@ async function installationStatusFor(
   const resolvePath = deps.resolveExecutablePath ?? resolveExecutablePath;
   const probeNpm = deps.probeNpmGlobalPackage ?? probeNpmGlobalPackage;
   const installApp = chosenOpenCodeAppId(env, health);
-  const executableName = presentOpenCodeAppId(health) ?? installApp;
+  const present = presentOpenCodeAppId(health);
+  const executableName = present ?? installApp;
   const executablePath =
     (await resolvePath(executableName)) ??
-    (executableName === "opencode" ? null : await resolvePath("opencode"));
+    (present === null || executableName === "opencode"
+      ? null
+      : await resolvePath("opencode"));
   const block = installBlockMessage(health, env, platform);
   const installCommand =
     block === null && shouldOfferInstall(health)
@@ -359,7 +392,7 @@ export async function getOpenCodeProviderInstallationRun(
       available: false,
       message:
         installApp === "opencode" && platform === "win32"
-          ? WINDOWS_OPENCODE_INSTALL_MESSAGE
+          ? windowsOpenCodeInstallMessage(health)
           : unsupportedOpenCodeForkMessage(installApp),
     };
   }

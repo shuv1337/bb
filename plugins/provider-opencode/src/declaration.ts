@@ -4,7 +4,11 @@ import type {
 } from "@get-bb/plugin-sdk";
 import { opencodeExtensionKinds } from "./extension-kinds.js";
 import { OPENCODE_NATIVE_ROOTS_DECLARATION } from "./native-roots.js";
-import { OPENCODE_SIGN_IN_HINT } from "./strings.js";
+import {
+  OPENCODE_EXPIRED_HINT,
+  OPENCODE_INSTALL_URL,
+  OPENCODE_SIGN_IN_HINT,
+} from "./strings.js";
 
 export const OPENCODE_PROVIDER_ID = "opencode";
 
@@ -47,12 +51,10 @@ export function opencodeProviderDeclaration(): PluginProviderDeclaration {
     id: OPENCODE_PROVIDER_ID,
     displayName: "OpenCode",
     icon: "./icons/opencode.svg",
-    experimental_visibility: "installed",
     strings: {
       signInHint: OPENCODE_SIGN_IN_HINT,
-      expiredHint:
-        "Your OpenCode session expired. Run `opencode auth login`, then reload.",
-      installUrl: "https://opencode.ai/v2/docs/",
+      expiredHint: OPENCODE_EXPIRED_HINT,
+      installUrl: OPENCODE_INSTALL_URL,
       planModeCopy: "OpenCode will switch to the plan agent.",
       iconTint: { light: "#2563EB", dark: "#2563EB" },
     },

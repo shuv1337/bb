@@ -10,6 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ProviderHealthResult } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  discoveryDepsFrom,
+  resolveAttachedRegistration,
+} from "../runtime/discovery.js";
 import type { OpenCodeDiscoveryHealth } from "../runtime/index.js";
 import {
   chosenOpenCodeAppId,
@@ -18,6 +22,8 @@ import {
   getOpenCodeProviderInstallationStatus,
   openCodeHealthResult,
   openCodeInstallCommand,
+  notInstalledOpenCodeMessage,
+  OPENCODE_INSTALL_DEFAULT_APP_ID,
   OPENCODE_INSTALL_SCRIPT_URL,
   OPENCODE_REWIND_MINIMUM_SUPPORTED_VERSION,
   SHUVCODE_NPM_PACKAGE,
@@ -25,6 +31,7 @@ import {
   presentOpenCodeAppId,
   replacePresentAppMessage,
   unsupportedOpenCodeForkMessage,
+  windowsOpenCodeInstallMessage,
 } from "./provider-maintenance.js";
 
 function health(
@@ -61,14 +68,35 @@ const emptyProbe = {
 };
 
 describe("chosen OpenCode install app", () => {
-  it("defaults to upstream when nothing is present", () => {
-    expect(chosenOpenCodeAppId({})).toBe("opencode");
-    expect(chosenOpenCodeAppId({ OPENCODE_APP: "shuvcode" })).toBe(
+  it("defaults to shuvcode when nothing is present and OPENCODE_APP is unset", () => {
+    expect(OPENCODE_INSTALL_DEFAULT_APP_ID).toBe("shuvcode");
+    expect(chosenOpenCodeAppId({})).toBe("shuvcode");
+    expect(chosenOpenCodeAppId({}, health())).toBe("shuvcode");
+    expect(chosenOpenCodeAppId({ OPENCODE_APP: "  " }, health())).toBe(
       "shuvcode",
     );
   });
 
-  it("prefers a discovered shuvcode binary over the upstream default", () => {
+  it("selects upstream OpenCode when OPENCODE_APP asks for it", () => {
+    expect(chosenOpenCodeAppId({ OPENCODE_APP: "opencode" })).toBe("opencode");
+    expect(chosenOpenCodeAppId({ OPENCODE_APP: "opencode" }, health())).toBe(
+      "opencode",
+    );
+  });
+
+  it("keeps a present upstream OpenCode instead of the shuvcode default", () => {
+    expect(
+      chosenOpenCodeAppId({}, health({ pathBinaryAppId: "opencode" })),
+    ).toBe("opencode");
+    expect(
+      chosenOpenCodeAppId(
+        {},
+        health({ appId: "opencode", status: "unknown" }),
+      ),
+    ).toBe("opencode");
+  });
+
+  it("prefers a discovered shuvcode binary over OPENCODE_APP", () => {
     expect(
       chosenOpenCodeAppId(
         {},
@@ -81,6 +109,19 @@ describe("chosen OpenCode install app", () => {
         health({ pathBinaryAppId: "shuvcode" }),
       ),
     ).toBe("shuvcode");
+  });
+
+  it("keeps the upstream default when an unsupported OpenCode v1 is on PATH", () => {
+    const v1 = health({
+      status: "unsupported_version",
+      statusMessage: "OpenCode v1 is not supported by this provider",
+      version: "1.9.0",
+    });
+    expect(presentOpenCodeAppId(v1)).toBeNull();
+    expect(chosenOpenCodeAppId({}, v1)).toBe("opencode");
+    expect(chosenOpenCodeAppId({ OPENCODE_APP: "shuvcode" }, v1)).toBe(
+      "shuvcode",
+    );
   });
 
   it("prefers a stale registration app id when PATH is empty", () => {
@@ -153,6 +194,66 @@ describe("openCodeHealthResult", () => {
     );
     expect(unauthenticated.status).toBe("unauthenticated");
     expect(unauthenticated.canInstall).toBe(false);
+    expect(unauthenticated.loginCommand).toBe("opencode auth login");
+  });
+
+  it("does not name shuvcode for an explicit URL server whose app is unknown", () => {
+    const ready = supportedHealth(
+      openCodeHealthResult(
+        health({
+          status: "ready",
+          statusMessage: null,
+          version: "2.0.8",
+          url: "http://127.0.0.1:4096",
+        }),
+        {},
+        "linux",
+      ),
+    );
+    expect(ready.loginCommand).toBe("opencode auth login");
+  });
+
+  it("names the login command of the app that is present or would be installed", () => {
+    const upstream = supportedHealth(
+      openCodeHealthResult(
+        health({
+          status: "ready",
+          statusMessage: null,
+          appId: "opencode",
+          version: "2.0.8",
+          pathBinaryAppId: "opencode",
+        }),
+        {},
+        "linux",
+      ),
+    );
+    expect(upstream.loginCommand).toBe("opencode auth login");
+    const missing = supportedHealth(openCodeHealthResult(health(), {}, "linux"));
+    expect(missing.loginCommand).toBe("shuvcode auth login");
+    const requested = supportedHealth(
+      openCodeHealthResult(health(), { OPENCODE_APP: "opencode" }, "linux"),
+    );
+    expect(requested.loginCommand).toBe("opencode auth login");
+  });
+
+  it("suggests the shuvcode install and the upstream override when nothing is installed", () => {
+    const missing = supportedHealth(openCodeHealthResult(health(), {}, "linux"));
+    expect(missing.statusMessage).toContain(
+      `\`npm install -g ${SHUVCODE_NPM_PACKAGE}@latest\``,
+    );
+    expect(missing.statusMessage).toContain(
+      "Set OPENCODE_APP=opencode to install upstream OpenCode v2 instead.",
+    );
+    const upstream = supportedHealth(
+      openCodeHealthResult(health(), { OPENCODE_APP: "opencode" }, "linux"),
+    );
+    expect(upstream.statusMessage).toContain(OPENCODE_INSTALL_SCRIPT_URL);
+    expect(upstream.statusMessage).not.toContain("OPENCODE_APP=opencode");
+    const command = openCodeInstallCommand("opencode", "linux");
+    if (command === null) throw new Error("expected an upstream install plan");
+    expect(upstream.statusMessage).toBe(
+      notInstalledOpenCodeMessage("opencode", command),
+    );
   });
 
   it("offers install only when nothing v2-capable is present", () => {
@@ -164,7 +265,7 @@ describe("openCodeHealthResult", () => {
         health({
           status: "unsupported_version",
           statusMessage: "OpenCode v1 is not supported by this provider",
-          pathBinaryAppId: "opencode",
+          version: "1.9.0",
         }),
         {},
         "linux",
@@ -223,9 +324,39 @@ describe("openCodeHealthResult", () => {
 });
 
 describe("OpenCode installation plans", () => {
-  it("returns a v2 upstream install plan when nothing is installed", async () => {
+  it("returns a shuvcode npm install plan when nothing is installed", async () => {
     const deps = {
       env: {},
+      platform: "linux" as const,
+      health: async () => health(),
+      ...emptyProbe,
+    };
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.installed).toBe(false);
+    expect(status.installSource).toBe("notInstalled");
+    expect(status.executableName).toBe("shuvcode");
+    expect(status.npmPackageName).toBe(SHUVCODE_NPM_PACKAGE);
+    expect(status.installAction).toEqual({
+      kind: "install",
+      label: "Install",
+      command: `npm install -g ${SHUVCODE_NPM_PACKAGE}@latest`,
+    });
+    expect(status.needsUpdate).toBe(false);
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.command).toMatch(/npm/);
+      expect(run.command.args).toEqual([
+        "install",
+        "-g",
+        `${SHUVCODE_NPM_PACKAGE}@latest`,
+      ]);
+    }
+  });
+
+  it("returns the v2 upstream install plan when OPENCODE_APP=opencode and nothing is installed", async () => {
+    const deps = {
+      env: { OPENCODE_APP: "opencode" },
       platform: "linux" as const,
       health: async () => health(),
       ...emptyProbe,
@@ -288,6 +419,92 @@ describe("OpenCode installation plans", () => {
     expect(run).toEqual({
       available: false,
       message: replacePresentAppMessage("shuvcode", "opencode"),
+    });
+  });
+
+  it("attaches to a present upstream OpenCode and never offers shuvcode over it", async () => {
+    const deps = {
+      env: {},
+      platform: "linux" as const,
+      health: async () =>
+        health({
+          status: "ready",
+          statusMessage: null,
+          version: "2.0.8",
+          appId: "opencode",
+          pathBinaryAppId: "opencode",
+        }),
+      resolveExecutablePath: async (command: string) =>
+        command === "opencode" ? "/usr/bin/opencode" : null,
+      probeNpmGlobalPackage: async () => ({
+        npmBin: null,
+        npmGlobalPackageVersion: null,
+      }),
+    };
+    const ready = supportedHealth(await getOpenCodeProviderHealth(deps));
+    expect(ready.status).toBe("ready");
+    expect(ready.canInstall).toBe(false);
+    expect(ready.installedVersion).toBe("2.0.8");
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.installed).toBe(true);
+    expect(status.executableName).toBe("opencode");
+    expect(status.executablePath).toBe("/usr/bin/opencode");
+    expect(status.currentVersion).toBe("2.0.8");
+    expect(status.installAction).toBeNull();
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(false);
+  });
+
+  it("offers the upstream installer, not shuvcode, for a present OpenCode v1", async () => {
+    const deps = {
+      env: {},
+      platform: "linux" as const,
+      health: async () =>
+        health({
+          status: "unsupported_version",
+          statusMessage: "OpenCode v1 is not supported by this provider",
+          version: "1.9.0",
+        }),
+      resolveExecutablePath: async (command: string) =>
+        command === "opencode" ? "/usr/bin/opencode" : null,
+      probeNpmGlobalPackage: async () => ({
+        npmBin: null,
+        npmGlobalPackageVersion: null,
+      }),
+    };
+    const v1 = supportedHealth(await getOpenCodeProviderHealth(deps));
+    expect(v1.loginCommand).toBe("opencode auth login");
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("opencode");
+    expect(status.executablePath).toBe("/usr/bin/opencode");
+    expect(status.installAction?.command).toContain(OPENCODE_INSTALL_SCRIPT_URL);
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.displayCommand).toContain(OPENCODE_INSTALL_SCRIPT_URL);
+      expect(run.command.args).not.toContain(`${SHUVCODE_NPM_PACKAGE}@latest`);
+    }
+  });
+
+  it("keeps the replacement guard for a present upstream app id when OPENCODE_APP asks for shuvcode", async () => {
+    const deps = {
+      env: { OPENCODE_APP: "shuvcode" },
+      platform: "linux" as const,
+      health: async () =>
+        health({
+          status: "unsupported_version",
+          version: "1.9.0",
+          appId: "opencode",
+          pathBinaryAppId: "opencode",
+        }),
+      ...emptyProbe,
+    };
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.installAction).toBeNull();
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run).toEqual({
+      available: false,
+      message: replacePresentAppMessage("opencode", "shuvcode"),
     });
   });
 
@@ -372,7 +589,7 @@ describe("OpenCode installation plans", () => {
     }
   });
 
-  it("returns an unsupported message instead of a shell installer on Windows", async () => {
+  it("returns the shuvcode npm plan on Windows by default", async () => {
     const deps = {
       env: {},
       platform: "win32" as const,
@@ -380,8 +597,58 @@ describe("OpenCode installation plans", () => {
       ...emptyProbe,
     };
     const windows = supportedHealth(await getOpenCodeProviderHealth(deps));
+    expect(windows.canInstall).toBe(true);
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("shuvcode");
+    expect(status.installAction?.kind).toBe("install");
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.command).toMatch(/npm/);
+      expect(run.command.args).toEqual(
+        expect.arrayContaining([`${SHUVCODE_NPM_PACKAGE}@latest`]),
+      );
+    }
+  });
+
+  it("returns an unsupported message instead of a shell installer when OPENCODE_APP=opencode on Windows", async () => {
+    const deps = {
+      env: { OPENCODE_APP: "opencode" },
+      platform: "win32" as const,
+      health: async () => health(),
+      ...emptyProbe,
+    };
+    const windows = supportedHealth(await getOpenCodeProviderHealth(deps));
     expect(windows.canInstall).toBe(false);
-    expect(windows.statusMessage).toBe(WINDOWS_OPENCODE_INSTALL_MESSAGE);
+    expect(windows.statusMessage).toBe(windowsOpenCodeInstallMessage(health()));
+    expect(windowsOpenCodeInstallMessage(health())).toContain(
+      WINDOWS_OPENCODE_INSTALL_MESSAGE,
+    );
+    expect(windowsOpenCodeInstallMessage(health())).toContain(
+      "unset OPENCODE_APP to install shuvcode",
+    );
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run).toEqual({
+      available: false,
+      message: windowsOpenCodeInstallMessage(health()),
+    });
+  });
+
+  it("does not suggest shuvcode on Windows when upstream OpenCode v1 is present", async () => {
+    const deps = {
+      env: {},
+      platform: "win32" as const,
+      health: async () =>
+        health({
+          status: "unsupported_version",
+          statusMessage: "OpenCode v1 is not supported by this provider",
+          version: "1.9.0",
+        }),
+      ...emptyProbe,
+    };
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("opencode");
+    expect(status.installAction).toBeNull();
     const run = await getOpenCodeProviderInstallationRun("install", deps);
     expect(run).toEqual({
       available: false,
@@ -417,6 +684,151 @@ describe("OpenCode installation plans", () => {
       }),
     });
     expect(run.available).toBe(false);
+  });
+});
+
+describe("OpenCode installation from real discovery", () => {
+  function discoveredHealth(args: {
+    env: NodeJS.ProcessEnv;
+    binaries: Partial<Record<"opencode" | "shuvcode", string>>;
+    versions: Partial<Record<string, { stdout: string; status: number }>>;
+  }): () => Promise<OpenCodeDiscoveryHealth> {
+    return async () => {
+      const attached = await resolveAttachedRegistration(
+        discoveryDepsFrom({
+          env: args.env,
+          homedir: join(tmpdir(), "bb-opencode-maintenance-home"),
+          readdir: async () => [],
+          isDirectory: async () => false,
+          kill: () => false,
+          which: (command) =>
+            command === "opencode" || command === "shuvcode"
+              ? args.binaries[command]
+              : undefined,
+          execVersion: async (binary) =>
+            args.versions[binary] ?? { stdout: "", status: 1 },
+        }),
+      );
+      return attached.health;
+    };
+  }
+
+  const opencodeOnPath = (resolved: string) => async (command: string) =>
+    command === "opencode" ? resolved : null;
+
+  it("offers the upstream installer for an OpenCode v1 binary on linux", async () => {
+    const deps = {
+      env: {},
+      platform: "linux" as const,
+      health: discoveredHealth({
+        env: {},
+        binaries: { opencode: "/usr/bin/opencode" },
+        versions: { "/usr/bin/opencode": { stdout: "1.18.31\n", status: 0 } },
+      }),
+      resolveExecutablePath: opencodeOnPath("/usr/bin/opencode"),
+      probeNpmGlobalPackage: emptyProbe.probeNpmGlobalPackage,
+    };
+    const discovered = await deps.health();
+    expect(discovered.status).toBe("unsupported_version");
+    expect(discovered.appId).toBeNull();
+    expect(discovered.pathBinaryAppId).toBeNull();
+    const v1 = supportedHealth(await getOpenCodeProviderHealth(deps));
+    expect(v1.canInstall).toBe(true);
+    expect(v1.loginCommand).toBe("opencode auth login");
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("opencode");
+    expect(status.executablePath).toBe("/usr/bin/opencode");
+    expect(status.npmPackageName).not.toBe(SHUVCODE_NPM_PACKAGE);
+    expect(status.installAction?.command).toContain(OPENCODE_INSTALL_SCRIPT_URL);
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.displayCommand).toContain(OPENCODE_INSTALL_SCRIPT_URL);
+      expect(run.command.args).not.toContain(`${SHUVCODE_NPM_PACKAGE}@latest`);
+    }
+  });
+
+  it("returns the upstream Windows message, not shuvcode, for an OpenCode v1 binary on Windows", async () => {
+    const deps = {
+      env: {},
+      platform: "win32" as const,
+      health: discoveredHealth({
+        env: {},
+        binaries: { opencode: "C:/tools/opencode.exe" },
+        versions: {
+          "C:/tools/opencode.exe": { stdout: "opencode 1.9.0", status: 0 },
+        },
+      }),
+      resolveExecutablePath: opencodeOnPath("C:/tools/opencode.exe"),
+      probeNpmGlobalPackage: emptyProbe.probeNpmGlobalPackage,
+    };
+    const v1 = supportedHealth(await getOpenCodeProviderHealth(deps));
+    expect(v1.canInstall).toBe(false);
+    expect(v1.statusMessage).toBe(WINDOWS_OPENCODE_INSTALL_MESSAGE);
+    expect(v1.loginCommand).toBe("opencode auth login");
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("opencode");
+    expect(status.installAction).toBeNull();
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run).toEqual({
+      available: false,
+      message: WINDOWS_OPENCODE_INSTALL_MESSAGE,
+    });
+  });
+
+  it("installs the requested shuvcode alongside an OpenCode v1 binary when OPENCODE_APP asks", async () => {
+    const env = { OPENCODE_APP: "shuvcode" };
+    const deps = {
+      env,
+      platform: "linux" as const,
+      health: discoveredHealth({
+        env,
+        binaries: { opencode: "/usr/bin/opencode" },
+        versions: { "/usr/bin/opencode": { stdout: "1.9.0", status: 0 } },
+      }),
+      resolveExecutablePath: opencodeOnPath("/usr/bin/opencode"),
+      probeNpmGlobalPackage: emptyProbe.probeNpmGlobalPackage,
+    };
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("shuvcode");
+    expect(status.executablePath).toBeNull();
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.args).toEqual(
+        expect.arrayContaining([`${SHUVCODE_NPM_PACKAGE}@latest`]),
+      );
+    }
+  });
+
+  it("reports a coherent shuvcode install when an opencode binary fails its version probe", async () => {
+    const deps = {
+      env: {},
+      platform: "linux" as const,
+      health: discoveredHealth({
+        env: {},
+        binaries: { opencode: "/usr/bin/opencode" },
+        versions: { "/usr/bin/opencode": { stdout: "", status: 1 } },
+      }),
+      resolveExecutablePath: opencodeOnPath("/usr/bin/opencode"),
+      probeNpmGlobalPackage: emptyProbe.probeNpmGlobalPackage,
+    };
+    const discovered = await deps.health();
+    expect(discovered.status).toBe("not_installed");
+    const status = await getOpenCodeProviderInstallationStatus(deps);
+    expect(status.executableName).toBe("shuvcode");
+    expect(status.executablePath).toBeNull();
+    expect(status.installed).toBe(false);
+    expect(status.installSource).toBe("notInstalled");
+    expect(status.npmPackageName).toBe(SHUVCODE_NPM_PACKAGE);
+    expect(status.installAction?.command).toContain(SHUVCODE_NPM_PACKAGE);
+    const run = await getOpenCodeProviderInstallationRun("install", deps);
+    expect(run.available).toBe(true);
+    if (run.available) {
+      expect(run.command.args).toEqual(
+        expect.arrayContaining([`${SHUVCODE_NPM_PACKAGE}@latest`]),
+      );
+    }
   });
 });
 

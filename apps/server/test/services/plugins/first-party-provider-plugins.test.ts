@@ -55,7 +55,7 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     fork: "checkpoint",
     supportsManualCompaction: true,
     supportsUsage: false,
-    visibility: "installed",
+    visibility: "always",
     hasLogo: true,
   },
   {

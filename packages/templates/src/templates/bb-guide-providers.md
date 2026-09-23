@@ -90,6 +90,10 @@ Claude process before its next turn and keeps the conversation.
 
 The native OpenCode provider (`opencode`) attaches to a live OpenCode v2
 service on the host. OpenCode (ACP) remains `acp-opencode` for v1 binaries.
+OpenCode is listed on every host. Where neither app is installed, Install
+installs `shuvcode` (`npm install -g shuvcode`); set `OPENCODE_APP=opencode`
+on the host daemon to install upstream OpenCode v2 instead. An existing
+`opencode` or `shuvcode` install is used as is.
 Native skills and slash commands prefer that service's `GET /api/skill` and
 `GET /api/command` catalogs; OpenCode (ACP) does not. Project
 `.opencode/commands` and `.opencode/command` are always scanned. Set the

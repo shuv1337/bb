@@ -15,6 +15,9 @@ What lives here:
   an install plan the daemon runs. Auto-start is off. `Service.ensure` is
   never called.
 
+The provider is always visible, so hosts without OpenCode still show its
+Install action.
+
 ## Skills and commands
 
 Declared roots (`experimental_nativeSkillRoots` / `experimental_nativeCommandRoots`):
@@ -82,11 +85,17 @@ PATH `opencode` may be a symlink; app identity comes from `--version`
 (`shuvcode v2.0.8` → `shuvcode`). The installer runs only when no
 v2-capable binary and no registration exist. A discovered app (PATH branding
 or registration) is the install target; `OPENCODE_APP` cannot replace a
-present binary. Default when nothing is present is upstream OpenCode via
-`https://opencode.ai/v2/install` (`@opencode/cli`). `OPENCODE_APP=shuvcode`
-selects `npm install -g shuvcode` on every platform, Windows included.
-Upstream OpenCode has no Windows install plan; download the Windows CLI
-from the v2 docs. bb never replaces a fork with upstream. Install status
+present binary. Default when nothing is present and `OPENCODE_APP` is unset
+is `npm install -g shuvcode` (`OPENCODE_INSTALL_DEFAULT_APP_ID`), on every
+platform, Windows included. `OPENCODE_APP=opencode` selects upstream
+OpenCode v2 via `https://opencode.ai/v2/install` (`@opencode/cli`). Upstream
+OpenCode has no Windows install plan; download the Windows CLI from the v2
+docs. bb never replaces an installed `opencode` with `shuvcode`, or a fork
+with upstream. A host whose only PATH binary is OpenCode v1 keeps the upstream
+v2 installer (or the Windows download message) unless `OPENCODE_APP` asks for
+`shuvcode`. A PATH binary whose `--version` probe fails counts as not
+installed, so Install adds `shuvcode` next to it. The install default does not change discovery, native roots
+or the command-catalog app id, which still default to `opencode`. Install status
 reports `npmGlobal` only when npm lists the package globally and the binary
 on PATH resolves into that package; it does not query the npm registry for
 a latest version.

@@ -24,11 +24,18 @@ function rootPaths(
 }
 
 describe("the OpenCode plugin", () => {
-  it("registers the native provider with installed visibility and workspace models", () => {
+  it("registers the native provider as always visible with workspace models", () => {
     const { declaration } = registeredDeclaration();
     expect(declaration.id).toBe("opencode");
     expect(declaration.displayName).toBe("OpenCode");
-    expect(declaration.experimental_visibility).toBe("installed");
+    expect(declaration.experimental_visibility ?? "always").toBe("always");
+    expect(declaration.strings?.installUrl).toBe(
+      "https://www.npmjs.com/package/shuvcode",
+    );
+    expect(declaration.strings?.signInHint).toContain("shuvcode auth login");
+    expect(declaration.strings?.signInHint).toContain("opencode auth login");
+    expect(declaration.strings?.expiredHint).toContain("shuvcode auth login");
+    expect(declaration.strings?.expiredHint).toContain("opencode auth login");
     expect(declaration.models).toEqual({ scope: "workspace" });
     expect(declaration.family).toBeUndefined();
     expect(declaration.maintenance).toEqual({

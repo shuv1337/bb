@@ -370,7 +370,7 @@ describe("resolveSystemExecutionOptions", () => {
         responder.requests.filter(
           (request) => request.command.type === "provider.health",
         ),
-      ).toHaveLength(5);
+      ).toHaveLength(4);
       const modelRequest = responder.requests.find(
         (request) => request.command.type === "provider.list_models",
       );
@@ -610,6 +610,7 @@ describe("resolveSystemExecutionOptions", () => {
         "codex",
         "claude-code",
         "pi",
+        "opencode",
         "acp-cursor",
       ]);
       expect(response.modelLoadError).toEqual({
@@ -738,6 +739,7 @@ describe("resolveSystemExecutionOptions", () => {
           expect(response.providers).toEqual(
             expect.arrayContaining([
               expect.objectContaining({ id: "codex" }),
+              expect.objectContaining({ id: "opencode" }),
               expect.objectContaining({ id: "acp-example-agent" }),
             ]),
           );
@@ -750,7 +752,7 @@ describe("resolveSystemExecutionOptions", () => {
             responder.requests.filter(
               (request) => request.command.type === "provider.health",
             ),
-          ).toHaveLength(failStatusRequest ? 0 : 5);
+          ).toHaveLength(failStatusRequest ? 0 : 4);
           expect(
             responder.requests.filter(
               (request) => request.command.type === "provider.list_models",
@@ -1259,7 +1261,7 @@ describe("resolveSystemExecutionOptions", () => {
           responder.requests.filter(
             (request) => request.command.type === "provider.health",
           ),
-        ).toHaveLength(5);
+        ).toHaveLength(4);
         const modelRequest = responder.requests.find(
           (request) => request.command.type === "provider.list_models",
         );
@@ -1308,7 +1310,7 @@ describe("resolveSystemExecutionOptions", () => {
         registry.markRegistrationsSettled();
 
         expect((await providersPromise).map((provider) => provider.id)).toEqual(
-          ["codex", "claude-code", "pi", "acp-cursor"],
+          ["codex", "claude-code", "pi", "opencode", "acp-cursor"],
         );
       },
     );
@@ -1383,7 +1385,7 @@ describe("resolveSystemExecutionOptions", () => {
         responder.requests.filter(
           (request) => request.command.type === "provider.health",
         ),
-      ).toHaveLength(5);
+      ).toHaveLength(4);
       const modelRequest = responder.requests.find(
         (request) => request.command.type === "provider.list_models",
       );
