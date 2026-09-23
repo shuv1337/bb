@@ -38,6 +38,7 @@ async function startFixture(input?: {
   bareUnauthorized?: boolean;
   unauthorizedEvents?: boolean;
   unauthorizedAfterConnect?: boolean;
+  unavailableOnce?: boolean;
 }) {
   const password = input?.password ?? "pw";
   const expectedAuth =
@@ -95,6 +96,15 @@ async function startFixture(input?: {
         return;
       }
     }
+    let dropAfterConnect = false;
+    if (input?.unavailableOnce && method === "GET" && url.startsWith("/api/event")) {
+      eventConnections += 1;
+      if (eventConnections === 2) {
+        json(res, 503, { _tag: "Unavailable", message: "restarting" });
+        return;
+      }
+      dropAfterConnect = eventConnections === 1;
+    }
     void (async () => {
       if (method === "GET" && url.startsWith("/api/info")) {
         json(res, 200, {
@@ -111,7 +121,7 @@ async function startFixture(input?: {
         res.write(
           `data: ${JSON.stringify({ type: "server.connected", data: {} })}\n\n`,
         );
-        if (input?.dropSse || input?.unauthorizedAfterConnect) {
+        if (input?.dropSse || input?.unauthorizedAfterConnect || dropAfterConnect) {
           res.end();
           return;
         }
@@ -542,6 +552,26 @@ describe("http runtime adapter", () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandled);
+      await runtime.close();
+    }
+  });
+
+  it("keeps the stream and ready status through a transient reconnect failure", async () => {
+    const fixture = await startFixture({ unavailableOnce: true });
+    const runtime = await createOpenCodeRuntime({
+      env: {
+        BB_OPENCODE_SERVER: fixture.url,
+        BB_OPENCODE_PASSWORD: fixture.password,
+      },
+    });
+    const ac = new AbortController();
+    try {
+      const iterator = runtime.subscribe("ses_test1", ac.signal)[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      expect(first.value).toMatchObject({ kind: "resync", reason: "reconnect" });
+      expect((await runtime.health()).status).toBe("ready");
+    } finally {
+      ac.abort();
       await runtime.close();
     }
   });

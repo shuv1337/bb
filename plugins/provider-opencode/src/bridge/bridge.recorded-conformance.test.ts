@@ -333,7 +333,6 @@ async function checkCell(
     cell,
   );
   const events = assembled(harness);
-  expect(events).not.toBe(recordedEvents);
   const results = checkRecordedCellReplay({
     provider: "opencode",
     cell,

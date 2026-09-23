@@ -121,6 +121,7 @@ async function withBridge(
   hooks: {
     prompt?: (input: OpenCodePromptInput) => Promise<void>;
     compact?: () => Promise<void>;
+    replyPermission?: () => Promise<void>;
     failContext?: boolean;
     injectResync?: boolean;
   },
@@ -170,6 +171,7 @@ async function withBridge(
         },
         replyPermission: async (requestID, reply) => {
           if (failPermission) throw new Error("permission reply failed");
+          await hooks.replyPermission?.();
           permissionReplies.push({ requestID, reply });
           await handle.replyPermission(requestID, reply);
         },
@@ -279,6 +281,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
       async ({ request, messages, prompts }) => {
         const threadId = "thr_prompt_fail";
         const sessionId = await startThread(request, threadId);
+        const before = deltaKinds(messages, threadId);
         const response = await request("turn/start", {
           threadId,
           providerThreadId: sessionId,
@@ -289,7 +292,8 @@ describe("OpenCode turn dispatch and interaction replies", () => {
         expect(response.error?.code).toBe(BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR);
         expect(response.error?.message).toBe("prompt failed");
         expect(prompts).toHaveLength(1);
-        expect(deltaKinds(messages, threadId)).not.toContain("input.accepted");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(deltaKinds(messages, threadId)).toEqual(before);
       },
     );
   });
@@ -412,6 +416,9 @@ describe("OpenCode turn dispatch and interaction replies", () => {
           result: { decision: "allow_once", grantedPermissions: null },
         });
         await waitFor(() => deltaKinds(tools.messages, threadId).includes("provider.error"));
+        expect(
+          threadDeltas(tools.messages, threadId).find((delta) => delta.kind === "provider.error"),
+        ).toMatchObject({ message: "permission reply failed", threadScoped: true });
         expect(tools.permissionReplies).toEqual([]);
         tools.setFailPermission(false);
         tools.reply(id, {
@@ -733,6 +740,134 @@ describe("OpenCode turn dispatch and interaction replies", () => {
         },
       });
       await waitFor(() => interactionId(tools.messages) !== undefined);
+    });
+  });
+
+  it("stamps input.accepted with a turn that opened and closed during dispatch", async () => {
+    let finishTurn: () => Promise<void> = async () => undefined;
+    await withBridge(
+      { prompt: () => finishTurn(), compact: () => finishTurn() },
+      async (tools) => {
+        const threadId = "thr_fast_turn";
+        const sessionId = await startThread(tools.request, threadId);
+        let played = 0;
+        finishTurn = async () => {
+          const before = played;
+          played += 1;
+          tools.emit({
+            type: "session.execution.started",
+            data: { sessionID: sessionId },
+            durable: { aggregateID: sessionId, seq: before * 2 + 1 },
+          });
+          tools.emit({
+            type: "session.execution.succeeded",
+            data: { sessionID: sessionId },
+            durable: { aggregateID: sessionId, seq: before * 2 + 2 },
+          });
+          await waitFor(
+            () =>
+              deltaKinds(tools.messages, threadId).filter((kind) => kind === "turn.boundary")
+                .length === played,
+          );
+        };
+        const prompt = await tools.request("turn/start", {
+          threadId,
+          providerThreadId: sessionId,
+          clientRequestId: "creq_fast234567",
+          input: [{ type: "text", text: "quick", mentions: [] }],
+          options: executionOptions(),
+        });
+        expect(prompt.error).toBeUndefined();
+        const compact = await tools.request("turn/start", {
+          threadId,
+          providerThreadId: sessionId,
+          clientRequestId: "creq_fast345678",
+          input: [
+            {
+              type: "text",
+              text: "/compact",
+              mentions: [
+                {
+                  start: 0,
+                  end: 8,
+                  resource: {
+                    kind: "command",
+                    trigger: "/",
+                    name: "compact",
+                    source: "command",
+                    origin: "builtin",
+                    label: "compact",
+                    argumentHint: null,
+                  },
+                },
+              ],
+            },
+          ],
+          options: executionOptions(),
+        });
+        expect(compact.error).toBeUndefined();
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        const deltas = threadDeltas(tools.messages, threadId);
+        const opens = deltas.filter((delta) => delta.kind === "turn.open");
+        expect(opens.map((delta) => delta.providerTurnId)).toEqual([
+          `exec:${sessionId}:1`,
+          `exec:${sessionId}:3`,
+        ]);
+        expect(
+          deltas
+            .filter((delta) => delta.kind === "input.accepted")
+            .map((delta) => [delta.clientRequestId, delta.providerTurnId]),
+        ).toEqual([
+          ["creq_fast234567", `exec:${sessionId}:1`],
+          ["creq_fast345678", `exec:${sessionId}:3`],
+        ]);
+      },
+    );
+  });
+
+  it("detaches the session after the event stream fails", async () => {
+    await withBridge({}, async (tools) => {
+      const threadId = "thr_stream_detach";
+      const sessionId = await startThread(tools.request, threadId);
+      tools.failStream(new Error("event stream failed"));
+      await waitFor(() => deltaKinds(tools.messages, threadId).includes("provider.error"));
+      const response = await tools.request("turn/start", {
+        threadId,
+        providerThreadId: sessionId,
+        clientRequestId: "creq_deaf234567",
+        input: [{ type: "text", text: "hello?", mentions: [] }],
+        options: executionOptions(),
+      });
+      expect(response.error).toMatchObject({
+        code: BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
+        message: "No active OpenCode session",
+      });
+      expect(tools.prompts).toEqual([]);
+    });
+  });
+
+  it("replies once when an interaction response arrives twice", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await withBridge({ replyPermission: () => held }, async (tools) => {
+      const threadId = "thr_dup_reply";
+      const sessionId = await startThread(tools.request, threadId);
+      tools.emit({
+        type: "permission.asked",
+        data: { id: "per_dup", sessionID: sessionId, action: "read", resources: ["a"] },
+      });
+      await waitFor(() => interactionId(tools.messages) !== undefined);
+      const id = interactionId(tools.messages);
+      if (id === undefined) throw new Error("missing interaction");
+      const answer = { result: { decision: "allow_once", grantedPermissions: null } };
+      tools.reply(id, answer);
+      tools.reply(id, answer);
+      release();
+      await waitFor(() => tools.permissionReplies.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(tools.permissionReplies).toEqual([{ requestID: "per_dup", reply: "once" }]);
     });
   });
 });

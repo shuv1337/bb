@@ -567,7 +567,9 @@
         "$TURBO_ROOT$/plugins/provider-pi/package.json",
         "$TURBO_ROOT$/plugins/provider-pi/src/**",
         "$TURBO_ROOT$/plugins/provider-pi/tsconfig.json",
+        "$TURBO_ROOT$/plugins/provider-opencode/package.json",
         "$TURBO_ROOT$/plugins/provider-opencode/src/**",
+        "$TURBO_ROOT$/plugins/provider-opencode/tsconfig.json",
         "$TURBO_ROOT$/vitest.shared.ts"
       ],
       "passThroughEnv": ["UPDATE_PARITY_ROW_COUNTS"]

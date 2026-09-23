@@ -107,7 +107,7 @@ describe("builtin host artifacts", () => {
     {
       pluginDir: "provider-opencode",
       methods: ["resolveNativeRoots"],
-      maxBytes: 1_800_000,
+      maxBytes: 1_600_000,
     },
   ];
   it.each(hostBridges)(

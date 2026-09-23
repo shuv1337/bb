@@ -168,7 +168,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
   private registration: LiveRegistration | null = null;
   private pump: EventPump | null = null;
   private closed = false;
-  private streamFailure: Error | null = null;
+  private streamFailure: OpenCodeUnauthenticatedError | null = null;
   private watchedPump: EventPump | null = null;
   private healthSnapshot: OpenCodeDiscoveryHealth;
   private readonly fetchImpl: typeof globalThis.fetch;
@@ -223,10 +223,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
       } else {
         this.healthSnapshot = {
           ...attached.health,
-          status:
-            this.streamFailure instanceof OpenCodeUnauthenticatedError
-              ? "unauthenticated"
-              : "unknown",
+          status: "unauthenticated",
           statusMessage: this.streamFailure.message,
         };
       }
@@ -600,8 +597,9 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     this.streamFailure = null;
     this.registration = registration;
     this.client = clientFor(registration, this.fetchImpl);
-    this.pump = new EventPump((signal) =>
-      this.requireClient().event.subscribe({ signal }),
+    this.pump = new EventPump(
+      (signal) => this.requireClient().event.subscribe({ signal }),
+      isUnauthenticated,
     );
     this.armPumpWatch(this.pump);
     void previous?.close();
@@ -660,13 +658,13 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
 
   private reportStreamFailure(pump: EventPump, error: unknown): Error {
     const classified = this.streamFailure ?? classifyClientError(error);
+    if (!(classified instanceof OpenCodeUnauthenticatedError)) {
+      return classified;
+    }
     this.streamFailure = classified;
     this.healthSnapshot = {
       ...this.healthSnapshot,
-      status:
-        classified instanceof OpenCodeUnauthenticatedError
-          ? "unauthenticated"
-          : "unknown",
+      status: "unauthenticated",
       statusMessage: classified.message,
     };
     pump.fail(classified);

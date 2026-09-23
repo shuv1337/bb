@@ -1,10 +1,19 @@
 import { afterEach, expect } from "vitest";
 
-const unhandled: unknown[] = [];
+const UNHANDLED_KEY = Symbol.for("bb-plugin-provider-opencode.unhandled-rejections");
 
-process.on("unhandledRejection", (reason) => {
-  unhandled.push(reason);
-});
+function unhandledRejections(): unknown[] {
+  const existing: unknown = Reflect.get(globalThis, UNHANDLED_KEY);
+  if (Array.isArray(existing)) return existing;
+  const created: unknown[] = [];
+  Reflect.set(globalThis, UNHANDLED_KEY, created);
+  process.on("unhandledRejection", (reason) => {
+    created.push(reason);
+  });
+  return created;
+}
+
+const unhandled = unhandledRejections();
 
 afterEach(() => {
   const seen = unhandled.splice(0, unhandled.length);

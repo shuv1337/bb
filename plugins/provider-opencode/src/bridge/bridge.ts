@@ -167,6 +167,11 @@ interface ThreadSession {
     clientRequestId: string;
     timer: ReturnType<typeof setTimeout> | null;
   }>;
+  dispatches: Set<InFlightDispatch>;
+}
+
+interface InFlightDispatch {
+  openedTurnId: string | undefined;
 }
 
 function decodeRequest(raw: unknown): DecodedRequest {
@@ -207,6 +212,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   const sessions = new Map<string, ThreadSession>();
   const sessionsByProviderId = new Map<string, ThreadSession>();
   const pendingInteractions = new Map<string, PendingInteraction>();
+  const replyingInteractions = new Set<string>();
   const owners = new Map<string, OwnerRecord>();
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
   let ownersPath: string | null = null;
@@ -270,6 +276,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         if (delta.kind === "turn.open" && delta.parentRef === undefined) {
           session.turnOpen = true;
           session.liveProviderTurnId = delta.providerTurnId;
+          for (const dispatch of session.dispatches) {
+            dispatch.openedTurnId ??= delta.providerTurnId;
+          }
           flushPendingAccepts(session, outbound, delta.providerTurnId);
         } else if (
           delta.kind === "turn.boundary" &&
@@ -291,13 +300,32 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     });
   }
 
+  function errorScope(
+    session: ThreadSession,
+  ): { providerTurnId: string } | { threadScoped: true } | Record<string, never> {
+    const liveTurnId = liveTurnIdOf(session);
+    if (!session.turnOpen) return { threadScoped: true };
+    return liveTurnId !== undefined ? { providerTurnId: liveTurnId } : {};
+  }
+
   function acceptDispatch(
     session: ThreadSession,
     clientRequestId: string,
     zeroWork: boolean,
+    dispatch: InFlightDispatch,
     providerTurnId?: string,
   ): void {
     if (session.closed) return;
+    if (!session.turnOpen && dispatch.openedTurnId !== undefined) {
+      sendDeltas(session.threadId, [
+        {
+          kind: "input.accepted",
+          clientRequestId,
+          providerTurnId: dispatch.openedTurnId,
+        },
+      ]);
+      return;
+    }
     if (session.turnOpen) {
       const turnId = providerTurnId ?? liveTurnIdOf(session);
       sendDeltas(session.threadId, [
@@ -587,17 +615,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
               await enqueue(session, () => applyRuntimeEvent(session, event));
             } catch (error) {
               if (session.closed || session.abort.signal.aborted) return;
-              const message = failureMessage(error);
-              const liveTurnId = liveTurnIdOf(session);
               sendDeltas(session.threadId, [
                 {
                   kind: "provider.error",
-                  message,
-                  ...(session.turnOpen && liveTurnId !== undefined
-                    ? { providerTurnId: liveTurnId }
-                    : session.turnOpen
-                      ? {}
-                      : { threadScoped: true }),
+                  message: failureMessage(error),
+                  ...errorScope(session),
                 },
               ]);
             }
@@ -608,6 +630,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         } catch (error) {
           if (session.closed || session.abort.signal.aborted) return;
           surfaceStreamFailure(session, error);
+          void detachSession(session);
           return;
         }
         if (session.closed) {
@@ -689,6 +712,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       turnOpen: false,
       liveProviderTurnId: undefined,
       pendingAccepts: [],
+      dispatches: new Set(),
     };
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
@@ -974,6 +998,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         if (turn.kind === "prompt") {
           await assertRequestedSkills(session.cwd, turn.prompt.skills ?? []);
         }
+        const dispatch: InFlightDispatch = { openedTurnId: undefined };
+        session.dispatches.add(dispatch);
         try {
           if (turn.kind === "compact") {
             await session.handle.compact();
@@ -989,11 +1015,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
             error instanceof Error ? error.message : "OpenCode turn dispatch failed",
           );
           break;
+        } finally {
+          session.dispatches.delete(dispatch);
         }
         acceptDispatch(
           session,
           request.params.clientRequestId,
           turn.kind === "compact",
+          dispatch,
           request.method === "turn/steer" ? request.params.expectedTurnId : undefined,
         );
         sendResult(request.id, { threadId: request.params.threadId });
@@ -1051,13 +1080,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     id: string,
     sendReply: () => Promise<void>,
   ): void {
+    replyingInteractions.add(id);
     void sendReply()
       .then(() => {
+        replyingInteractions.delete(id);
         if (pendingInteractions.get(id) === pending) {
           pendingInteractions.delete(id);
         }
       })
       .catch((error: unknown) => {
+        replyingInteractions.delete(id);
+        const session = sessions.get(pending.threadId);
         sendDeltas(pending.threadId, [
           {
             kind: "provider.error",
@@ -1065,6 +1098,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
               error instanceof Error
                 ? error.message
                 : "OpenCode interaction reply failed",
+            ...(session === undefined ? { threadScoped: true } : errorScope(session)),
           },
         ]);
       });
@@ -1077,7 +1111,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   }): void {
     const id = String(response.id);
     const pending = pendingInteractions.get(id);
-    if (pending === undefined) return;
+    if (pending === undefined || replyingInteractions.has(id)) return;
     if ("error" in response && response.error !== undefined) {
       deliverInteraction(pending, id, async () => {
         if (pending.kind === "permission") {

@@ -67,18 +67,20 @@ export class EventPump {
   private connection: AbortController | null = null;
   private running: Promise<void> | null = null;
   private connected = false;
-  private sawConnected = false;
-  private everConnected = false;
   private closed = false;
   private backoffMs = 250;
   private connectWaiters: Array<(ok: boolean) => void> = [];
   private streamError: unknown = null;
+  private attemptError: unknown = null;
   private stoppedSettled = false;
   private resolveStopped = (): void => {};
   private rejectStopped = (_error: unknown): void => {};
   private readonly stopped: Promise<void>;
 
-  constructor(private readonly source: EventSourceFactory) {
+  constructor(
+    private readonly source: EventSourceFactory,
+    private readonly isFatal: (error: unknown) => boolean = () => false,
+  ) {
     this.stopped = new Promise((resolve, reject) => {
       this.resolveStopped = resolve;
       this.rejectStopped = reject;
@@ -208,7 +210,6 @@ export class EventPump {
     let reconnecting = false;
     while (!this.closed && !controller.signal.aborted) {
       this.connected = false;
-      this.sawConnected = false;
       try {
         for await (const raw of this.source(controller.signal)) {
           if (this.closed || controller.signal.aborted) break;
@@ -223,13 +224,16 @@ export class EventPump {
         }
       } catch (error) {
         if (this.closed || controller.signal.aborted) break;
-        if (!this.sawConnected) {
+        this.connected = false;
+        if (this.isFatal(error)) {
           if (this.streamError === null) this.streamError = error;
-          this.connected = false;
           this.flushWaiters(false);
-          if (this.everConnected) this.settleStopped(this.streamError);
+          this.settleStopped(this.streamError);
           break;
         }
+        this.attemptError = error;
+        this.flushWaiters(false);
+        this.attemptError = null;
       }
       this.connected = false;
       if (this.closed || controller.signal.aborted) break;
@@ -248,8 +252,6 @@ export class EventPump {
 
   private markConnected(reconnecting: boolean): void {
     this.connected = true;
-    this.sawConnected = true;
-    this.everConnected = true;
     this.flushWaiters(true);
     if (reconnecting) this.emitResync("reconnect");
   }
@@ -267,8 +269,9 @@ export class EventPump {
           resolve();
           return;
         }
-        if (this.streamError !== null) {
-          reject(this.streamError);
+        const failure = this.streamError ?? this.attemptError;
+        if (failure !== null) {
+          reject(failure);
           return;
         }
         reject(new Error("OpenCode event stream closed"));
