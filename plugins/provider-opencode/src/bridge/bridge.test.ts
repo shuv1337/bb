@@ -1,5 +1,5 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type {
@@ -899,6 +899,22 @@ it("model/list keeps the runtime's default model", async () => {
     ["anthropic/sonnet", false, "none"],
     ["openai/gpt", true, "high"],
   ]);
+});
+
+it("model/list without a cwd lists models for the home directory, not the bridge cwd", async () => {
+  const fake = createFakeOpenCodeRuntime({
+    models: [toOpenCodeModel({ providerID: "openai", id: "gpt", name: "GPT", isDefault: true })],
+  });
+  const directories: string[] = [];
+  const listModels = fake.models.bind(fake);
+  fake.models = async (location) => {
+    directories.push(location.directory);
+    return listModels(location);
+  };
+  await useHarness({ fake });
+  const listed = await harness.request(96, "model/list", {});
+  expect(listed.error).toBeUndefined();
+  expect(directories).toEqual([homedir()]);
 });
 
 it("thread/stop uses activeTurnId to interrupt dispatched work and skip stale turns", async () => {

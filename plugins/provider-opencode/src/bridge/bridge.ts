@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import {
@@ -1209,7 +1210,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       }
       case "model/list": {
         const oc = await runtime();
-        const directory = request.params.cwd ?? process.cwd();
+        const directory = request.params.cwd ?? homedir();
         const models = await oc.models({ directory });
         const defaultModel = models.find((model) => model.isDefault);
         sendResult(request.id, {
