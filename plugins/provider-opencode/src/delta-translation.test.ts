@@ -6,6 +6,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
   createOpenCodeDeltaTranslator,
+  IGNORED_EVENT_TYPES,
   type OpenCodeTranslateContext,
 } from "./delta-translation.js";
 import { opencodeProviderDeclaration } from "./declaration.js";
@@ -70,39 +71,98 @@ function recordedEvents(value: unknown): OpenCodeNativeEvent[] {
 }
 
 describe("delta translation pinned to M0 recordings", () => {
-  it("switches only on recorded names plus the contract settle trio", () => {
+  it("maps or ignores every recorded event name", () => {
     const types = readJson("event-types.json");
     if (types === null || typeof types !== "object") {
       throw new Error("event-types");
     }
     const record = types as { owned?: unknown; allSeen?: unknown };
-    const allowed = new Set([
+    const recorded = new Set([
       ...stringList(record.owned, "owned"),
       ...stringList(record.allSeen, "allSeen"),
-      ...SETTLE_UNTIL_IDLE,
     ]);
-    const source = readFileSync(
-      new URL("./delta-translation.ts", import.meta.url),
-      "utf8",
-    );
-    const cases = [...source.matchAll(/case "([^"]+)"/g)].map((match) => match[1]);
-    const ignoredStart = source.indexOf("const IGNORED_EVENT_TYPES = new Set([");
-    const ignoredEnd = source.indexOf("]);", ignoredStart);
-    const ignored = [
-      ...source.slice(ignoredStart, ignoredEnd).matchAll(/"([^"]+)"/g),
-    ].map((match) => match[1]);
-    expect(cases.filter((name) => !allowed.has(name))).toEqual([]);
-    expect(ignored.filter((name) => !allowed.has(name))).toEqual([]);
-    expect(cases.filter((name) => ignored.includes(name))).toEqual([]);
-    for (const name of UNRECORDED) {
-      expect(source).not.toContain(`"${name}"`);
-    }
-    expect(cases).toEqual(
+    const owned = recordedEvents(readJson("events-owned.sanitized.json"));
+    const sampleOverrides: Record<string, OpenCodeNativeEvent> = {
+      "session.created": {
+        type: "session.created",
+        data: { sessionID: "SES_CHILD", parentID: "SES_1", title: "helper" },
+      },
+      "session.usage.updated": {
+        type: "session.usage.updated",
+        data: {
+          sessionID: "SES_1",
+          tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+      },
+    };
+    const sampleOf = (type: string): OpenCodeNativeEvent =>
+      sampleOverrides[type] ??
+      owned.find((event) => event.type === type) ?? {
+        type,
+        data: { sessionID: "SES_1", id: "evt_1" },
+      };
+    const outcomes = [...recorded, ...SETTLE_UNTIL_IDLE].map((type) => {
+      const translator = createOpenCodeDeltaTranslator();
+      if (type !== "session.execution.started") {
+        translator.translate(
+          { type: "session.execution.started", data: { sessionID: "SES_1" } },
+          CTX,
+        );
+      }
+      const sample = sampleOf(type);
+      const sessionID = sample.data?.sessionID;
+      const result = translator.translate(sample, {
+        ...CTX,
+        eventSessionID: typeof sessionID === "string" ? sessionID : CTX.eventSessionID,
+      });
+      const unhandled = result.deltas.some((delta) => delta.kind === "unhandled");
+      if (IGNORED_EVENT_TYPES.has(type)) {
+        return {
+          type,
+          outcome:
+            result.deltas.length === 0 && result.interactions.length === 0
+              ? "ignored"
+              : "ignored-with-output",
+        };
+      }
+      if (unhandled) return { type, outcome: "unhandled" };
+      if (result.deltas.length === 0 && result.interactions.length === 0) {
+        return { type, outcome: "silent" };
+      }
+      return { type, outcome: "mapped" };
+    });
+    expect(
+      outcomes.filter(
+        (entry) => entry.outcome !== "mapped" && entry.outcome !== "ignored",
+      ),
+    ).toEqual([]);
+    expect(
+      [...IGNORED_EVENT_TYPES].filter((type) => !recorded.has(type)),
+    ).toEqual([]);
+    expect(
+      outcomes
+        .filter((entry) => entry.outcome === "mapped")
+        .map((entry) => entry.type),
+    ).toEqual(
       expect.arrayContaining([
+        "session.execution.started",
         "session.execution.succeeded",
+        "session.text.delta",
+        "session.tool.called",
+        "permission.asked",
+        "form.created",
         ...SETTLE_UNTIL_IDLE,
       ]),
     );
+    for (const type of [...UNRECORDED, "vendor.never.recorded"]) {
+      expect(recorded.has(type)).toBe(false);
+      expect(IGNORED_EVENT_TYPES.has(type)).toBe(false);
+      const result = createOpenCodeDeltaTranslator().translate(
+        { type, data: { sessionID: "SES_1" } },
+        CTX,
+      );
+      expect(result.deltas.map((delta) => delta.kind)).toEqual(["unhandled"]);
+    }
   });
 
   it("leaves unrecorded names unhandled", () => {

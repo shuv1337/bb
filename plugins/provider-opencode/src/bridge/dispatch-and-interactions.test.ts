@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BRIDGE_JSON_RPC_ERRORS } from "@get-bb/plugin-sdk/provider-bridge";
 import {
   experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness,
   type BridgeJsonRpcObject,
   type BridgeJsonRpcOutputMessage,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
-import { createOpenCodeBridge } from "./bridge.js";
+import { createOpenCodeBridge, UNOPENED_DISPATCH_GRACE_MS } from "./bridge.js";
 import {
   createFakeOpenCodeRuntime,
   type OpenCodePromptInput,
@@ -99,6 +99,28 @@ function errorFor(
   return undefined;
 }
 
+async function withGraceClock(
+  run: (passGrace: () => Promise<void>) => Promise<void>,
+): Promise<void> {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout"],
+    shouldAdvanceTime: true,
+  });
+  try {
+    await run(async () => {
+      await vi.advanceTimersByTimeAsync(UNOPENED_DISPATCH_GRACE_MS * 4);
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+function drainRejections(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (!predicate()) {
@@ -136,6 +158,7 @@ async function withBridge(
     prompts: OpenCodePromptInput[];
     counts: { compacts: number };
     permissionReplies: Array<{ requestID: string; reply: string }>;
+    permissionReplyAttempts: string[];
     cancelledForms: string[];
     setFailPermission: (value: boolean) => void;
     reply: (id: string | number, body: BridgeJsonRpcObject) => void;
@@ -143,6 +166,7 @@ async function withBridge(
 ): Promise<void> {
   const prompts: OpenCodePromptInput[] = [];
   const permissionReplies: Array<{ requestID: string; reply: string }> = [];
+  const permissionReplyAttempts: string[] = [];
   const cancelledForms: string[] = [];
   const counts = { compacts: 0 };
   let failPermission = false;
@@ -170,6 +194,7 @@ async function withBridge(
           await handle.compact();
         },
         replyPermission: async (requestID, reply) => {
+          permissionReplyAttempts.push(requestID);
           if (failPermission) throw new Error("permission reply failed");
           await hooks.replyPermission?.();
           permissionReplies.push({ requestID, reply });
@@ -225,6 +250,7 @@ async function withBridge(
       prompts,
       counts,
       permissionReplies,
+      permissionReplyAttempts,
       cancelledForms,
       setFailPermission(value: boolean) {
         failPermission = value;
@@ -272,7 +298,7 @@ async function startThread(
 
 describe("OpenCode turn dispatch and interaction replies", () => {
   it("returns an error and emits nothing when prompt throws", async () => {
-    await withBridge(
+    await withGraceClock((passGrace) => withBridge(
       {
         prompt: async () => {
           throw new Error("prompt failed");
@@ -292,10 +318,10 @@ describe("OpenCode turn dispatch and interaction replies", () => {
         expect(response.error?.code).toBe(BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR);
         expect(response.error?.message).toBe("prompt failed");
         expect(prompts).toHaveLength(1);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await passGrace();
         expect(deltaKinds(messages, threadId)).toEqual(before);
       },
-    );
+    ));
   });
 
   it("rejects an unknown skill before dispatch", async () => {
@@ -426,12 +452,14 @@ describe("OpenCode turn dispatch and interaction replies", () => {
         });
         await waitFor(() => tools.permissionReplies.length === 1);
         expect(tools.permissionReplies).toEqual([{ requestID: "per_1", reply: "once" }]);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await drainRejections();
         expect(unhandled).toEqual([]);
       });
+      await drainRejections();
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+    expect(unhandled).toEqual([]);
   });
 
   it("denies a permission when the interaction response is an error", async () => {
@@ -581,13 +609,13 @@ describe("OpenCode turn dispatch and interaction replies", () => {
       tools.reply(id, {
         result: { decision: "allow_once", grantedPermissions: null },
       });
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(tools.permissionReplyAttempts).toEqual([]);
       expect(tools.permissionReplies).toEqual([]);
     });
   });
 
   it("does not settle a prompt as zero-work when execution starts after the grace", async () => {
-    await withBridge({}, async ({ request, messages, emit }) => {
+    await withGraceClock((passGrace) => withBridge({ prompt: async () => undefined }, async ({ request, messages, emit }) => {
       const threadId = "thr_prompt_live";
       const sessionId = await startThread(request, threadId);
       const response = await request("turn/start", {
@@ -598,7 +626,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
         options: executionOptions(),
       });
       expect(response.error).toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await passGrace();
       expect(deltaKinds(messages, threadId)).not.toContain("turn.boundary");
       expect(deltaKinds(messages, threadId)).not.toContain("turn.open");
       emit({
@@ -618,7 +646,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
         },
       ]);
       expect(deltaKinds(messages, threadId)).not.toContain("turn.boundary");
-    });
+    }));
   });
 
   it("stamps input.accepted with the live provider turn id", async () => {
@@ -745,7 +773,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
 
   it("stamps input.accepted with a turn that opened and closed during dispatch", async () => {
     let finishTurn: () => Promise<void> = async () => undefined;
-    await withBridge(
+    await withGraceClock((passGrace) => withBridge(
       { prompt: () => finishTurn(), compact: () => finishTurn() },
       async (tools) => {
         const threadId = "thr_fast_turn";
@@ -806,7 +834,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
           options: executionOptions(),
         });
         expect(compact.error).toBeUndefined();
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        await passGrace();
         const deltas = threadDeltas(tools.messages, threadId);
         const opens = deltas.filter((delta) => delta.kind === "turn.open");
         expect(opens.map((delta) => delta.providerTurnId)).toEqual([
@@ -822,7 +850,7 @@ describe("OpenCode turn dispatch and interaction replies", () => {
           ["creq_fast345678", `exec:${sessionId}:3`],
         ]);
       },
-    );
+    ));
   });
 
   it("detaches the session after the event stream fails", async () => {
@@ -864,9 +892,10 @@ describe("OpenCode turn dispatch and interaction replies", () => {
       const answer = { result: { decision: "allow_once", grantedPermissions: null } };
       tools.reply(id, answer);
       tools.reply(id, answer);
+      expect(tools.permissionReplyAttempts).toEqual(["per_dup"]);
       release();
       await waitFor(() => tools.permissionReplies.length === 1);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(tools.permissionReplyAttempts).toEqual(["per_dup"]);
       expect(tools.permissionReplies).toEqual([{ requestID: "per_dup", reply: "once" }]);
     });
   });

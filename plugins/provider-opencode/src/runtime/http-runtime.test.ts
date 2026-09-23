@@ -1,4 +1,9 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,16 +33,50 @@ function empty(res: ServerResponse, status: number): void {
   res.end();
 }
 
-async function readBody(req: IncomingMessage): Promise<unknown> {
+async function readText(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
-  const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : undefined;
+  return Buffer.concat(chunks).toString("utf8");
 }
+
+type CapturedRequest = {
+  method: string;
+  url: string;
+  headers: IncomingHttpHeaders;
+  body: string;
+};
+
+const FIXTURE_AGENTS = [
+  {
+    id: "build",
+    name: "Build",
+    mode: "primary",
+    hidden: false,
+    description: "Builds things",
+    request: {},
+    permissions: [],
+  },
+  {
+    id: "plan",
+    name: "Plan",
+    mode: "primary",
+    hidden: false,
+    request: {},
+    permissions: [],
+  },
+  {
+    id: "explore",
+    name: "Explore",
+    mode: "subagent",
+    hidden: true,
+    request: {},
+    permissions: [],
+  },
+];
 
 async function startFixture(input?: {
   password?: string;
-  dropSse?: boolean;
+  dropSse?: number;
   bareUnauthorized?: boolean;
   unauthorizedEvents?: boolean;
   unauthorizedAfterConnect?: boolean;
@@ -49,6 +88,7 @@ async function startFixture(input?: {
   const expectedAuth =
     "Basic " + Buffer.from(`opencode:${password}`).toString("base64");
   const calls: { method: string; url: string; body?: unknown }[] = [];
+  const requests: CapturedRequest[] = [];
   const sessions = new Map<
     string,
     {
@@ -62,10 +102,18 @@ async function startFixture(input?: {
   >();
   let sse: ServerResponse | null = null;
   let eventConnections = 0;
+  let droppedSse = 0;
   const state = { pid: 4242, infoStatus: 200 };
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
     const method = req.method ?? "GET";
+    const captured: CapturedRequest = {
+      method,
+      url,
+      headers: { ...req.headers },
+      body: "",
+    };
+    requests.push(captured);
     const auth = req.headers.authorization;
     if (auth !== expectedAuth) {
       res.statusCode = 401;
@@ -122,6 +170,7 @@ async function startFixture(input?: {
       dropAfterConnect = eventConnections === 1;
     }
     void (async () => {
+      if (method !== "GET") captured.body = await readText(req);
       if (method === "GET" && url.startsWith("/api/info")) {
         if (state.infoStatus !== 200) {
           empty(res, state.infoStatus);
@@ -141,8 +190,10 @@ async function startFixture(input?: {
         res.write(
           `data: ${JSON.stringify({ type: "server.connected", data: {} })}\n\n`,
         );
+        const dropThis = droppedSse < (input?.dropSse ?? 0);
+        if (dropThis) droppedSse += 1;
         if (
-          input?.dropSse ||
+          dropThis ||
           input?.unauthorizedAfterConnect ||
           input?.notFoundAfterConnect ||
           dropAfterConnect
@@ -209,8 +260,45 @@ async function startFixture(input?: {
         });
         return;
       }
-      const body = method === "GET" ? undefined : await readBody(req);
+      const body = captured.body ? JSON.parse(captured.body) : undefined;
       calls.push({ method, url, body });
+      const listed = /^\/api\/(agent|config|skill|command)\?/.exec(url);
+      if (method === "GET" && listed) {
+        const location = { directory: "/workspace" };
+        if (listed[1] === "agent") {
+          json(res, 200, { location, data: FIXTURE_AGENTS });
+          return;
+        }
+        if (listed[1] === "config") {
+          json(res, 200, [
+            { type: "document", path: "/workspace/opencode.json", info: { default_agent: "plan" } },
+          ]);
+          return;
+        }
+        if (listed[1] === "skill") {
+          json(res, 200, {
+            location,
+            data: [
+              {
+                id: "lint",
+                name: "Lint",
+                description: "Runs lint",
+                path: "/workspace/.opencode/skills/lint/SKILL.md",
+                content: "lint body",
+              },
+            ],
+          });
+          return;
+        }
+        json(res, 200, {
+          location,
+          data: [
+            { name: "team/review", description: "Review a file" },
+            { name: "ship" },
+          ],
+        });
+        return;
+      }
       if (method === "POST" && url === "/api/session") {
         const created = {
           id: "ses_test1",
@@ -240,6 +328,25 @@ async function startFixture(input?: {
         const session = sessions.get(sessionID);
         if (method === "DELETE" && rest === "") {
           sessions.delete(sessionID);
+          empty(res, 204);
+          return;
+        }
+        if (method === "PATCH" && rest === "") {
+          const title =
+            typeof body === "object" && body !== null ? Reflect.get(body, "title") : undefined;
+          if (session && typeof title === "string") session.title = title;
+          empty(res, 204);
+          return;
+        }
+        if (method === "POST" && (rest === "/agent" || rest === "/model")) {
+          empty(res, 204);
+          return;
+        }
+        if (method === "POST" && /^\/form\/[^/]+\/reply$/.test(rest)) {
+          empty(res, 204);
+          return;
+        }
+        if (method === "DELETE" && /^\/form\/[^/]+$/.test(rest)) {
           empty(res, 204);
           return;
         }
@@ -398,6 +505,8 @@ async function startFixture(input?: {
   return {
     url,
     calls,
+    requests,
+    expectedAuth,
     password,
     state,
     sessions,
@@ -406,6 +515,12 @@ async function startFixture(input?: {
       sse.write(`data: ${JSON.stringify(event)}\n\n`);
     },
   };
+}
+
+function drainRejections(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 function explicitEnv(fixture: { url: string; password: string }) {
@@ -473,8 +588,6 @@ describe("http runtime adapter", () => {
     expect(
       bodies.some((line) => line.includes("/instructions/entries/bb.instructions")),
     ).toBe(true);
-    expect(JSON.stringify(fixture.calls)).not.toContain("thoughtSignature");
-    expect(JSON.stringify(fixture.calls)).not.toMatch(/password":/);
 
     await runtime.close();
     await expect(session.prompt({ text: "nope" })).rejects.toThrow(/closed/);
@@ -512,18 +625,314 @@ describe("http runtime adapter", () => {
     await runtime.close();
   });
 
-  it("does not report ready on port 0 and can attach after a later health refresh", async () => {
+  it("sends the password only in the Authorization header", async () => {
+    const fixture = await startFixture({ password: "fixture-pw-7f3a" });
+    const token = Buffer.from(`opencode:${fixture.password}`).toString("base64");
+    const runtime = await createOpenCodeRuntime({ env: explicitEnv(fixture) });
+    const ac = new AbortController();
+    try {
+      expect((await runtime.health()).status).toBe("ready");
+      await runtime.models({ directory: "/workspace" });
+      await runtime.agents({ directory: "/workspace" });
+      await runtime.skills({ directory: "/workspace" });
+      await runtime.commands({ directory: "/workspace" });
+      const iterator = runtime.subscribe("ses_test1", ac.signal)[Symbol.asyncIterator]();
+      const session = await runtime.createSession({
+        location: { directory: "/workspace" },
+        title: "t",
+        permissionMode: "accept-edits",
+        instructions: { mode: "append", text: "note" },
+        environment: { A: "1" },
+      });
+      await session.prompt({ text: "hi" });
+      await session.command({ name: "ship", text: "" });
+      await session.switchAgent("plan");
+      await session.switchModel({ providerID: "google", id: "gemini-3.7-flash-high" });
+      await session.update({ title: "renamed" });
+      await session.replyForm("frm_1", { name: "x" });
+      await session.cancelForm("frm_2");
+      await session.replyPermission("per_1", "once");
+      await session.info();
+      await session.context();
+      await session.compact();
+      await session.interrupt();
+      await session.setInstructions({ mode: "append", text: "" });
+      await session.fork();
+      await runtime.openSession("ses_test1");
+      fixture.push({
+        type: "session.inbox.enqueued",
+        data: { sessionID: "ses_test1", inboxID: "msg_1" },
+      });
+      expect((await iterator.next()).value).toMatchObject({ kind: "native" });
+    } finally {
+      ac.abort();
+      await runtime.close();
+    }
+    const paths = new Set(
+      fixture.requests.map((request) => `${request.method} ${request.url.split("?")[0]}`),
+    );
+    expect([...paths]).toEqual(
+      expect.arrayContaining([
+        "GET /api/info",
+        "GET /api/event",
+        "GET /api/model",
+        "GET /api/agent",
+        "GET /api/skill",
+        "GET /api/command",
+        "GET /api/config",
+        "POST /api/session",
+        "GET /api/session/ses_test1",
+        "PATCH /api/session/ses_test1",
+        "PUT /api/session/ses_test1/environment",
+        "PUT /api/experimental/session/ses_test1/instructions/entries/bb.instructions",
+        "DELETE /api/experimental/session/ses_test1/instructions/entries/bb.instructions",
+        "POST /api/session/ses_test1/prompt",
+        "POST /api/session/ses_test1/command",
+        "POST /api/session/ses_test1/agent",
+        "POST /api/session/ses_test1/model",
+        "POST /api/session/ses_test1/form/frm_1/reply",
+        "DELETE /api/session/ses_test1/form/frm_2",
+        "POST /api/session/ses_test1/permission/per_1/reply",
+        "GET /api/session/ses_test1/context",
+        "POST /api/session/ses_test1/compact",
+        "POST /api/session/ses_test1/interrupt",
+        "POST /api/session/ses_test1/fork",
+      ]),
+    );
+    const leaks: string[] = [];
+    for (const request of fixture.requests) {
+      const where = `${request.method} ${request.url}`;
+      if (request.headers.authorization !== fixture.expectedAuth) {
+        leaks.push(`${where}: authorization ${String(request.headers.authorization)}`);
+      }
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (name === "authorization") continue;
+        const text = Array.isArray(value) ? value.join(",") : String(value);
+        if (text.includes(fixture.password) || text.includes(token)) {
+          leaks.push(`${where}: header ${name}`);
+        }
+      }
+      const url = decodeURIComponent(request.url);
+      if (url.includes(fixture.password) || url.includes(token)) {
+        leaks.push(`${where}: url`);
+      }
+      if (request.body.includes(fixture.password) || request.body.includes(token)) {
+        leaks.push(`${where}: body`);
+      }
+    }
+    expect(leaks).toEqual([]);
+  });
+
+  it("reconnects the event stream after the server drops it", async () => {
+    const fixture = await startFixture({ dropSse: 1 });
+    const runtime = await createOpenCodeRuntime({ env: explicitEnv(fixture) });
+    const ac = new AbortController();
+    try {
+      const iterator = runtime.subscribe("ses_test1", ac.signal)[Symbol.asyncIterator]();
+      expect((await iterator.next()).value).toEqual({
+        kind: "stream.error",
+        sessionID: "ses_test1",
+        message: "OpenCode event stream ended",
+      });
+      expect((await iterator.next()).value).toEqual({
+        kind: "resync",
+        sessionID: "ses_test1",
+        reason: "reconnect",
+      });
+      fixture.push({
+        type: "session.inbox.enqueued",
+        data: { sessionID: "ses_test1", inboxID: "msg_after" },
+      });
+      expect((await iterator.next()).value).toMatchObject({
+        kind: "native",
+        sessionID: "ses_test1",
+        event: {
+          type: "session.inbox.enqueued",
+          data: { sessionID: "ses_test1", inboxID: "msg_after" },
+        },
+      });
+      expect(
+        fixture.requests.filter(
+          (request) => request.method === "GET" && request.url.startsWith("/api/event"),
+        ),
+      ).toHaveLength(2);
+      expect((await runtime.health()).status).toBe("ready");
+    } finally {
+      ac.abort();
+      await runtime.close();
+    }
+  });
+
+  it("round-trips catalog and session operations over HTTP", async () => {
+    const fixture = await startFixture();
+    const runtime = await createOpenCodeRuntime({ env: explicitEnv(fixture) });
+    try {
+      const location = { directory: "/workspace" };
+      const query = "?location%5Bdirectory%5D=%2Fworkspace";
+      expect(await runtime.agents(location)).toEqual({
+        agents: [
+          {
+            id: "build",
+            name: "Build",
+            mode: "primary",
+            hidden: false,
+            description: "Builds things",
+          },
+          { id: "plan", name: "Plan", mode: "primary", hidden: false, description: undefined },
+          {
+            id: "explore",
+            name: "Explore",
+            mode: "subagent",
+            hidden: true,
+            description: undefined,
+          },
+        ],
+        defaultAgentId: "plan",
+      });
+      expect(await runtime.skills(location)).toEqual([
+        {
+          id: "lint",
+          name: "Lint",
+          description: "Runs lint",
+          path: "/workspace/.opencode/skills/lint/SKILL.md",
+        },
+      ]);
+      expect(await runtime.commands(location)).toEqual([
+        { name: "team/review", description: "Review a file" },
+        { name: "ship", description: undefined },
+      ]);
+      expect(fixture.calls).toEqual([
+        { method: "GET", url: `/api/agent${query}`, body: undefined },
+        { method: "GET", url: `/api/config${query}`, body: undefined },
+        { method: "GET", url: `/api/skill${query}`, body: undefined },
+        { method: "GET", url: `/api/command${query}`, body: undefined },
+      ]);
+
+      await runtime.createSession({ location, title: "t" });
+      fixture.calls.length = 0;
+      const session = await runtime.openSession("ses_test1");
+      expect(session.id).toBe("ses_test1");
+      await session.switchAgent("plan");
+      await session.switchModel({ providerID: "google", id: "gemini-3.7-flash-high", variant: "high" });
+      await session.update({
+        title: "renamed",
+        permissions: [{ action: "edit", resource: "*", effect: "ask" }],
+      });
+      await session.command({ name: "ship", text: "now" });
+      await session.replyForm("frm_1", { name: "x", count: 2, ok: true, tags: ["a", "b"] });
+      await session.cancelForm("frm_2");
+      expect(fixture.calls).toEqual([
+        { method: "GET", url: "/api/session/ses_test1", body: undefined },
+        { method: "POST", url: "/api/session/ses_test1/agent", body: { agent: "plan" } },
+        {
+          method: "POST",
+          url: "/api/session/ses_test1/model",
+          body: {
+            model: { id: "gemini-3.7-flash-high", providerID: "google", variant: "high" },
+          },
+        },
+        {
+          method: "PATCH",
+          url: "/api/session/ses_test1",
+          body: {
+            title: "renamed",
+            permissions: [{ action: "edit", resource: "*", effect: "ask" }],
+          },
+        },
+        {
+          method: "POST",
+          url: "/api/session/ses_test1/command",
+          body: { name: "ship", text: "now" },
+        },
+        {
+          method: "POST",
+          url: "/api/session/ses_test1/form/frm_1/reply",
+          body: { answer: { name: "x", count: 2, ok: true, tags: ["a", "b"] } },
+        },
+        { method: "DELETE", url: "/api/session/ses_test1/form/frm_2", body: undefined },
+      ]);
+      expect(fixture.sessions.get("ses_test1")?.title).toBe("renamed");
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("does not attach to an OPENCODE_SERVER_URL on port 0 even when it answers", async () => {
+    const fixture = await startFixture();
+    const target = new URL(fixture.url);
     const runtime = await createOpenCodeRuntime({
-      env: { OPENCODE_SERVER_URL: "http://127.0.0.1:1" },
-      fetch: async () => {
-        throw new Error("offline");
+      env: {
+        OPENCODE_SERVER_URL: "http://127.0.0.1:0",
+        OPENCODE_SERVER_PASSWORD: fixture.password,
+      },
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        url.port = target.port;
+        return fetch(new Request(url, request));
       },
     });
-    expect((await runtime.health()).status).not.toBe("ready");
-    await expect(
-      runtime.createSession({ location: { directory: "/workspace" } }),
-    ).rejects.toThrow(/not ready|not attached|did not answer/i);
-    await runtime.close();
+    try {
+      const health = await runtime.health();
+      expect(health.status).toBe("unknown");
+      expect(health.statusMessage).toBe("OpenCode service is not attached");
+      await expect(
+        runtime.createSession({ location: { directory: "/workspace" } }),
+      ).rejects.toThrow(/not ready|not attached/i);
+      expect(() => runtime.subscribe("ses_test1", new AbortController().signal)).toThrow(
+        /not attached/,
+      );
+      expect(fixture.requests.length).toBeGreaterThan(0);
+      expect(
+        fixture.requests.filter((request) => request.url.split("?")[0] !== "/api/info"),
+      ).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("attaches after a later health() once the server appears", async () => {
+    const fixture = await startFixture();
+    let online = false;
+    const runtime = await createOpenCodeRuntime({
+      env: explicitEnv(fixture),
+      fetch: async (input, init) => {
+        if (!online) throw new Error("offline");
+        return fetch(input, init);
+      },
+    });
+    const ac = new AbortController();
+    try {
+      const offline = await runtime.health();
+      expect(offline.status).toBe("unknown");
+      expect(offline.statusMessage).toMatch(/did not answer/);
+      await expect(
+        runtime.createSession({ location: { directory: "/workspace" } }),
+      ).rejects.toThrow(/did not answer|not ready|not attached/i);
+      expect(fixture.requests).toEqual([]);
+      online = true;
+      const health = await runtime.health();
+      expect(health.status).toBe("ready");
+      expect(health.pid).toBe(4242);
+      const iterator = runtime.subscribe("ses_test1", ac.signal)[Symbol.asyncIterator]();
+      const session = await runtime.createSession({ location: { directory: "/workspace" } });
+      await session.prompt({ text: "after attach" });
+      expect(fixture.calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        "POST /api/session",
+        "POST /api/session/ses_test1/prompt",
+      ]);
+      fixture.push({
+        type: "session.inbox.enqueued",
+        data: { sessionID: "ses_test1", inboxID: "msg_late" },
+      });
+      expect((await iterator.next()).value).toMatchObject({
+        kind: "native",
+        event: { type: "session.inbox.enqueued" },
+      });
+    } finally {
+      ac.abort();
+      await runtime.close();
+    }
   });
 
   it("classifies a bare 401 and keeps the cause", async () => {
@@ -546,7 +955,13 @@ describe("http runtime adapter", () => {
     if (!(caught instanceof OpenCodeUnauthenticatedError)) {
       throw new Error("expected OpenCodeUnauthenticatedError");
     }
-    expect(caught.cause).toBeDefined();
+    const statuses: unknown[] = [];
+    let cause: unknown = caught.cause;
+    while (typeof cause === "object" && cause !== null && statuses.length < 8) {
+      statuses.push(Reflect.get(cause, "status"));
+      cause = Reflect.get(cause, "cause");
+    }
+    expect(statuses).toContain(401);
   });
 
   it("does not classify a session id that contains 401", async () => {
@@ -601,12 +1016,14 @@ describe("http runtime adapter", () => {
       await expect(runtime.models({ directory: "/workspace" })).rejects.toThrow(
         /OpenCode rejected authentication/,
       );
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await drainRejections();
       expect(unhandled).toEqual([]);
     } finally {
-      process.off("unhandledRejection", onUnhandled);
       await runtime.close();
+      await drainRejections();
+      process.off("unhandledRejection", onUnhandled);
     }
+    expect(unhandled).toEqual([]);
   });
 
   it("rejects a reconnect that fails before the next server.connected and keeps that status", async () => {
@@ -640,12 +1057,14 @@ describe("http runtime adapter", () => {
         /OpenCode rejected authentication/,
       );
       expect((await runtime.health()).status).toBe("unauthenticated");
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await drainRejections();
       expect(unhandled).toEqual([]);
     } finally {
-      process.off("unhandledRejection", onUnhandled);
       await runtime.close();
+      await drainRejections();
+      process.off("unhandledRejection", onUnhandled);
     }
+    expect(unhandled).toEqual([]);
   });
 
   it("keeps the stream and ready status through a transient reconnect failure", async () => {

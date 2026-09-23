@@ -73,7 +73,7 @@ import {
   getOpenCodeProviderInstallationStatus,
 } from "./provider-maintenance.js";
 
-const UNOPENED_DISPATCH_GRACE_MS = 250;
+export const UNOPENED_DISPATCH_GRACE_MS = 250;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const RESUBSCRIBE_BACKOFF_INITIAL_MS = 250;
 const RESUBSCRIBE_BACKOFF_MAX_MS = 8_000;

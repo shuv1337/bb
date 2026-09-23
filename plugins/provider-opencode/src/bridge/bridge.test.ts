@@ -1085,10 +1085,21 @@ it("backs off and resyncs when the event stream ends", async () => {
   });
   const started = await harness.startThread("thr_stream_end");
   expect(started.error).toBeUndefined();
+  const sessionId = providerThreadId(started);
   await harness.waitFor(() => subscribes === 2 && contexts === 1, "resubscribe and resync");
-  expect(harness.warnings.some((warning) => warning.includes("resubscribing in 20ms"))).toBe(true);
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  harness.fake.emit({
+    type: "session.execution.started",
+    data: { sessionID: sessionId },
+  });
+  await harness.waitFor(
+    () => deltaKinds("thr_stream_end").includes("turn.open"),
+    "event on the resubscribed stream",
+  );
   expect(subscribes).toBe(2);
+  expect(contexts).toBe(1);
+  expect(harness.warnings.filter((warning) => warning.includes("resubscribing"))).toEqual([
+    "OpenCode event stream for thr_stream_end ended; resubscribing in 20ms",
+  ]);
 });
 
 it("surfaces a runtime stream.error as a warning and keeps the session attached", async () => {

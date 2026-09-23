@@ -38,7 +38,7 @@ const DELEGATION_PRESENTATION: DeltaPresentation = {
   icon: { glyph: "Bot" },
 };
 
-const IGNORED_EVENT_TYPES = new Set([
+export const IGNORED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "server.connected",
   "provider.updated",
   "model.updated",

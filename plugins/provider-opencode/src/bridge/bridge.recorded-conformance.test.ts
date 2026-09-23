@@ -285,20 +285,22 @@ function assembled(harness: OpenCodeBridgeHarness) {
   );
 }
 
+const STALL_EVENT_LOOP_TURNS = 50;
+
 async function observeStalls(
   harness: OpenCodeBridgeHarness,
   ready: () => boolean,
   label: string,
 ): Promise<string[]> {
-  const deadline = Date.now() + 1_000;
-  while (Date.now() < deadline) {
+  for (let turn = 0; turn < STALL_EVENT_LOOP_TURNS; turn += 1) {
     if (ready()) return [];
     await harness.rpc.flushWork();
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
   }
-  return [`timed out waiting for ${label}`];
+  if (ready()) return [];
+  return [`stalled waiting for ${label} after ${STALL_EVENT_LOOP_TURNS} event-loop turns`];
 }
 
 async function checkCell(
