@@ -19,12 +19,10 @@ const UNRECORDED = [
   "session.reasoning.delta",
   "session.reasoning.ended",
   "session.tool.failed",
-  "session.tool.progress",
   "session.tool.input.delta",
   "session.idle",
   "form.cancelled",
   "session.forked",
-  "session.permissions",
 ] as const;
 
 const SETTLE_UNTIL_IDLE = [
@@ -331,6 +329,57 @@ describe("delta translation turn lifecycle", () => {
       "item.open",
       "item.close",
     ]);
+  });
+
+  it("reports a shell command's exit code from its result trailer", () => {
+    const deltas = translateAll([
+      { type: "session.execution.started", data: { sessionID: "SES_1" } },
+      {
+        type: "session.tool.input.started",
+        data: { sessionID: "SES_1", id: "call_1", name: "bash" },
+      },
+      {
+        type: "session.tool.success",
+        data: {
+          sessionID: "SES_1",
+          id: "call_1",
+          content: [
+            { type: "text", text: "No module named pytest\n\nCommand exited with code 1." },
+          ],
+        },
+      },
+    ]);
+    const close = deltas.find((delta) => delta.kind === "item.close");
+    expect(close).toMatchObject({ exitCode: 1, item: { exitCode: 1 } });
+  });
+
+  it("prefers a numeric exit code in the tool metadata", () => {
+    const deltas = translateAll([
+      { type: "session.execution.started", data: { sessionID: "SES_1" } },
+      {
+        type: "session.tool.input.started",
+        data: { sessionID: "SES_1", id: "call_1", name: "bash" },
+      },
+      {
+        type: "session.tool.success",
+        data: { sessionID: "SES_1", id: "call_1", content: "boom", metadata: { exit: 2 } },
+      },
+    ]);
+    const close = deltas.find((delta) => delta.kind === "item.close");
+    expect(close).toMatchObject({ exitCode: 2 });
+  });
+
+  it("ignores live permission, progress, and step-failure events", () => {
+    const deltas = translateAll([
+      { type: "session.execution.started", data: { sessionID: "SES_1" } },
+      { type: "session.permissions", data: { sessionID: "SES_1", permissions: [] } },
+      {
+        type: "session.tool.progress",
+        data: { sessionID: "SES_1", id: "call_1", metadata: { shellID: "sh_1" } },
+      },
+      { type: "session.step.failed", data: { sessionID: "SES_1" } },
+    ]);
+    expect(deltas.some((delta) => delta.kind === "unhandled")).toBe(false);
   });
 
   it("closes open items and delegations before an interrupted boundary", () => {

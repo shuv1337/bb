@@ -59,7 +59,24 @@ export const IGNORED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "session.step.streamed",
   "session.step.ended",
   "session.tool.input.ended",
+  "session.tool.progress",
+  "session.step.failed",
+  "session.permissions",
 ]);
+
+const COMMAND_EXIT_TRAILER = /Command exited with code (-?\d+)\.?\s*$/;
+
+function commandExitCode(resultText: string, metadata: unknown): number {
+  if (metadata !== null && typeof metadata === "object") {
+    const record = metadata as Record<string, unknown>;
+    for (const key of ["exitCode", "exit"]) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isInteger(value)) return value;
+    }
+  }
+  const trailer = COMMAND_EXIT_TRAILER.exec(resultText);
+  return trailer === null ? 0 : Number(trailer[1]);
+}
 
 const nativeEventSchema = z
   .object({
@@ -901,12 +918,13 @@ export function createOpenCodeDeltaTranslator() {
             text: resultText,
           });
         }
+        const exitCode = commandExitCode(resultText, data.metadata);
         const closedItem =
           classified.item.type === "command"
             ? {
                 ...classified.item,
                 aggregatedOutput: resultText,
-                exitCode: 0,
+                exitCode,
               }
             : classified.item.type === "tool"
               ? {
@@ -919,7 +937,7 @@ export function createOpenCodeDeltaTranslator() {
           key: keyFor(id, parentRef),
           status: "completed",
           ...(classified.item.type === "command"
-            ? { aggregatedOutput: resultText, exitCode: 0 }
+            ? { aggregatedOutput: resultText, exitCode }
             : {}),
           ...(resultText.length > 0 ? { resultText } : {}),
           item: closedItem,
