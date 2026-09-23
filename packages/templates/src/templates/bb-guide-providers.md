@@ -88,9 +88,26 @@ default. Enable them with
 the Chrome extension and a claude.ai login. A change restarts the thread's
 Claude process before its next turn and keeps the conversation.
 
+The native OpenCode provider (`opencode`) attaches to a live OpenCode v2
+service on the host. OpenCode (ACP) remains `acp-opencode` for v1 binaries.
+OpenCode is listed on every host. Where neither app is installed, Install
+installs `shuvcode` (`npm install -g shuvcode`); set `OPENCODE_APP=opencode`
+on the host daemon to install upstream OpenCode v2 instead. An existing
+`opencode` or `shuvcode` install is used as is.
+Native skills and slash commands prefer that service's `GET /api/skill` and
+`GET /api/command` catalogs; OpenCode (ACP) does not. Project
+`.opencode/commands` and `.opencode/command` are always scanned. Set the
+native default agent with
+`bb plugin config provider-opencode set defaultAgent <name>` and a catalog
+variant with `bb plugin config provider-opencode set defaultVariant <id>`.
+Host daemon env: `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_PASSWORD`,
+`OPENCODE_APP`. A registration whose URL is not on this host is never sent
+its password; set `OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` to
+attach to it.
+
 Known ACP agents can appear automatically when their CLI is installed on the
 host. For example, opencode, omp, Grok Build's grok CLI, or Hermes' hermes CLI
-on PATH appears as provider acp-opencode, acp-omp, acp-grok, or
+on PATH appears as provider acp-opencode (OpenCode (ACP)), acp-omp, acp-grok, or
 acp-hermes-agent.
 
 bb indexes the native user and project skill roots for Codex, Claude Code, Pi,
@@ -99,22 +116,24 @@ roots such as .agents/skills and .claude/skills when the provider supports them.
 It also includes project ancestor roots for providers that search to the Git
 repository root. Configured Pi, omp, Grok, and Hermes directories are included.
 Enabled provider plugins also contribute skills to the selected provider's `/`
-command menu. `bb skill list` shows native skills for Claude Code, Codex, and
-Cursor.
+command menu. `bb skill list` shows native skills for Claude Code, Codex,
+Cursor, and OpenCode.
 
 ACP providers discover models from the agent itself. For acp-opencode, the
 list mirrors the OpenCode catalog, so a custom model from the OpenCode config
-appears automatically. Discover and select one with:
+appears automatically. Discover and select a native OpenCode model with:
 
-  bb provider models acp-opencode --environment "$BB_ENVIRONMENT_ID"
-  bb thread spawn --provider acp-opencode --model <provider/model>
+  bb provider models opencode --environment "$BB_ENVIRONMENT_ID"
+  bb thread spawn --provider opencode --model <provider/model>
 
-bb applies the selected model to the ACP session before the first prompt.
+The ACP catalog uses the same listing against acp-opencode.
 
 An OpenCode model and an OpenCode agent are different selections. An OpenCode
 agent (build, plan, or a custom primary agent such as an orchestrator) is a
-session mode, not a model. bb does not select OpenCode agents; configure the
-default agent in the OpenCode config and the ACP session uses it.
+session mode, not a model. On provider opencode, set defaultAgent with
+bb plugin config provider-opencode set defaultAgent <name> and defaultVariant
+with bb plugin config provider-opencode set defaultVariant <id>. On OpenCode
+(ACP), configure the default agent in the OpenCode config.
 
 Top-level customModels in the app data-dir config.json adds extra picker
 entries. Each entry has a providerId (a built-in provider id or any acp-*

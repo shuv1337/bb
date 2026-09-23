@@ -85,7 +85,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
   },
   {
     id: "acp-opencode",
-    displayName: "opencode",
+    displayName: "OpenCode (ACP)",
     icon: declaredIcon("opencode"),
     iconTint: { light: "#2563EB", dark: "#2563EB" },
     signInCommand: "opencode auth login",
@@ -95,7 +95,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     supportsManualCompaction: true,
     fork: "tip",
     launch: {
-      displayName: "opencode",
+      displayName: "OpenCode (ACP)",
       command: "opencode",
       args: ["acp"],
       env: {},

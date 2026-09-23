@@ -1,0 +1,257 @@
+[
+  {
+    "id": "EVT_1",
+    "created": 1789895950295,
+    "type": "session.created",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "slug": "kind-cactus",
+      "version": "2.0.8",
+      "projectID": "OTHER_1",
+      "parentID": "SES_1",
+      "location": {
+        "directory": "<WORKSPACE>"
+      },
+      "subpath": "",
+      "title": "Glob hello.txt file",
+      "agent": "explore",
+      "metadata": {
+        "bbThreadId": "m0-runtime-spike",
+        "bbPurpose": "provider-opencode M0 fixture"
+      },
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "ask"
+        },
+        {
+          "action": "question",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ]
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 0,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_2",
+    "created": 1789895950302,
+    "type": "session.inbox.enqueued",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "inboxID": "MSG_1",
+      "sessionID": "SES_2",
+      "item": {
+        "type": "user",
+        "payload": {
+          "text": "You are a subagent spawned by another session.\nGlob for hello.txt in the current workspace directory and check its location/presence."
+        },
+        "delivery": "steer"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 1,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_3",
+    "created": 1789895950305,
+    "type": "session.execution.started",
+    "data": {
+      "sessionID": "SES_2"
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 2,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_4",
+    "created": 1789895950311,
+    "metadata": {
+      "instructions": {
+        "initial": true
+      }
+    },
+    "type": "session.instructions.updated",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "delta": {
+        "core/environment": "15c20c5228917c6d29b655b7885b4918cda148d38673636cae4aa02042367396",
+        "core/date": "a1c58eae50dd2eaa9ccf1c52186da25f354ac2b428ace01e4e6e971190b46229",
+        "core/codemode": "d34808aba0ba8e1f000d0ba7075b6079e15ff31fd7ced5a5d3712e25b57e0079",
+        "core/instructions": "08503134f2a3950f28064a289bac492d6a0643a0c1f6065fc7c22704db39c2c0"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 3,
+      "version": 2
+    }
+  },
+  {
+    "id": "EVT_5",
+    "created": 1789895950313,
+    "type": "session.inbox.delivered",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "inboxID": "MSG_1"
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 4,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_6",
+    "created": 1789895951543,
+    "type": "session.step.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "agent": "explore",
+      "model": {
+        "id": "gemini-3.7-flash-high",
+        "providerID": "google"
+      },
+      "assistantMessageID": "MSG_2",
+      "started": 1789895950323
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 5,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_7",
+    "created": 1789895951548,
+    "type": "session.tool.input.started",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "assistantMessageID": "MSG_2",
+      "id": "CALL_1",
+      "name": "glob"
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 6,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_8",
+    "created": 1789895951553,
+    "type": "session.tool.input.ended",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "assistantMessageID": "MSG_2",
+      "id": "CALL_1",
+      "text": ""
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 7,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_9",
+    "created": 1789895951557,
+    "type": "session.tool.called",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "assistantMessageID": "MSG_2",
+      "id": "CALL_1",
+      "input": {
+        "pattern": "**/hello.txt",
+        "path": "<WORKSPACE>"
+      },
+      "executed": false,
+      "state": {
+        "thoughtSignature": "<redacted>"
+      }
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 8,
+      "version": 1
+    }
+  },
+  {
+    "id": "EVT_10",
+    "created": 1789895951563,
+    "type": "permission.asked",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "id": "PER_1",
+      "sessionID": "SES_2",
+      "action": "glob",
+      "resources": [
+        "**/hello.txt"
+      ],
+      "save": [
+        "*"
+      ],
+      "metadata": {
+        "root": "<WORKSPACE>",
+        "path": "<WORKSPACE>"
+      },
+      "source": {
+        "type": "tool",
+        "messageID": "MSG_2",
+        "id": "CALL_1"
+      }
+    }
+  },
+  {
+    "id": "EVT_11",
+    "created": 1789895951596,
+    "type": "session.step.streamed",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_2",
+      "assistantMessageID": "MSG_2"
+    },
+    "durable": {
+      "aggregateID": "SES_2",
+      "seq": 9,
+      "version": 1
+    }
+  }
+]

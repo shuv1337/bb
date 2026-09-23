@@ -6,6 +6,7 @@ export const PROVIDER_IDS = [
   "claude-code",
   "codex",
   "pi",
+  "opencode",
   "acp-cursor",
   "acp-opencode",
   "acp-omp",
@@ -23,6 +24,7 @@ export const NATIVE_ROOT_ENV_KEYS = [
   "PI_PROFILE",
   "PI_CODING_AGENT_DIR",
   "PI_CONFIG_FILES",
+  "OPENCODE_APP",
   "GROK_HOME",
   "GROK_CLAUDE_SKILLS_ENABLED",
   "GROK_CURSOR_SKILLS_ENABLED",
@@ -767,10 +769,35 @@ async function buildOpenCode(
   );
   await writeSkill(path.join(home, ".claude", "skills"), "home-claude-skill");
   await writeSkill(path.join(home, ".agents", "skills"), "home-agents-skill");
+  await writeCommand(
+    path.join(cwd, ".opencode", "commands"),
+    "cwd-opencode-command.md",
+    "Project command in the plural directory",
+  );
+  await writeCommand(
+    path.join(workspace, ".opencode", "command"),
+    "ws-opencode-command.md",
+    "Project command in the singular directory",
+  );
+  await writeCommand(
+    path.join(root, ".opencode", "commands"),
+    "above-root-opencode-command.md",
+    "Command above the repository root",
+  );
+  await writeCommand(
+    path.join(dirs.configDir, "commands"),
+    "opencode-config-command.md",
+    "User command in the app config directory",
+  );
   if (dirs.customConfigDir !== null) {
     await writeSkill(
       path.join(dirs.customConfigDir, "skills"),
       "custom-opencode-skill",
+    );
+    await writeCommand(
+      path.join(dirs.customConfigDir, "command"),
+      "custom-opencode-command.md",
+      "User command in OPENCODE_CONFIG_DIR",
     );
   }
 }
@@ -788,16 +815,41 @@ const OPENCODE_USER_NAMES = [
   "home-claude-skill",
   "home-agents-skill",
 ];
-const OPENCODE_ABSENT = ["above-root-opencode-skill"];
+const OPENCODE_ABSENT = [
+  "above-root-opencode-skill",
+  "above-root-opencode-command",
+];
+const OPENCODE_PROJECT_COMMAND_NAMES = [
+  "cwd-opencode-command",
+  "ws-opencode-command",
+];
+const OPENCODE_USER_COMMAND_NAMES = ["opencode-config-command"];
+const OPENCODE_ALL_COMMAND_NAMES = [
+  ...OPENCODE_PROJECT_COMMAND_NAMES,
+  ...OPENCODE_USER_COMMAND_NAMES,
+  "custom-opencode-command",
+];
 
 function openCodeVariant(
   variant: string,
   dirsFor: (paths: FixturePaths) => OpenCodeDirs,
   env: (paths: FixturePaths) => FixtureEnv,
   extraUserNames: readonly string[],
+  providerId: ProviderId = "acp-opencode",
 ): FixtureVariant {
+  const nativeCommands = providerId === "opencode";
+  const userCommandNames = nativeCommands
+    ? [
+        ...OPENCODE_USER_COMMAND_NAMES,
+        ...extraUserNames.filter((name) => name.endsWith("-command")),
+      ]
+    : [];
+  const userSkillNames = extraUserNames.filter(
+    (name) => !name.endsWith("-command"),
+  );
+  const absentCommands = nativeCommands ? [] : OPENCODE_ALL_COMMAND_NAMES;
   return {
-    providerId: "acp-opencode",
+    providerId,
     variant,
     env,
     build: (paths) => buildOpenCode(paths, dirsFor(paths)),
@@ -806,13 +858,24 @@ function openCodeVariant(
         present: [
           ...OPENCODE_PROJECT_NAMES,
           ...OPENCODE_USER_NAMES,
-          ...extraUserNames,
+          ...userSkillNames,
+          ...(nativeCommands ? OPENCODE_PROJECT_COMMAND_NAMES : []),
+          ...userCommandNames,
         ],
-        absent: OPENCODE_ABSENT,
+        absent: [...OPENCODE_ABSENT, ...absentCommands],
       },
       userOnly: {
-        present: [...OPENCODE_USER_NAMES, ...extraUserNames],
-        absent: [...OPENCODE_ABSENT, ...OPENCODE_PROJECT_NAMES],
+        present: [
+          ...OPENCODE_USER_NAMES,
+          ...userSkillNames,
+          ...userCommandNames,
+        ],
+        absent: [
+          ...OPENCODE_ABSENT,
+          ...OPENCODE_PROJECT_NAMES,
+          ...OPENCODE_PROJECT_COMMAND_NAMES,
+          ...absentCommands,
+        ],
       },
     },
   };
@@ -1404,6 +1467,39 @@ export const FIXTURE_VARIANTS: readonly FixtureVariant[] = [
       OPENCODE_CONFIG_DIR: "~/opencode-custom",
     }),
     ["custom-opencode-skill"],
+  ),
+  openCodeVariant(
+    "default",
+    (paths) => ({
+      configDir: path.join(paths.home, ".config", "opencode"),
+      customConfigDir: null,
+    }),
+    () => ({}),
+    [],
+    "opencode",
+  ),
+  openCodeVariant(
+    "config-dir",
+    (paths) => ({
+      configDir: path.join(paths.root, "xdg", "opencode"),
+      customConfigDir: path.join(paths.home, "opencode-custom"),
+    }),
+    (paths) => ({
+      XDG_CONFIG_HOME: path.join(paths.root, "xdg"),
+      OPENCODE_CONFIG_DIR: "~/opencode-custom",
+    }),
+    ["custom-opencode-skill", "custom-opencode-command"],
+    "opencode",
+  ),
+  openCodeVariant(
+    "app",
+    (paths) => ({
+      configDir: path.join(paths.home, ".config", "shuvcode"),
+      customConfigDir: null,
+    }),
+    () => ({ OPENCODE_APP: "shuvcode" }),
+    [],
+    "opencode",
   ),
   ompVariant(
     "default",

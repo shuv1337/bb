@@ -195,7 +195,7 @@ describe("the ACP plugin's registration bookkeeping", () => {
         (declaration) => declaration.id === "acp-opencode",
       );
       expect(opencode).toHaveLength(1);
-      expect(opencode[0]?.displayName).toBe("opencode");
+      expect(opencode[0]?.displayName).toBe("OpenCode (ACP)");
     });
   });
 

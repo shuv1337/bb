@@ -455,6 +455,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Claude Code provider",
           "Codex provider",
           "Pi provider",
+          "OpenCode provider",
         ],
         experimental: true,
       },

@@ -275,7 +275,7 @@ describe("thread runtime config", () => {
   it.each([
     {
       expectedSpec: {
-        displayName: "opencode",
+        displayName: "OpenCode (ACP)",
         command: "opencode",
         args: ["acp"],
         env: {},

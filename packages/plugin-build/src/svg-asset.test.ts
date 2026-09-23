@@ -25,6 +25,7 @@ const FIRST_PARTY_BRANDING_SVGS = [
   "plugins/provider-acp/icons/opencode.svg",
   "plugins/provider-claude-code/icons/claude-code.svg",
   "plugins/provider-codex/icons/codex.svg",
+  "plugins/provider-opencode/icons/opencode.svg",
   "plugins/provider-pi/icons/pi.svg",
 ];
 

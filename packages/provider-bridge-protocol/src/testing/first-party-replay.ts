@@ -43,6 +43,10 @@ export const FIRST_PARTY_BRIDGE_MODULES: Readonly<
     legacyModulePaths: ["plugins/provider-pi/src/bridge/bridge.ts"],
     pluginId: "provider-pi",
   },
+  opencode: {
+    modulePath: "plugins/provider-opencode/src/host.ts",
+    pluginId: "provider-opencode",
+  },
 };
 
 const BRIDGE_WORKER_ENTRY =

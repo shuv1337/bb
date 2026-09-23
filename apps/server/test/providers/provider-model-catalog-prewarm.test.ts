@@ -36,6 +36,7 @@ const ALWAYS_VISIBLE_PROVIDER_IDS = [
   "acp-cursor",
   "claude-code",
   "codex",
+  "opencode",
   "pi",
 ];
 
@@ -284,7 +285,12 @@ describe("provider model catalog prewarm", () => {
 
       await withPrewarm(harness, async () => {
         await waitForPasses(logLines, 1);
-        expect(prewarmed()).toEqual(["catalog-probe", "claude-code", "pi"]);
+        expect(prewarmed()).toEqual([
+          "catalog-probe",
+          "claude-code",
+          "opencode",
+          "pi",
+        ]);
 
         clock.now += HOUR;
         probe.dispose();
@@ -295,6 +301,7 @@ describe("provider model catalog prewarm", () => {
           "catalog-probe",
           "catalog-probe",
           "claude-code",
+          "opencode",
           "pi",
         ]);
       });

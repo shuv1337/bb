@@ -37,6 +37,10 @@ import {
   PI_NATIVE_ROOTS_DECLARATION,
   resolvePiNativeRoots,
 } from "../../../plugins/provider-pi/src/native-roots.js";
+import {
+  OPENCODE_NATIVE_ROOTS_DECLARATION,
+  resolveOpenCodeNativeRoots,
+} from "../../../plugins/provider-opencode/src/native-roots.js";
 
 export interface PipelineInput {
   providerId: string;
@@ -85,6 +89,17 @@ function providerSource(providerId: string): ProviderNativeRootSource {
     return {
       declaration: PI_NATIVE_ROOTS_DECLARATION,
       resolve: (_cwd, homeDir) => resolvePiNativeRoots({ homeDir, env }),
+    };
+  }
+  if (providerId === "opencode") {
+    return {
+      declaration: OPENCODE_NATIVE_ROOTS_DECLARATION,
+      resolve: (_cwd, homeDir) =>
+        resolveOpenCodeNativeRoots({
+          homeDir,
+          env,
+          catalogSkills: [],
+        }),
     };
   }
   const agent = KNOWN_ACP_AGENTS.find(

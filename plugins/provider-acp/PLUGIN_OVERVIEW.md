@@ -2,7 +2,7 @@ Use one bb workspace with the coding agents you already run on your machine. Thi
 
 ## What you get
 
-- Ready-made providers for Cursor, opencode, omp, Grok Build, and Hermes Agent.
+- Ready-made providers for Cursor, OpenCode (ACP), omp, Grok Build, and Hermes Agent.
 - A `Custom agents` setting. Add any other ACP agent as a JSON array with an `id`, a `displayName`, and a `command`.
 - Permission modes `accept-edits` and `full` for every ACP provider.
 - Reasoning levels and a model picker where the agent reports them.

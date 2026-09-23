@@ -306,6 +306,7 @@ describe("builtin plugin reconciliation", () => {
       ["provider-claude-code", "./icons/claude-code.svg"],
       ["provider-codex", "./icons/codex.svg"],
       ["provider-pi", "./icons/pi.svg"],
+      ["provider-opencode", "./icons/opencode.svg"],
       ["provider-retry", "ArrowReloadHorizontal"],
       ["provider-usage", "ChartColumn"],
       ["push-notifications", "BellDot"],

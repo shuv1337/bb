@@ -99,6 +99,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       providerFallbackCandidates: [
         "claude-code",
         "pi",
+        "opencode",
         "acp-cursor",
         "acp-opencode",
         "acp-omp",
@@ -122,6 +123,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "pi",
       "claude-code",
       "codex",
+      "opencode",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -165,6 +167,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual([
       "pi",
       "claude-code",
+      "opencode",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -238,6 +241,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       executionDefaults: null,
       providerFallbackCandidates: [
         "pi",
+        "opencode",
         "acp-cursor",
         "acp-opencode",
         "acp-omp",

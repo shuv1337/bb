@@ -360,7 +360,7 @@ describe("resolveSystemExecutionOptions", () => {
         expect.arrayContaining([
           expect.objectContaining({
             id: "acp-opencode",
-            displayName: "opencode",
+            displayName: "OpenCode (ACP)",
             available: true,
           }),
         ]),
@@ -380,7 +380,7 @@ describe("resolveSystemExecutionOptions", () => {
         bridgeLaunch: {
           providerOptions: {
             acpLaunchSpec: {
-              displayName: "opencode",
+              displayName: "OpenCode (ACP)",
               command: "opencode",
               args: ["acp"],
               env: {},
@@ -610,6 +610,7 @@ describe("resolveSystemExecutionOptions", () => {
         "codex",
         "claude-code",
         "pi",
+        "opencode",
         "acp-cursor",
       ]);
       expect(response.modelLoadError).toEqual({
@@ -738,6 +739,7 @@ describe("resolveSystemExecutionOptions", () => {
           expect(response.providers).toEqual(
             expect.arrayContaining([
               expect.objectContaining({ id: "codex" }),
+              expect.objectContaining({ id: "opencode" }),
               expect.objectContaining({ id: "acp-example-agent" }),
             ]),
           );
@@ -1308,7 +1310,7 @@ describe("resolveSystemExecutionOptions", () => {
         registry.markRegistrationsSettled();
 
         expect((await providersPromise).map((provider) => provider.id)).toEqual(
-          ["codex", "claude-code", "pi", "acp-cursor"],
+          ["codex", "claude-code", "pi", "opencode", "acp-cursor"],
         );
       },
     );

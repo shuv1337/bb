@@ -6,10 +6,11 @@ description: "Configure or troubleshoot ACP agent discovery, custom models, skil
 # ACP providers
 
 Known agents can be discovered automatically when their CLI is installed on the
-host: `opencode`, `omp`, `grok`, and `hermes` appear as `acp-opencode`, `acp-omp`,
-`acp-grok`, and `acp-hermes-agent`. Inspect the target host's catalog with
-`bb provider list` and `bb provider models <provider-id>` using its environment
-or machine selector.
+host: `opencode`, `omp`, `grok`, and `hermes` appear as `acp-opencode` (OpenCode
+(ACP)), `acp-omp`, `acp-grok`, and `acp-hermes-agent`. Native OpenCode v2 is
+provider `opencode` from `provider-opencode`, not this plugin. Inspect the
+target host's catalog with `bb provider list` and
+`bb provider models <provider-id>` using its environment or machine selector.
 
 Cursor project skills come from `.cursor/skills`, which can link to
 `.agents/skills`. BB lists these linked skills as read-only under `cursor-project`.

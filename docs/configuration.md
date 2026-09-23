@@ -443,10 +443,83 @@ uses this mapping to launch remote-capable editors and terminals over SSH.
 Browsers or devices without a helper can still use bb; local editor actions are
 simply unavailable.
 
+## OpenCode
+
+The bundled `provider-opencode` plugin registers provider id `opencode`. bb
+attaches to a live OpenCode v2 service on the host (upstream `opencode`,
+`shuvcode`, or another app) and talks HTTP. `acp-opencode` remains as
+**OpenCode (ACP)** for OpenCode 1.x and as an escape hatch.
+
+**OpenCode** is listed on every host, installed or not. On a host with
+neither app, its Install action runs `npm install -g shuvcode@latest` on every
+platform, Windows included. Set `OPENCODE_APP=opencode` to install upstream
+OpenCode v2 instead (`curl -fsSL https://opencode.ai/v2/install | bash`,
+which installs `@opencode/cli`; not available on Windows, so download the
+Windows CLI from the v2 docs). An existing install of either app is used as
+is: bb attaches to it and never replaces it with the other. A host whose only
+PATH binary is OpenCode v1 is offered the upstream v2 installer (or the
+Windows download message) unless `OPENCODE_APP=shuvcode` is set.
+
+Host environment (set on the daemon environment). The names carry no `BB_`
+prefix because the host worker that resolves skills and commands drops every
+`BB_*` variable it inherits:
+
+- `OPENCODE_SERVER_URL` — attach to this v2 URL instead of scanning
+  registrations. Optional `OPENCODE_SERVER_PASSWORD`; username is always
+  `opencode`. A 401 is reported as `unauthenticated`.
+- `OPENCODE_APP` — prefer this app id among live registrations
+  (`opencode`, `shuvcode`, …). When nothing is installed, it also selects
+  what Install installs: unset or `shuvcode` → `npm install -g shuvcode`;
+  `opencode` → the upstream v2 install script. A discovered binary or
+  registration wins over this value; bb never replaces an installed app.
+
+Without `OPENCODE_SERVER_URL`, bb reads the `service*.json` registrations
+under `$XDG_STATE_HOME` (default `~/.local/state`) and never starts a
+service. It sends a registration's password only when the registration URL
+is on this host: loopback, `0.0.0.0`/`[::]`, or an IP address of one of this
+host's interfaces. A registration on any other host is skipped and never
+contacted. When no local registration is live or rejects authentication,
+health is `unknown` with a message pointing to `OPENCODE_SERVER_URL`. Set
+`OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` to attach to a service
+on another host.
+
+Default agent and variant for new threads:
+
+```bash
+bb plugin config provider-opencode set defaultAgent reviewer
+bb plugin config provider-opencode unset defaultAgent
+bb plugin config provider-opencode set defaultVariant thinking
+bb plugin config provider-opencode unset defaultVariant
+```
+
+Empty `defaultAgent` uses OpenCode's `default_agent` (usually `build`). Plan
+mode always uses the OpenCode `plan` agent. Empty `defaultVariant` uses the
+model's native default. A picker reasoning level is sent as the variant only
+when it is not `none` and the model lists it; otherwise `defaultVariant`
+applies, and it must be one of the model's variants or thread start fails.
+Variant `none` is reachable only through `defaultVariant`.
+These settings travel as `providerOptions.agent` and
+`providerOptions.variant`. Deleting a bb thread does not remove the OpenCode
+session.
+
+While a v2 service is up, the composer prefers that workspace's
+`GET /api/skill` and `GET /api/command` catalogs. Command entries have names,
+not paths, so bb writes them as markdown under the plugin's data directory
+on the host (`opencode-command-catalog/<app>/<cwd hash>`) and removes them
+when the host worker stops. When the service is down, skills fall back to
+the **OpenCode** roots in the table below. When the service is down or that
+directory cannot be written, commands fall back to
+`~/.config/<app>/commands` and `~/.config/<app>/command` (plus both under
+`$OPENCODE_CONFIG_DIR` for upstream `opencode`); a write failure never drops
+skills. Project commands in
+`.opencode/commands` and `.opencode/command`, from the repository root to the
+current directory, are always scanned. `acp-opencode` does not call these HTTP
+catalogs and has no command roots.
+
 ## Custom ACP Agents
 
 Known ACP agents appear when their CLI is installed on the host. bb exposes
-`acp-opencode` when `opencode` is on PATH and can be launched as `opencode acp`,
+`acp-opencode` (OpenCode (ACP)) when `opencode` is on PATH and can be launched as `opencode acp`,
 `acp-omp` when `omp` (oh-my-pi) is on PATH, `acp-grok` when Grok Build's `grok`
 CLI is on PATH and can be launched as `grok agent stdio`, and
 `acp-hermes-agent` when Hermes' `hermes` CLI is on PATH. `acp-cursor` is always
@@ -539,8 +612,10 @@ so do not pin OpenCode models here: add the model to the OpenCode config and
 bb discovers it automatically.
 
 An OpenCode "agent" (build, plan, or a custom primary agent) is a session
-mode, not a model, so it does not belong in `customModels`. bb does not select
-OpenCode agents; set the default agent in the OpenCode config instead.
+mode, not a model, so it does not belong in `customModels`. On the native
+`opencode` provider, set `defaultAgent` with `bb plugin config
+provider-opencode set defaultAgent <name>`. On OpenCode (ACP), set the
+default agent in the OpenCode config instead.
 
 ## Agent Instructions
 
@@ -589,18 +664,23 @@ itself knows no agent's layout. The Skills page and `bb skill list` show
 native skills for every provider whose plugin declares or resolves roots. The
 table lists what the shipped plugins declare and resolve.
 
-| Provider     | User roots                                                                                               | Project roots                                                                                                |
-| ------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Codex        | `~/.agents/skills`, `$CODEX_HOME/skills`                                                                 | `.agents/skills` from the repository root to the current directory, plus `.codex/skills`                     |
-| Claude Code  | `$CLAUDE_CONFIG_DIR/skills` or `~/.claude/skills`, plus enabled plugin skills                            | `.claude/skills` from the repository root to the current directory, plus enabled plugin skills               |
-| Pi           | `~/.pi/agent/skills`, `~/.agents/skills`                                                                 | `.pi/skills` and `.agents/skills` from the repository root to the current directory                          |
-| Cursor       | `~/.cursor/skills`, `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`                            | The same four roots in the workspace                                                                         |
-| OpenCode     | `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`                                      | `.opencode/skills`, `.claude/skills`, and `.agents/skills` from the repository root to the current directory |
-| omp          | The active `~/.omp/.../agent` roots and supported Pi, Agents, Claude, Codex, and OpenCode roots          | `.omp/skills` and the supported compatibility roots from the repository root to the current directory        |
-| Grok Build   | `$GROK_HOME/skills` or `~/.grok/skills`, plus `~/.agents/skills`, `~/.claude/skills`, `~/.cursor/skills` | The same four roots from the repository root to the current directory                                        |
-| Hermes Agent | `$HERMES_HOME/skills` or `~/.hermes/skills`                                                              | None                                                                                                         |
+| Provider       | User roots                                                                                               | Project roots                                                                                                |
+| -------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Codex          | `~/.agents/skills`, `$CODEX_HOME/skills`                                                                 | `.agents/skills` from the repository root to the current directory, plus `.codex/skills`                     |
+| Claude Code    | `$CLAUDE_CONFIG_DIR/skills` or `~/.claude/skills`, plus enabled plugin skills                            | `.claude/skills` from the repository root to the current directory, plus enabled plugin skills               |
+| Pi             | `~/.pi/agent/skills`, `~/.agents/skills`                                                                 | `.pi/skills` and `.agents/skills` from the repository root to the current directory                          |
+| Cursor         | `~/.cursor/skills`, `~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`                            | The same four roots in the workspace                                                                         |
+| OpenCode       | `~/.config/<app>/skills`, `~/.claude/skills`, `~/.agents/skills`, plus `GET /api/skill` paths            | `.opencode/skills`, `.claude/skills`, and `.agents/skills` from the repository root to the current directory |
+| OpenCode (ACP) | `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`                                      | `.opencode/skills`, `.claude/skills`, and `.agents/skills` from the repository root to the current directory |
+| omp            | The active `~/.omp/.../agent` roots and supported Pi, Agents, Claude, Codex, and OpenCode roots          | `.omp/skills` and the supported compatibility roots from the repository root to the current directory        |
+| Grok Build     | `$GROK_HOME/skills` or `~/.grok/skills`, plus `~/.agents/skills`, `~/.claude/skills`, `~/.cursor/skills` | The same four roots from the repository root to the current directory                                        |
+| Hermes Agent   | `$HERMES_HOME/skills` or `~/.hermes/skills`                                                              | None                                                                                                         |
 
-OpenCode also uses `$OPENCODE_CONFIG_DIR/skills` when that variable exists.
+For OpenCode, `<app>` is the discovered app (`opencode`, `shuvcode`, …), or
+`$OPENCODE_APP` when discovery reports none. Both OpenCode providers use
+`$XDG_CONFIG_HOME` instead of `~/.config` when it is set. Both add
+`$OPENCODE_CONFIG_DIR/skills` when that variable exists; OpenCode applies it
+only when `<app>` is `opencode`.
 Pi and omp use `$PI_CODING_AGENT_DIR` when that variable exists. omp also uses
 `$OMP_PROFILE` or `$PI_PROFILE` to select its active profile root. Cursor and
 Hermes can organize skills in category directories. bb scans those roots
