@@ -16,6 +16,7 @@ import type {
   OpenCodeAgent,
   OpenCodeAgentCatalog,
   OpenCodeCommand,
+  OpenCodeCommandInput,
   OpenCodeDiscoveryHealth,
   OpenCodeLocation,
   OpenCodeModel,
@@ -45,7 +46,7 @@ export type CreateFakeOpenCodeRuntimeOptions = {
 
 export interface FakeOpenCodeCallLog {
   prompts: OpenCodePromptInput[];
-  commands: { name: string; text?: string }[];
+  commands: OpenCodeCommandInput[];
   permissionReplies: {
     requestID: string;
     reply: "once" | "always" | "reject";
@@ -255,7 +256,7 @@ export function createFakeOpenCodeRuntime(
       prompt: async (input: OpenCodePromptInput) => {
         assertOpen();
         calls.prompts.push(input);
-        const messageId = input.id ?? nextId("msg_");
+        const messageId = nextId("msg_");
         session.messages.push({
           id: messageId,
           type: "user",
@@ -311,11 +312,11 @@ export function createFakeOpenCodeRuntime(
       },
       command: async (input) => {
         assertOpen();
-        calls.commands.push({ name: input.name, text: input.text });
+        calls.commands.push({ ...input });
         session.messages.push({
           id: nextId("msg_"),
           type: "user",
-          text: `/${input.name} ${input.text ?? ""}`.trim(),
+          text: `/${input.name} ${input.text}`.trim(),
         });
       },
       compact: async () => {

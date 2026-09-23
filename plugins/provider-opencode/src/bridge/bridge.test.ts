@@ -1161,3 +1161,150 @@ it("surfaces a runtime stream.error as a warning and keeps the session attached"
   ]);
   expect(subscribes).toBe(1);
 });
+
+function mention(
+  text: string,
+  token: string,
+  name: string,
+  source: "command" | "skill",
+  trigger: "/" | "$",
+) {
+  const start = text.indexOf(token);
+  return {
+    start,
+    end: start + token.length,
+    resource: {
+      kind: "command" as const,
+      trigger,
+      name,
+      source,
+      origin: "user" as const,
+      label: name,
+      argumentHint: null,
+    },
+  };
+}
+
+async function restartWithSkills(skillIds: readonly string[]): Promise<void> {
+  await harness.teardown();
+  harness = await startOpenCodeBridgeHarness({
+    prefix: "bb-opencode-bridge-methods-",
+    scriptTurns: true,
+    runtime: {
+      skills: skillIds.map((id) => ({ id, name: id, path: `/skills/${id}/SKILL.md` })),
+    },
+  });
+}
+
+it("turn/start leaves the prompt id to OpenCode and keys the accept by the opened turn", async () => {
+  const threadId = "thr_no_minted_id";
+  await openTurn(threadId, "say hello", "creq_6789abcdef");
+  await harness.waitFor(
+    () => deltaKinds(threadId).includes("turn.boundary"),
+    "prompt boundary",
+  );
+  expect(harness.fake.calls.prompts).toEqual([{ text: "say hello", delivery: "steer" }]);
+  const open = harness.deltasOf(threadId).find((delta) => delta.kind === "turn.open");
+  const accepted = harness
+    .deltasOf(threadId)
+    .filter((delta) => delta.kind === "input.accepted");
+  expect(typeof open?.providerTurnId).toBe("string");
+  expect(accepted).toEqual([
+    {
+      kind: "input.accepted",
+      clientRequestId: "creq_6789abcdef",
+      providerTurnId: open?.providerTurnId,
+    },
+  ]);
+});
+
+it("turn/start sends a native command with its files, skills, and delivery", async () => {
+  await restartWithSkills(["lint"]);
+  const threadId = "thr_command_attachments";
+  const started = await harness.startThread(threadId);
+  expect(started.error).toBeUndefined();
+  const text = "/team:review $lint src/a.ts";
+  const notes = join(harness.workspaceDir, "notes.md");
+  const response = await harness.request("creq_789abcdefg", "turn/start", {
+    threadId,
+    providerThreadId: providerThreadId(started),
+    clientRequestId: "creq_789abcdefg",
+    input: [
+      {
+        type: "text",
+        text,
+        mentions: [
+          mention(text, "/team:review", "team:review", "command", "/"),
+          mention(text, "$lint", "lint", "skill", "$"),
+        ],
+      },
+      { type: "localFile", path: notes, name: "notes.md" },
+    ],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(response.error).toBeUndefined();
+  expect(harness.fake.calls.prompts).toEqual([]);
+  expect(harness.fake.calls.commands).toEqual([
+    {
+      name: "team/review",
+      text: "$lint src/a.ts",
+      files: [{ uri: `file://${notes}`, name: "notes.md" }],
+      skills: [{ id: "lint" }],
+      delivery: "steer",
+    },
+  ]);
+});
+
+it("turn/start queues a native command while the session is busy", async () => {
+  const threadId = "thr_command_queued";
+  const { sessionId } = await openTurn(threadId, "/hold", "creq_9abcdefghi");
+  await harness.waitFor(
+    () => deltaKinds(threadId).includes("turn.open"),
+    "held turn",
+  );
+  const text = "/team:review src/a.ts";
+  const response = await harness.request("creq_abcdefghij", "turn/start", {
+    threadId,
+    providerThreadId: sessionId,
+    clientRequestId: "creq_abcdefghij",
+    input: [
+      {
+        type: "text",
+        text,
+        mentions: [mention(text, "/team:review", "team:review", "command", "/")],
+      },
+    ],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(response.error).toBeUndefined();
+  expect(harness.fake.calls.commands).toEqual([
+    { name: "team/review", text: "src/a.ts", delivery: "queue" },
+  ]);
+});
+
+it("turn/start rejects a native command naming an unknown skill before dispatch", async () => {
+  await restartWithSkills(["lint"]);
+  const threadId = "thr_command_unknown_skill";
+  const started = await harness.startThread(threadId);
+  expect(started.error).toBeUndefined();
+  const text = "/team:review $missing";
+  const response = await harness.request("creq_89abcdefgh", "turn/start", {
+    threadId,
+    providerThreadId: providerThreadId(started),
+    clientRequestId: "creq_89abcdefgh",
+    input: [
+      {
+        type: "text",
+        text,
+        mentions: [
+          mention(text, "/team:review", "team:review", "command", "/"),
+          mention(text, "$missing", "missing", "skill", "$"),
+        ],
+      },
+    ],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(response.error?.message).toBe('Unknown OpenCode skill "missing"');
+  expect(harness.fake.calls.commands).toEqual([]);
+  expect(deltaKinds(threadId)).not.toContain("input.accepted");
+});

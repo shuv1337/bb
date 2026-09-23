@@ -13,6 +13,7 @@ import { parseWireModelId } from "./models.js";
 import { sessionRulesForPermissionMode } from "./permissions.js";
 import { OpenCodeInstructionReplaceError } from "./runtime/index.js";
 import type {
+  OpenCodeCommandInput,
   OpenCodeModel,
   OpenCodeModelRef,
   OpenCodePermissionMode,
@@ -128,46 +129,40 @@ export function buildOpenCodeShellEnv(args: {
 
 export type OpenCodeTurnKind =
   | { kind: "compact" }
-  | { kind: "command"; name: string; text: string }
+  | { kind: "command"; command: OpenCodeCommandInput }
   | { kind: "prompt"; prompt: OpenCodePromptInput };
 
 export function classifyOpenCodeTurn(args: {
   input: PromptInput[];
-  clientRequestId: string;
   delivery: "steer" | "queue";
 }): OpenCodeTurnKind {
   if (isStandaloneBuiltinCompactCommand(args.input)) {
     return { kind: "compact" };
   }
   const extracted = extractOpenCodeTurnInput(args.input);
-  const id = promptMessageId(args.clientRequestId);
-  if (extracted.command !== null) {
-    return {
-      kind: "command",
-      name: extracted.command.name,
-      text: extracted.command.text,
-    };
-  }
   const skills: OpenCodePromptSkill[] = extracted.skills.map((skill) => ({
     id: skill.id,
   }));
   const files: OpenCodePromptFile[] = extracted.files;
+  const attachments = {
+    ...(files.length > 0 ? { files } : {}),
+    ...(skills.length > 0 ? { skills } : {}),
+    delivery: args.delivery,
+  };
+  if (extracted.command !== null) {
+    return {
+      kind: "command",
+      command: {
+        name: extracted.command.name,
+        text: extracted.command.text,
+        ...attachments,
+      },
+    };
+  }
   return {
     kind: "prompt",
-    prompt: {
-      text: extracted.text,
-      ...(files.length > 0 ? { files } : {}),
-      ...(skills.length > 0 ? { skills } : {}),
-      delivery: args.delivery,
-      id,
-    },
+    prompt: { text: extracted.text, ...attachments },
   };
-}
-
-export function promptMessageId(clientRequestId: string): string {
-  return clientRequestId.startsWith("msg_")
-    ? clientRequestId
-    : `msg_${clientRequestId}`;
 }
 
 export function sessionTitleForThread(threadId: string): string {
@@ -192,7 +187,7 @@ export function knobsFromExecution(args: {
 }): AppliedSessionKnobs {
   assertOpenCodeInstructionMode(args.instructionMode);
   const providerOptions = parseOpenCodeProviderOptions(
-    args.options.providerOptions as Record<string, unknown> | undefined,
+    args.options.providerOptions,
   );
   const trimmed = args.options.instructions?.trim();
   return {

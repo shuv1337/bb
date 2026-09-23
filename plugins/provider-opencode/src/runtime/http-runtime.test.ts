@@ -351,6 +351,10 @@ async function startFixture(input?: {
           empty(res, 204);
           return;
         }
+        if (method === "POST" && rest === "/command") {
+          empty(res, 204);
+          return;
+        }
         if (method === "POST" && rest === "/interrupt") {
           json(res, 200, { data: {} });
           return;
@@ -474,6 +478,38 @@ describe("http runtime adapter", () => {
 
     await runtime.close();
     await expect(session.prompt({ text: "nope" })).rejects.toThrow(/closed/);
+  });
+
+  it("sends a command with its files, skills, and delivery", async () => {
+    const fixture = await startFixture();
+    const runtime = await createOpenCodeRuntime({ env: explicitEnv(fixture) });
+    expect((await runtime.health()).status).toBe("ready");
+    const session = await runtime.createSession({
+      location: { directory: "/workspace" },
+    });
+    await session.command({
+      name: "team/review",
+      text: "src/a.ts",
+      files: [{ uri: "file:///workspace/notes.md", name: "notes.md" }],
+      skills: [{ id: "lint" }],
+      delivery: "queue",
+    });
+    expect(
+      fixture.calls.filter((call) => call.url === "/api/session/ses_test1/command"),
+    ).toEqual([
+      {
+        method: "POST",
+        url: "/api/session/ses_test1/command",
+        body: {
+          name: "team/review",
+          text: "src/a.ts",
+          files: [{ uri: "file:///workspace/notes.md", name: "notes.md" }],
+          skills: [{ id: "lint" }],
+          delivery: "queue",
+        },
+      },
+    ]);
+    await runtime.close();
   });
 
   it("does not report ready on port 0 and can attach after a later health refresh", async () => {

@@ -1418,11 +1418,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           request.method === "turn/steer" ? "steer" : session.busy ? "queue" : "steer";
         const turn = classifyOpenCodeTurn({
           input: request.params.input,
-          clientRequestId: request.params.clientRequestId,
           delivery,
         });
         if (turn.kind === "prompt") {
           await assertRequestedSkills(session.cwd, turn.prompt.skills ?? []);
+        } else if (turn.kind === "command") {
+          await assertRequestedSkills(session.cwd, turn.command.skills ?? []);
         }
         const dispatch: InFlightDispatch = { openedTurnId: undefined };
         session.dispatches.add(dispatch);
@@ -1430,7 +1431,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           if (turn.kind === "compact") {
             await session.handle.compact();
           } else if (turn.kind === "command") {
-            await session.handle.command({ name: turn.name, text: turn.text });
+            await session.handle.command(turn.command);
           } else {
             await session.handle.prompt(turn.prompt);
           }

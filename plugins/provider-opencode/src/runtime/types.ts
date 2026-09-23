@@ -133,7 +133,14 @@ export type OpenCodePromptInput = {
   skills?: readonly OpenCodePromptSkill[];
   files?: readonly OpenCodePromptFile[];
   delivery?: "steer" | "queue";
-  id?: string;
+};
+
+export type OpenCodeCommandInput = {
+  name: string;
+  text: string;
+  skills?: readonly OpenCodePromptSkill[];
+  files?: readonly OpenCodePromptFile[];
+  delivery?: "steer" | "queue";
 };
 
 export type OpenCodeJson =
@@ -215,7 +222,7 @@ export interface SessionHandle {
   readonly location: OpenCodeLocation;
   info(): Promise<OpenCodeSessionInfo>;
   prompt(input: OpenCodePromptInput): Promise<void>;
-  command(input: { name: string; text?: string }): Promise<void>;
+  command(input: OpenCodeCommandInput): Promise<void>;
   compact(): Promise<void>;
   interrupt(): Promise<void>;
   switchAgent(agent: string): Promise<void>;

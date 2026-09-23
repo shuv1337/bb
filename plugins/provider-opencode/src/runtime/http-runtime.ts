@@ -29,6 +29,7 @@ import type {
   OpenCodeAgent,
   OpenCodeAgentCatalog,
   OpenCodeCommand,
+  OpenCodeCommandInput,
   OpenCodeDiscoveryHealth,
   OpenCodeLocation,
   OpenCodeModel,
@@ -476,15 +477,20 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
               name: file.name,
             })),
             delivery: input.delivery,
-            id: input.id,
           });
         }),
-      command: (input) =>
+      command: (input: OpenCodeCommandInput) =>
         run(async (client) => {
           await client.session.command({
             sessionID: id,
             name: input.name,
-            text: input.text ?? "",
+            text: input.text,
+            skills: input.skills?.map((skill) => ({ id: skill.id })),
+            files: input.files?.map((file) => ({
+              uri: file.uri,
+              name: file.name,
+            })),
+            delivery: input.delivery,
           });
         }),
       compact: () =>
