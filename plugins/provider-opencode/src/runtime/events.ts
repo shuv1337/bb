@@ -19,11 +19,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function decodeNativeEvent(value: unknown): OpenCodeNativeEvent | null {
   if (!isRecord(value) || typeof value.type !== "string") return null;
   const data = isRecord(value.data) ? value.data : undefined;
+  const durable = isRecord(value.durable) ? value.durable : undefined;
+  const seq = typeof durable?.seq === "number" ? durable.seq : undefined;
+  const aggregateID =
+    typeof durable?.aggregateID === "string" ? durable.aggregateID : undefined;
+  const version = typeof durable?.version === "number" ? durable.version : undefined;
   return {
     type: value.type,
-    id: typeof value.id === "string" ? value.id : undefined,
-    created: typeof value.created === "number" ? value.created : undefined,
-    data,
+    ...(typeof value.id === "string" ? { id: value.id } : {}),
+    ...(typeof value.created === "number" ? { created: value.created } : {}),
+    ...(data !== undefined ? { data } : {}),
+    ...(durable !== undefined
+      ? {
+          durable: {
+            ...(aggregateID !== undefined ? { aggregateID } : {}),
+            ...(seq !== undefined ? { seq } : {}),
+            ...(version !== undefined ? { version } : {}),
+          },
+        }
+      : {}),
   };
 }
 

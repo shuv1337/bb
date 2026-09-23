@@ -38,7 +38,25 @@ export type CreateFakeOpenCodeRuntimeOptions = {
   version?: string;
   url?: string;
   appId?: string | null;
+  scriptTurns?: boolean;
 };
+
+export interface FakeOpenCodeCallLog {
+  prompts: OpenCodePromptInput[];
+  commands: { name: string; text?: string }[];
+  permissionReplies: {
+    requestID: string;
+    reply: "once" | "always" | "reject";
+  }[];
+  formReplies: {
+    formID: string;
+    answer: Record<string, string | number | boolean | string[]>;
+  }[];
+  titles: string[];
+  compacts: number;
+  interrupts: number;
+  forks: number;
+}
 
 type FakeSession = {
   info: OpenCodeSessionInfo;
@@ -63,7 +81,9 @@ function readyHealth(): OpenCodeDiscoveryHealth {
 
 export interface FakeOpenCodeRuntime extends OpenCodeRuntime {
   emit(event: Record<string, unknown>): void;
+  play(event: Record<string, unknown>): Promise<void>;
   failStream(error: unknown): void;
+  readonly calls: FakeOpenCodeCallLog;
 }
 
 export function createFakeOpenCodeRuntime(
@@ -78,11 +98,64 @@ export function createFakeOpenCodeRuntime(
     seq += 1;
     return `${prefix}${seq.toString(16).padStart(4, "0")}`;
   };
-  const pushQueue: unknown[][] = [];
-  const queuedBeforeConnect: unknown[] = [];
+  type QueuedEvent = { event: unknown; settle: () => void };
+  const pushQueue: QueuedEvent[][] = [];
+  const queuedBeforeConnect: QueuedEvent[] = [];
+  const wakeWaiters: Array<() => void> = [];
+  const calls: FakeOpenCodeCallLog = {
+    prompts: [],
+    commands: [],
+    permissionReplies: [],
+    formReplies: [],
+    titles: [],
+    compacts: 0,
+    interrupts: 0,
+    forks: 0,
+  };
+  let scriptSeq = 0;
+
+  const wake = (): void => {
+    const waiter = wakeWaiters.shift();
+    waiter?.();
+  };
+
+  const waitForWake = (signal: AbortSignal): Promise<void> =>
+    new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", finish);
+        const index = wakeWaiters.indexOf(finish);
+        if (index >= 0) wakeWaiters.splice(index, 1);
+        resolve();
+      };
+      signal.addEventListener("abort", finish, { once: true });
+      wakeWaiters.push(finish);
+    });
+
+  const queueEvent = (event: unknown): Promise<void> => {
+    let settle = (): void => {};
+    const delivered = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const queued: QueuedEvent = { event, settle };
+    if (pushQueue.length === 0) {
+      queuedBeforeConnect.push(queued);
+      return delivered;
+    }
+    for (const queue of pushQueue) queue.push(queued);
+    wake();
+    return delivered;
+  };
+
   const pump = new EventPump(async function* (signal) {
     yield { type: "server.connected", data: {} };
-    const local: unknown[] = [];
+    const local: QueuedEvent[] = [];
     while (queuedBeforeConnect.length > 0) {
       const pending = queuedBeforeConnect.shift();
       if (pending !== undefined) local.push(pending);
@@ -92,23 +165,21 @@ export function createFakeOpenCodeRuntime(
       while (!signal.aborted) {
         const item = local.shift();
         if (item !== undefined) {
-          yield item;
+          yield item.event;
+          item.settle();
           continue;
         }
-        await new Promise((resolve) => setTimeout(resolve, 15));
+        await waitForWake(signal);
       }
     } finally {
       const index = pushQueue.indexOf(local);
       if (index >= 0) pushQueue.splice(index, 1);
+      while (local.length > 0) local.shift()?.settle();
     }
   });
 
-  const emit = (event: Record<string, unknown>) => {
-    if (pushQueue.length === 0) {
-      queuedBeforeConnect.push(event);
-      return;
-    }
-    for (const queue of pushQueue) queue.push(event);
+  const emit = (event: Record<string, unknown>): void => {
+    void queueEvent(event);
   };
 
   const reportStreamFailure = (error: unknown): Error => {
@@ -159,6 +230,7 @@ export function createFakeOpenCodeRuntime(
       },
       prompt: async (input: OpenCodePromptInput) => {
         assertOpen();
+        calls.prompts.push(input);
         const messageId = input.id ?? nextId("msg_");
         session.messages.push({
           id: messageId,
@@ -169,9 +241,53 @@ export function createFakeOpenCodeRuntime(
           type: "session.inbox.enqueued",
           data: { sessionID: id, inboxID: messageId },
         });
+        if (options.scriptTurns !== true) return;
+        scriptSeq += 1;
+        const turnSeq = scriptSeq;
+        if (input.text.includes("/hold")) {
+          await queueEvent({
+            type: "session.execution.started",
+            data: { sessionID: id },
+            durable: { seq: turnSeq },
+          });
+          return;
+        }
+        const assistantId = nextId("msg_");
+        await queueEvent({
+          type: "session.execution.started",
+          data: { sessionID: id },
+          durable: { seq: turnSeq },
+        });
+        await queueEvent({
+          type: "session.text.started",
+          data: { sessionID: id, assistantMessageID: assistantId, ordinal: 0 },
+        });
+        await queueEvent({
+          type: "session.text.delta",
+          data: {
+            sessionID: id,
+            assistantMessageID: assistantId,
+            ordinal: 0,
+            delta: `echo:${input.text}`,
+          },
+        });
+        await queueEvent({
+          type: "session.text.ended",
+          data: {
+            sessionID: id,
+            assistantMessageID: assistantId,
+            ordinal: 0,
+            text: `echo:${input.text}`,
+          },
+        });
+        await queueEvent({
+          type: "session.execution.succeeded",
+          data: { sessionID: id },
+        });
       },
       command: async (input) => {
         assertOpen();
+        calls.commands.push({ name: input.name, text: input.text });
         session.messages.push({
           id: nextId("msg_"),
           type: "user",
@@ -180,14 +296,16 @@ export function createFakeOpenCodeRuntime(
       },
       compact: async () => {
         assertOpen();
-        emit({
+        calls.compacts += 1;
+        await queueEvent({
           type: "session.compaction.started",
           data: { sessionID: id, reason: "manual" },
         });
       },
       interrupt: async () => {
         assertOpen();
-        emit({
+        calls.interrupts += 1;
+        await queueEvent({
           type: "session.execution.interrupted",
           data: { sessionID: id },
         });
@@ -202,6 +320,7 @@ export function createFakeOpenCodeRuntime(
       },
       update: async (patch) => {
         assertOpen();
+        if (patch.title !== undefined) calls.titles.push(patch.title);
         session.info = {
           ...session.info,
           title: patch.title ?? session.info.title,
@@ -209,6 +328,7 @@ export function createFakeOpenCodeRuntime(
       },
       fork: async (checkpointMessageId) => {
         assertOpen();
+        calls.forks += 1;
         const before =
           checkpointMessageId === undefined
             ? undefined
@@ -247,11 +367,13 @@ export function createFakeOpenCodeRuntime(
         assertOpen();
         return session.messages;
       },
-      replyPermission: async () => {
+      replyPermission: async (requestID, reply) => {
         assertOpen();
+        calls.permissionReplies.push({ requestID, reply });
       },
-      replyForm: async () => {
+      replyForm: async (formID, answer) => {
         assertOpen();
+        calls.formReplies.push({ formID, answer });
       },
       cancelForm: async () => {
         assertOpen();
@@ -375,6 +497,8 @@ export function createFakeOpenCodeRuntime(
       return events;
     },
     emit,
+    play: (event) => queueEvent(event),
+    calls,
     failStream: (error: unknown) => {
       reportStreamFailure(error);
     },

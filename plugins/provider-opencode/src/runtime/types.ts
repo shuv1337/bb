@@ -161,6 +161,11 @@ export type OpenCodeNativeEvent = {
   id?: string;
   created?: number;
   data?: Record<string, unknown>;
+  durable?: {
+    aggregateID?: string;
+    seq?: number;
+    version?: number;
+  };
 };
 
 export type RuntimeNativeEvent = {

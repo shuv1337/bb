@@ -1,4 +1,4 @@
-import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
+import { cp, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -92,7 +92,11 @@ describe("builtin host artifacts", () => {
     });
   }, 20_000);
 
-  it.each([
+  const hostBridges: {
+    pluginDir: string;
+    methods: string[];
+    maxBytes?: number;
+  }[] = [
     {
       pluginDir: "provider-acp",
       methods: ["probeAgent", "resolveNativeRoots"],
@@ -100,9 +104,15 @@ describe("builtin host artifacts", () => {
     { pluginDir: "provider-claude-code", methods: ["resolveNativeRoots"] },
     { pluginDir: "provider-codex", methods: ["resolveNativeRoots"] },
     { pluginDir: "provider-pi", methods: ["resolveNativeRoots"] },
-  ])(
+    {
+      pluginDir: "provider-opencode",
+      methods: ["resolveNativeRoots"],
+      maxBytes: 1_800_000,
+    },
+  ];
+  it.each(hostBridges)(
     "builds the $pluginDir host entry that serves a host contract beside its bridge",
-    async ({ pluginDir, methods }) => {
+    async ({ pluginDir, methods, maxBytes }) => {
       const root = await mkdtemp(join(repositoryRoot, ".builtin-host-test-"));
       tempDirs.push(root);
       const source = join(repositoryRoot, "plugins", pluginDir);
@@ -133,6 +143,10 @@ describe("builtin host artifacts", () => {
       expect(Object.keys(Object(contract))).toEqual(
         expect.arrayContaining(methods),
       );
+      if (maxBytes !== undefined) {
+        const size = (await stat(built.jsPath)).size;
+        expect(size).toBeLessThanOrEqual(maxBytes);
+      }
     },
     90_000,
   );

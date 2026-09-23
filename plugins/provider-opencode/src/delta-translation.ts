@@ -19,11 +19,10 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { PendingInteractionPayload } from "@get-bb/plugin-sdk/provider-bridge";
 import type { OpenCodeNativeEvent, OpenCodeSessionMessage } from "./runtime/index.js";
-import {
-  OPENCODE_AGENT_KIND,
-  OPENCODE_FORM_KIND,
-  OPENCODE_MODEL_KIND,
-} from "./bridge/kinds.js";
+
+const OPENCODE_AGENT_KIND = "provider-opencode/agent";
+const OPENCODE_FORM_KIND = "provider-opencode/form";
+const OPENCODE_MODEL_KIND = "provider-opencode/model";
 
 const AGENT_MESSAGE_PRESENTATION: DeltaPresentation = {
   label: { pending: "Writing", completed: "Wrote" },
