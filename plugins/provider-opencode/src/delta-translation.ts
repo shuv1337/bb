@@ -142,6 +142,7 @@ interface ChildState {
 
 interface NativeSessionState {
   sessionID: string;
+  cwd: string;
   turnSerial: number;
   turnOpen: boolean;
   executionTurnId: string | undefined;
@@ -159,6 +160,7 @@ interface NativeSessionState {
 function emptyNativeState(sessionID: string): NativeSessionState {
   return {
     sessionID,
+    cwd: "",
     turnSerial: 0,
     turnOpen: false,
     executionTurnId: undefined,
@@ -456,6 +458,7 @@ function ensureTurnOpen(
 function closeTurn(
   state: NativeSessionState,
   status: "completed" | "interrupted" | "failed",
+  errorMessage?: string,
 ): ThreadDelta[] {
   if (!state.turnOpen) {
     state.executionTurnId = undefined;
@@ -468,6 +471,7 @@ function closeTurn(
     {
       kind: "turn.boundary",
       status,
+      ...(errorMessage !== undefined ? { error: { message: errorMessage } } : {}),
       ...(state.lastCheckpointId !== undefined
         ? { providerCheckpointId: state.lastCheckpointId }
         : {}),
@@ -510,6 +514,86 @@ function closeDelegation(
   return deltas;
 }
 
+function closeOpenItems(
+  state: NativeSessionState,
+  parentRef: string | undefined,
+  status: "interrupted" | "failed",
+  providerTurnId: string | undefined,
+): ThreadDelta[] {
+  const turnScope = providerTurnId !== undefined ? { providerTurnId } : {};
+  const deltas: ThreadDelta[] = [];
+  for (const [id, tool] of state.tools) {
+    if (!tool.opened) continue;
+    const classified = classifyTool(tool.name, tool.input, state.cwd);
+    deltas.push({
+      kind: "item.close",
+      key: keyFor(id, parentRef),
+      status,
+      item: classified.item,
+      presentation: classified.presentation,
+      ...turnScope,
+    });
+  }
+  state.tools.clear();
+  for (const textId of state.textOpen) {
+    deltas.push({
+      kind: "item.textClose",
+      key: keyFor(textId, parentRef),
+      channel: "agentMessage",
+      ...turnScope,
+    });
+  }
+  state.textOpen.clear();
+  if (state.compactionOpen) {
+    deltas.push({
+      kind: "item.close",
+      key: keyFor("compaction", parentRef),
+      status,
+      item: { type: "compaction" },
+      presentation: COMPACTION_PRESENTATION,
+      ...turnScope,
+    });
+    state.compactionOpen = false;
+  }
+  return deltas;
+}
+
+interface OpenCodeTurnFailure {
+  message: string;
+  type: string | undefined;
+  status: number | undefined;
+}
+
+function turnFailureFrom(data: Record<string, unknown>): OpenCodeTurnFailure {
+  const error = asRecord(data.error);
+  return {
+    message: asString(error?.message) ?? "OpenCode turn failed",
+    type: asString(error?.type),
+    status: asNumber(error?.status),
+  };
+}
+
+function failureDelta(
+  failure: OpenCodeTurnFailure,
+  providerTurnId: string | undefined,
+): ThreadDelta {
+  return {
+    kind: "provider.error",
+    message: failure.message,
+    ...(failure.type !== undefined ? { detail: failure.type } : {}),
+    ...(failure.status === 401
+      ? {
+          errorInfo: {
+            category: "unauthorized" as const,
+            providerCode: failure.type ?? null,
+            httpStatusCode: 401,
+          },
+        }
+      : {}),
+    ...(providerTurnId !== undefined ? { providerTurnId } : { threadScoped: true }),
+  };
+}
+
 export function createOpenCodeDeltaTranslator() {
   const natives = new Map<string, NativeSessionState>();
 
@@ -529,6 +613,37 @@ export function createOpenCodeDeltaTranslator() {
 
   function forget(sessionID: string): void {
     natives.delete(sessionID);
+  }
+
+  function settleOwnedTurn(
+    owner: NativeSessionState,
+    status: "interrupted" | "failed",
+    failure?: OpenCodeTurnFailure,
+  ): ThreadDelta[] {
+    const providerTurnId = owner.turnOpen ? owner.executionTurnId : undefined;
+    const deltas: ThreadDelta[] = [];
+    for (const childId of [...owner.children.keys()]) {
+      const child = natives.get(childId);
+      if (child !== undefined) {
+        deltas.push(...closeOpenItems(child, childId, status, childId));
+      }
+      deltas.push(...closeDelegation(owner, childId, status));
+    }
+    deltas.push(...closeOpenItems(owner, undefined, status, providerTurnId));
+    if (failure !== undefined) {
+      deltas.push(failureDelta(failure, providerTurnId));
+    }
+    deltas.push(...closeTurn(owner, status, failure?.message));
+    return deltas;
+  }
+
+  function settleTurn(
+    sessionID: string,
+    status: "interrupted" | "failed",
+  ): ThreadDelta[] {
+    const state = natives.get(sessionID);
+    if (state === undefined) return [];
+    return settleOwnedTurn(state, status);
   }
 
   function checkpoint(sessionID: string): string | undefined {
@@ -602,6 +717,8 @@ export function createOpenCodeDeltaTranslator() {
     const parentRef = isChild ? eventSessionID : undefined;
     const owner = nativeState(ctx.ownedSessionID);
     const native = nativeState(eventSessionID);
+    owner.cwd = ctx.cwd;
+    native.cwd = ctx.cwd;
     const aggregateID = event.durable?.aggregateID ?? eventSessionID;
     const seq = event.durable?.seq;
     let gap = false;
@@ -678,7 +795,7 @@ export function createOpenCodeDeltaTranslator() {
           deltas.push(...closeDelegation(owner, eventSessionID, "failed"));
           break;
         }
-        deltas.push(...closeTurn(native, "failed"));
+        deltas.push(...settleOwnedTurn(native, "failed", turnFailureFrom(data)));
         break;
       }
       case "session.execution.interrupted": {
@@ -686,7 +803,7 @@ export function createOpenCodeDeltaTranslator() {
           deltas.push(...closeDelegation(owner, eventSessionID, "interrupted"));
           break;
         }
-        deltas.push(...closeTurn(native, "interrupted"));
+        deltas.push(...settleOwnedTurn(native, "interrupted"));
         break;
       }
       case "session.step.started": {
@@ -1028,6 +1145,7 @@ export function createOpenCodeDeltaTranslator() {
     checkpoint,
     executionTurnId,
     reconcileAfterResync,
+    settleTurn,
   };
 }
 

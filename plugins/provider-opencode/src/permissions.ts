@@ -11,6 +11,12 @@ const SENSITIVE_AFTER: readonly OpenCodePermissionRule[] = [
   { action: "edit", resource: "*.env.*", effect: "ask" },
 ];
 
+export function disallowedToolRules(
+  tools: readonly string[],
+): OpenCodePermissionRule[] {
+  return tools.map((tool) => ({ action: tool, resource: "*", effect: "deny" }));
+}
+
 export function sessionRulesForPermissionMode(
   mode: OpenCodePermissionMode,
 ): OpenCodePermissionRule[] {

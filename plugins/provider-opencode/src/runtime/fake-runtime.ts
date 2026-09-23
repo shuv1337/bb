@@ -19,6 +19,7 @@ import type {
   OpenCodeDiscoveryHealth,
   OpenCodeLocation,
   OpenCodeModel,
+  OpenCodePermissionRule,
   OpenCodePromptInput,
   OpenCodeRuntime,
   OpenCodeSessionInfo,
@@ -39,6 +40,7 @@ export type CreateFakeOpenCodeRuntimeOptions = {
   url?: string;
   appId?: string | null;
   scriptTurns?: boolean;
+  holdInterrupts?: boolean;
 };
 
 export interface FakeOpenCodeCallLog {
@@ -55,7 +57,10 @@ export interface FakeOpenCodeCallLog {
   titles: string[];
   compacts: number;
   interrupts: number;
+  interruptedSessions: string[];
   forks: number;
+  permissions: { sessionID: string; rules: readonly OpenCodePermissionRule[] }[];
+  instructions: { sessionID: string; text: string }[];
 }
 
 type FakeSession = {
@@ -110,7 +115,10 @@ export function createFakeOpenCodeRuntime(
     titles: [],
     compacts: 0,
     interrupts: 0,
+    interruptedSessions: [],
     forks: 0,
+    permissions: [],
+    instructions: [],
   };
   let scriptSeq = 0;
 
@@ -203,6 +211,22 @@ export function createFakeOpenCodeRuntime(
     }
     pump.fail(classified);
     return classified;
+  };
+
+  const assertReady = (): void => {
+    if (
+      healthSnapshot.status === "unauthenticated" ||
+      healthSnapshot.status === "expired"
+    ) {
+      throw new OpenCodeUnauthenticatedError(
+        healthSnapshot.statusMessage ?? "OpenCode rejected authentication",
+      );
+    }
+    if (healthSnapshot.status !== "ready") {
+      throw new OpenCodeRuntimeNotReadyError(
+        healthSnapshot.statusMessage ?? "not ready",
+      );
+    }
   };
 
   const connect = async (): Promise<void> => {
@@ -309,6 +333,8 @@ export function createFakeOpenCodeRuntime(
       interrupt: async () => {
         assertOpen();
         calls.interrupts += 1;
+        calls.interruptedSessions.push(id);
+        if (options.holdInterrupts === true) return;
         await queueEvent({
           type: "session.execution.interrupted",
           data: { sessionID: id },
@@ -325,6 +351,9 @@ export function createFakeOpenCodeRuntime(
       update: async (patch) => {
         assertOpen();
         if (patch.title !== undefined) calls.titles.push(patch.title);
+        if (patch.permissions !== undefined) {
+          calls.permissions.push({ sessionID: id, rules: patch.permissions });
+        }
         session.info = {
           ...session.info,
           title: patch.title ?? session.info.title,
@@ -392,6 +421,7 @@ export function createFakeOpenCodeRuntime(
           throw new OpenCodeInstructionReplaceError();
         }
         const text = input.text.trim();
+        calls.instructions.push({ sessionID: id, text });
         session.instructions = text.length === 0 ? null : text;
         emit({
           type: "session.instructions.updated",
@@ -409,11 +439,7 @@ export function createFakeOpenCodeRuntime(
 
   const runtime: FakeOpenCodeRuntime = {
     info: async () => {
-      if (healthSnapshot.status !== "ready") {
-        throw new OpenCodeRuntimeNotReadyError(
-          healthSnapshot.statusMessage ?? "not ready",
-        );
-      }
+      assertReady();
       return {
         version: options.version ?? "2.0.10",
         url: options.url ?? "http://127.0.0.1:9",
@@ -450,11 +476,7 @@ export function createFakeOpenCodeRuntime(
     skills: async () => options.skills ?? [],
     commands: async () => options.commands ?? [],
     createSession: async (input: CreateSessionInput) => {
-      if (healthSnapshot.status !== "ready") {
-        throw new OpenCodeRuntimeNotReadyError(
-          healthSnapshot.statusMessage ?? "not ready",
-        );
-      }
+      assertReady();
       if (input.instructions?.mode === "replace") {
         throw new OpenCodeInstructionReplaceError();
       }
@@ -477,6 +499,9 @@ export function createFakeOpenCodeRuntime(
         sessionRulesForPermissionMode(input.permissionMode);
       }
       sessions.set(id, session);
+      if (input.permissions !== undefined) {
+        calls.permissions.push({ sessionID: id, rules: input.permissions });
+      }
       emit({
         type: "session.created",
         data: { sessionID: id, parentID: undefined },

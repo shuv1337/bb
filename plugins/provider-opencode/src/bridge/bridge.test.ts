@@ -1,10 +1,21 @@
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type {
   BridgeJsonRpcObject,
   BridgeJsonRpcOutputMessage,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
+import { toOpenCodeModel } from "../models.js";
 import {
+  createFakeOpenCodeRuntime,
+  type OpenCodeRuntime,
+  type SessionHandle,
+} from "../runtime/index.js";
+import {
+  FULL_PERMISSION_OPTIONS,
   type OpenCodeBridgeHarness,
+  type StartOpenCodeBridgeHarnessOptions,
   startOpenCodeBridgeHarness,
 } from "./test-support.js";
 
@@ -496,4 +507,585 @@ it("pages a form that does not fit one question and replies once", async () => {
   expect(harness.fake.calls.formReplies).toEqual([
     { formID: "FORM_2", answer: { a: "alpha", b: 2.5, c: false, e: "echo" } },
   ]);
+});
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+async function useHarness(
+  options: StartOpenCodeBridgeHarnessOptions,
+): Promise<OpenCodeBridgeHarness> {
+  await harness.teardown();
+  harness = await startOpenCodeBridgeHarness({
+    prefix: "bb-opencode-bridge-methods-",
+    ...options,
+  });
+  return harness;
+}
+
+function keepOpenAcrossBridges(fake: OpenCodeRuntime): OpenCodeRuntime {
+  return { ...fake, close: async () => undefined };
+}
+
+function paramsOf(message: BridgeJsonRpcOutputMessage): Record<string, unknown> {
+  return isRecord(message.params) ? message.params : {};
+}
+
+function messageIndex(
+  predicate: (message: BridgeJsonRpcOutputMessage) => boolean,
+): number {
+  return harness.rpc.messages.findIndex(predicate);
+}
+
+function deltaMessageIndex(
+  threadId: string,
+  predicate: (delta: Record<string, unknown>) => boolean,
+): number {
+  return messageIndex((message) => {
+    if (message.method !== "thread/delta") return false;
+    const params = paramsOf(message);
+    if (params.threadId !== threadId || !Array.isArray(params.deltas)) return false;
+    return params.deltas.some((delta: unknown) => isRecord(delta) && predicate(delta));
+  });
+}
+
+function turnInput(
+  threadId: string,
+  sessionId: string,
+  clientRequestId: string,
+  text: string,
+  options: BridgeJsonRpcObject = FULL_PERMISSION_OPTIONS,
+): BridgeJsonRpcObject {
+  return {
+    threadId,
+    providerThreadId: sessionId,
+    clientRequestId,
+    input: [{ type: "text", text, mentions: [] }],
+    options,
+  };
+}
+
+function errorData(response: BridgeJsonRpcOutputMessage): Record<string, unknown> {
+  const error: unknown = response.error;
+  if (!isRecord(error) || !isRecord(error.data)) return {};
+  return error.data;
+}
+
+it("thread/fork refuses a source that is not bb-owned or is bound to another cwd", async () => {
+  const foreign = await harness.fake.createSession({
+    location: { directory: harness.workspaceDir },
+  });
+  const rejected = await harness.request(81, "thread/fork", {
+    threadId: "thr_fork_foreign",
+    cwd: harness.workspaceDir,
+    sourceProviderThreadId: foreign.id,
+    instructionMode: "append",
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(rejected.error?.message).toContain("not a bb-owned session");
+  const started = await harness.startThread("thr_fork_owned");
+  const moved = await harness.request(82, "thread/fork", {
+    threadId: "thr_fork_moved",
+    cwd: join(harness.workspaceDir, "elsewhere"),
+    sourceProviderThreadId: providerThreadId(started),
+    instructionMode: "append",
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(moved.error?.message).toContain("is bound to");
+  expect(harness.fake.calls.forks).toBe(0);
+});
+
+it("thread/fork warns about dropped tools and persists the fork's owner", async () => {
+  const dataDir = tempDir("bb-opencode-owners-");
+  const fake = createFakeOpenCodeRuntime({ scriptTurns: true });
+  await useHarness({ fake, dataDir, wrapRuntime: keepOpenAcrossBridges });
+  const cwd = harness.workspaceDir;
+  const started = await harness.startThread("thr_fork_src");
+  const forked = await harness.request(83, "thread/fork", {
+    threadId: "thr_fork_dst",
+    cwd,
+    sourceProviderThreadId: providerThreadId(started),
+    instructionMode: "append",
+    options: FULL_PERMISSION_OPTIONS,
+    dynamicTools: [{ name: "bb_lookup", description: "lookup", inputSchema: {} }],
+  });
+  expect(forked.error).toBeUndefined();
+  const forkId = providerThreadId(forked);
+  expect(harness.deltasOf("thr_fork_dst")).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "provider.warning",
+        details: "Dropped dynamicTools: bb_lookup",
+      }),
+    ]),
+  );
+  await harness.closeAll();
+  await useHarness({ fake, dataDir, wrapRuntime: keepOpenAcrossBridges });
+  const resumed = await harness.request(84, "thread/resume", {
+    threadId: "thr_fork_dst",
+    cwd,
+    providerThreadId: forkId,
+    instructionMode: "append",
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(resumed.error).toBeUndefined();
+  expect(providerThreadId(resumed)).toBe(forkId);
+});
+
+it("settles the open turn and announces session/replaced before the new identity", async () => {
+  const threadId = "thr_replace";
+  const { sessionId } = await openTurn(threadId, "/hold", "creq_rep2345678");
+  await harness.waitFor(() => deltaKinds(threadId).includes("turn.open"), "held turn");
+  const again = await harness.startThread(threadId);
+  expect(again.error).toBeUndefined();
+  const nextId = providerThreadId(again);
+  expect(nextId).not.toBe(sessionId);
+  expect(harness.fake.calls.interruptedSessions).toContain(sessionId);
+  const settledAt = deltaMessageIndex(
+    threadId,
+    (delta) => delta.kind === "turn.boundary" && delta.status === "interrupted",
+  );
+  const replacedAt = messageIndex((message) => message.method === "session/replaced");
+  const identityAt = messageIndex(
+    (message) =>
+      message.method === "thread/identity" && paramsOf(message).providerThreadId === nextId,
+  );
+  expect(settledAt).toBeGreaterThanOrEqual(0);
+  expect(replacedAt).toBeGreaterThan(settledAt);
+  expect(identityAt).toBeGreaterThan(replacedAt);
+  const replaced = harness.rpc.messages[replacedAt];
+  if (replaced === undefined) throw new Error("missing session/replaced");
+  expect(paramsOf(replaced)).toMatchObject({
+    threadId,
+    providerThreadId: nextId,
+    contextLost: true,
+  });
+  expect(harness.deltasOf(threadId).filter((delta) => delta.kind === "turn.boundary")).toHaveLength(1);
+});
+
+it("reports a failed execution's reason and asks for sign-in on a 401", async () => {
+  const threadId = "thr_failed";
+  const started = await harness.startThread(threadId);
+  const sessionId = providerThreadId(started);
+  await harness.fake.play({
+    type: "session.execution.started",
+    data: { sessionID: sessionId },
+  });
+  await harness.fake.play({
+    type: "session.execution.failed",
+    data: {
+      sessionID: sessionId,
+      error: { type: "ProviderAuthError", message: "API key rejected", status: 401 },
+    },
+  });
+  await harness.waitFor(() => deltaKinds(threadId).includes("turn.boundary"), "failed turn");
+  const deltas = harness.deltasOf(threadId);
+  const errorAt = deltas.findIndex((delta) => delta.kind === "provider.error");
+  const boundaryAt = deltas.findIndex((delta) => delta.kind === "turn.boundary");
+  expect(deltas[errorAt]).toMatchObject({
+    message: "API key rejected",
+    detail: "ProviderAuthError",
+    errorInfo: { category: "unauthorized", httpStatusCode: 401 },
+  });
+  expect(errorAt).toBeLessThan(boundaryAt);
+  expect(deltas[boundaryAt]).toMatchObject({
+    status: "failed",
+    error: { message: "API key rejected" },
+  });
+  expect(
+    harness.rpc.messages.filter((message) => message.method === "provider/recovery").map(paramsOf),
+  ).toEqual([
+    expect.objectContaining({ threadId, kind: "authRequired", retryable: false }),
+  ]);
+});
+
+it("rejects thread/start with a typed authRequired error when OpenCode is signed out", async () => {
+  await useHarness({
+    runtime: {
+      health: {
+        status: "unauthenticated",
+        statusMessage: "OpenCode rejected the saved credentials",
+        appId: "opencode",
+        version: "2.0.10",
+        installedVersion: "2.0.10",
+        url: "http://127.0.0.1:9",
+        registrationFile: null,
+        pid: 1,
+        pathBinaryAppId: "opencode",
+      },
+    },
+  });
+  const started = await harness.startThread("thr_signed_out");
+  expect(started.error?.message).toContain("OpenCode rejected the saved credentials");
+  expect(errorData(started)).toMatchObject({
+    recovery: { kind: "authRequired", retryable: false },
+  });
+});
+
+it("persists owners atomically and forgets them on thread/discard", async () => {
+  const dataDir = tempDir("bb-opencode-owners-");
+  await useHarness({ dataDir });
+  const ownersFile = join(dataDir, "opencode-session-owners.json");
+  const readOwners = (): Record<string, unknown> => {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(ownersFile, "utf8"));
+      return isRecord(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  const started = await harness.startThread("thr_owned");
+  const sessionId = providerThreadId(started);
+  await harness.waitFor(() => sessionId in readOwners(), "owner write");
+  expect(readOwners()[sessionId]).toEqual({
+    threadId: "thr_owned",
+    cwd: harness.workspaceDir,
+  });
+  const discarded = await harness.request(91, "thread/discard", {
+    threadId: "thr_owned",
+    providerThreadId: sessionId,
+  });
+  expect(discarded.error).toBeUndefined();
+  await harness.waitFor(() => !(sessionId in readOwners()), "owner removal");
+  expect(readdirSync(dataDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+});
+
+it("keeps thread/start working when the owners file cannot be written", async () => {
+  const parent = tempDir("bb-opencode-owners-");
+  const blocked = join(parent, "not-a-dir");
+  writeFileSync(blocked, "file", "utf8");
+  await useHarness({ dataDir: blocked });
+  const started = await harness.startThread("thr_unwritable");
+  expect(started.error).toBeUndefined();
+  await harness.waitFor(
+    () => harness.warnings.some((warning) => warning.includes("could not persist")),
+    "persist warning",
+  );
+});
+
+it("interrupts busy child sessions when the thread is released", async () => {
+  const threadId = "thr_child_release";
+  const started = await harness.startThread(threadId);
+  const sessionId = providerThreadId(started);
+  const child = await harness.fake.createSession({
+    location: { directory: harness.workspaceDir },
+  });
+  await harness.fake.play({
+    type: "session.created",
+    data: { sessionID: child.id, parentID: sessionId, title: "helper" },
+  });
+  await harness.fake.play({
+    type: "session.execution.started",
+    data: { sessionID: child.id, parentID: sessionId },
+  });
+  await harness.waitFor(
+    () =>
+      harness
+        .deltasOf(threadId)
+        .some((delta) => delta.kind === "turn.open" && delta.parentRef === child.id),
+    "child turn",
+  );
+  const released = await harness.request(92, "thread/stop", {
+    threadId,
+    providerThreadId: sessionId,
+    intent: "release",
+    activeTurnId: null,
+  });
+  expect(released.error).toBeUndefined();
+  expect(harness.fake.calls.interruptedSessions).toEqual([child.id]);
+});
+
+it("denies disallowedTools through OpenCode permission rules on every update", async () => {
+  const threadId = "thr_disallowed";
+  const started = await harness.startThread(threadId, { disallowedTools: ["webfetch"] });
+  expect(started.error).toBeUndefined();
+  const sessionId = providerThreadId(started);
+  const deny = { action: "webfetch", resource: "*", effect: "deny" };
+  const forSession = () =>
+    harness.fake.calls.permissions.filter((entry) => entry.sessionID === sessionId);
+  expect(forSession()[0]?.rules.at(-1)).toEqual(deny);
+  const before = forSession().length;
+  const turn = await harness.request(
+    "creq_dis2345678",
+    "turn/start",
+    turnInput(threadId, sessionId, "creq_dis2345678", "hello"),
+  );
+  expect(turn.error).toBeUndefined();
+  expect(forSession().length).toBeGreaterThan(before);
+  expect(forSession().at(-1)?.rules.at(-1)).toEqual(deny);
+});
+
+it("refuses thread/start input and installation updates instead of ignoring them", async () => {
+  const withInput = await harness.startThread("thr_with_input", {
+    input: [{ type: "text", text: "hi", mentions: [] }],
+  });
+  expect(withInput.error).toMatchObject({ code: -32602 });
+  expect(harness.fake.calls.prompts).toEqual([]);
+  const update = await harness.request(93, "provider/installation/run", {
+    providerId: "opencode",
+    action: "update",
+  });
+  expect(update.error).toMatchObject({ code: -32602 });
+});
+
+it("freezes instructions for the session and clears them on reconstruction", async () => {
+  const threadId = "thr_instructions";
+  const started = await harness.startThread(threadId, {
+    options: { ...FULL_PERMISSION_OPTIONS, instructions: "be brief" },
+  });
+  const sessionId = providerThreadId(started);
+  const writes = () =>
+    harness.fake.calls.instructions.filter((entry) => entry.sessionID === sessionId);
+  expect(writes()).toEqual([{ sessionID: sessionId, text: "be brief" }]);
+  const turn = await harness.request(
+    "creq_ins2345678",
+    "turn/start",
+    turnInput(threadId, sessionId, "creq_ins2345678", "hello", {
+      ...FULL_PERMISSION_OPTIONS,
+      instructions: "be verbose",
+    }),
+  );
+  expect(turn.error).toBeUndefined();
+  expect(writes()).toHaveLength(1);
+  const resumed = await harness.request(94, "thread/resume", {
+    threadId,
+    cwd: harness.workspaceDir,
+    providerThreadId: sessionId,
+    instructionMode: "append",
+    options: { ...FULL_PERMISSION_OPTIONS, instructions: "   " },
+  });
+  expect(resumed.error).toBeUndefined();
+  expect(writes().at(-1)).toEqual({ sessionID: sessionId, text: "" });
+});
+
+it("model/list keeps the runtime's default model", async () => {
+  await useHarness({
+    runtime: {
+      models: [
+        toOpenCodeModel({ providerID: "anthropic", id: "sonnet", name: "Sonnet" }),
+        toOpenCodeModel({
+          providerID: "openai",
+          id: "gpt",
+          name: "GPT",
+          isDefault: true,
+          variants: [{ id: "low" }, { id: "high" }],
+          defaultVariant: "high",
+        }),
+      ],
+    },
+  });
+  const listed = await harness.request(95, "model/list", { cwd: harness.workspaceDir });
+  const result = listed.result;
+  if (!isRecord(result) || !Array.isArray(result.models)) {
+    throw new Error("model/list returned no models");
+  }
+  expect(
+    result.models.map((model: unknown) =>
+      isRecord(model) ? [model.id, model.isDefault, model.defaultReasoningEffort] : null,
+    ),
+  ).toEqual([
+    ["anthropic/sonnet", false, "none"],
+    ["openai/gpt", true, "high"],
+  ]);
+});
+
+it("thread/stop uses activeTurnId to interrupt dispatched work and skip stale turns", async () => {
+  await useHarness({});
+  const staleThread = "thr_stop_stale";
+  const stale = await harness.startThread(staleThread);
+  const stopped = await harness.request(96, "thread/stop", {
+    threadId: staleThread,
+    providerThreadId: providerThreadId(stale),
+    intent: "interrupt",
+    activeTurnId: "exec:gone:1",
+  });
+  expect(stopped.error).toBeUndefined();
+  expect(harness.fake.calls.interrupts).toBe(0);
+
+  const pendingThread = "thr_stop_pending";
+  const pending = await harness.startThread(pendingThread);
+  const pendingId = providerThreadId(pending);
+  const turn = await harness.request(
+    "creq_stp2345678",
+    "turn/start",
+    turnInput(pendingThread, pendingId, "creq_stp2345678", "not started yet"),
+  );
+  expect(turn.error).toBeUndefined();
+  const interrupted = await harness.request(97, "thread/stop", {
+    threadId: pendingThread,
+    providerThreadId: pendingId,
+    intent: "interrupt",
+    activeTurnId: "exec:pending:1",
+  });
+  expect(interrupted.error).toBeUndefined();
+  expect(harness.fake.calls.interruptedSessions).toEqual([pendingId]);
+});
+
+it("settles an interrupt itself when OpenCode never confirms it", async () => {
+  await useHarness({
+    scriptTurns: true,
+    runtime: { holdInterrupts: true },
+    bridge: { interruptSettlementTimeoutMs: 40 },
+  });
+  const threadId = "thr_interrupt_timeout";
+  const { sessionId } = await openTurn(threadId, "/hold", "creq_tim2345678");
+  await harness.fake.play({
+    type: "session.tool.input.started",
+    data: { sessionID: sessionId, id: "tool_1", name: "bash" },
+  });
+  await harness.waitFor(
+    () => harness.deltasOf(threadId).some((delta) => delta.kind === "item.open"),
+    "tool open",
+  );
+  const stopped = await harness.request(98, "thread/stop", {
+    threadId,
+    providerThreadId: sessionId,
+    intent: "interrupt",
+    activeTurnId: null,
+  });
+  expect(stopped.error).toBeUndefined();
+  const responseAt = harness.rpc.messages.indexOf(stopped);
+  const closeAt = deltaMessageIndex(
+    threadId,
+    (delta) =>
+      delta.kind === "item.close" &&
+      delta.status === "interrupted" &&
+      isRecord(delta.key) &&
+      delta.key.providerItemId === "tool_1",
+  );
+  const boundaryAt = deltaMessageIndex(
+    threadId,
+    (delta) => delta.kind === "turn.boundary" && delta.status === "interrupted",
+  );
+  expect(closeAt).toBeGreaterThanOrEqual(0);
+  expect(boundaryAt).toBeGreaterThanOrEqual(closeAt);
+  expect(responseAt).toBeGreaterThan(boundaryAt);
+  expect(deltaKinds(threadId)).not.toContain("session.ended");
+});
+
+it("answers a grandchild's permission on the grandchild and skips unattached children", async () => {
+  const replies: Array<{ sessionID: string; requestID: string }> = [];
+  const unopenable = new Set<string>();
+  const trackReplies = (handle: SessionHandle): SessionHandle => ({
+    ...handle,
+    replyPermission: async (requestID, reply) => {
+      replies.push({ sessionID: handle.id, requestID });
+      await handle.replyPermission(requestID, reply);
+    },
+  });
+  await useHarness({
+    wrapRuntime: (fake) => ({
+      ...fake,
+      createSession: async (input) => trackReplies(await fake.createSession(input)),
+      openSession: async (sessionID) => {
+        if (unopenable.has(sessionID)) throw new Error("child session is gone");
+        return trackReplies(await fake.openSession(sessionID));
+      },
+    }),
+  });
+  const threadId = "thr_lineage";
+  const rootId = providerThreadId(await harness.startThread(threadId));
+  const location = { directory: harness.workspaceDir };
+  const child = await harness.fake.createSession({ location });
+  const grandchild = await harness.fake.createSession({ location });
+  await harness.fake.play({
+    type: "session.created",
+    data: { sessionID: child.id, parentID: rootId, title: "child" },
+  });
+  await harness.fake.play({
+    type: "session.created",
+    data: { sessionID: grandchild.id, parentID: child.id, title: "grandchild" },
+  });
+  harness.fake.emit({
+    type: "permission.asked",
+    data: { id: "per_grand", sessionID: grandchild.id, action: "read", resources: ["a"] },
+  });
+  await harness.waitFor(() => interactionRequest() !== undefined, "grandchild permission");
+  const request = interactionRequest();
+  if (request?.id === undefined) throw new Error("missing grandchild permission");
+  harness.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      result: { decision: "allow_once", grantedPermissions: null },
+    }),
+  );
+  await harness.waitFor(() => replies.length === 1, "grandchild reply");
+  expect(replies).toEqual([{ sessionID: grandchild.id, requestID: "per_grand" }]);
+
+  const orphan = await harness.fake.createSession({ location });
+  unopenable.add(orphan.id);
+  await harness.fake.play({
+    type: "session.created",
+    data: { sessionID: orphan.id, parentID: rootId, title: "orphan" },
+  });
+  await harness.fake.play({
+    type: "permission.asked",
+    data: { id: "per_orphan", sessionID: orphan.id, action: "read", resources: ["b"] },
+  });
+  await harness.waitFor(
+    () => harness.deltasOf(threadId).some((delta) => delta.kind === "provider.warning"),
+    "orphan warning",
+  );
+  expect(
+    harness
+      .deltasOf(threadId)
+      .filter((delta) => delta.kind === "unhandled")
+      .map((delta) => delta.rawType),
+  ).toEqual(["opencode/child-session-unavailable"]);
+  expect(
+    harness.rpc.messages.filter(
+      (message) => message.method === "interaction/request" && message.id !== undefined,
+    ),
+  ).toHaveLength(1);
+  expect(replies).toHaveLength(1);
+});
+
+it("backs off and resyncs when the event stream ends", async () => {
+  let subscribes = 0;
+  let contexts = 0;
+  await useHarness({
+    bridge: { resubscribeBackoffMs: { initial: 20, max: 40 } },
+    wrapRuntime: (fake) => ({
+      ...fake,
+      createSession: async (input) => {
+        const handle = await fake.createSession(input);
+        return {
+          ...handle,
+          context: async () => {
+            contexts += 1;
+            return handle.context();
+          },
+        };
+      },
+      subscribe: (sessionID, signal) => {
+        subscribes += 1;
+        if (subscribes === 1) {
+          return {
+            [Symbol.asyncIterator]: () => ({
+              next: async () => ({ done: true as const, value: undefined }),
+            }),
+          };
+        }
+        return fake.subscribe(sessionID, signal);
+      },
+    }),
+  });
+  const started = await harness.startThread("thr_stream_end");
+  expect(started.error).toBeUndefined();
+  await harness.waitFor(() => subscribes === 2 && contexts === 1, "resubscribe and resync");
+  expect(harness.warnings.some((warning) => warning.includes("resubscribing in 20ms"))).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  expect(subscribes).toBe(2);
 });

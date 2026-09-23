@@ -4,6 +4,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 import { opencodeExtensionKinds } from "./extension-kinds.js";
 import { OPENCODE_NATIVE_ROOTS_DECLARATION } from "./native-roots.js";
+import { OPENCODE_SIGN_IN_HINT } from "./strings.js";
 
 export const OPENCODE_PROVIDER_ID = "opencode";
 
@@ -48,7 +49,7 @@ export function opencodeProviderDeclaration(): PluginProviderDeclaration {
     icon: "./icons/opencode.svg",
     experimental_visibility: "installed",
     strings: {
-      signInHint: "Run `opencode auth login` on the machine to sign in.",
+      signInHint: OPENCODE_SIGN_IN_HINT,
       expiredHint:
         "Your OpenCode session expired. Run `opencode auth login`, then reload.",
       installUrl: "https://opencode.ai/v2/docs/",

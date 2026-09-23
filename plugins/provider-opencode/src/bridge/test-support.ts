@@ -8,11 +8,12 @@ import {
   type BridgeJsonRpcOutputMessage,
   type BridgeJsonRpcTestHarness,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
-import { createOpenCodeBridge } from "./bridge.js";
+import { createOpenCodeBridge, type OpenCodeBridgeDeps } from "./bridge.js";
 import {
   createFakeOpenCodeRuntime,
   type CreateFakeOpenCodeRuntimeOptions,
   type FakeOpenCodeRuntime,
+  type OpenCodeRuntime,
 } from "../runtime/index.js";
 
 export const FULL_PERMISSION_OPTIONS = {
@@ -27,12 +28,18 @@ export interface StartOpenCodeBridgeHarnessOptions {
   initialize?: boolean;
   scriptTurns?: boolean;
   runtime?: CreateFakeOpenCodeRuntimeOptions;
+  fake?: FakeOpenCodeRuntime;
+  wrapRuntime?: (fake: FakeOpenCodeRuntime) => OpenCodeRuntime;
+  bridge?: Omit<OpenCodeBridgeDeps, "createRuntime" | "warn">;
+  dataDir?: string;
 }
 
 export interface OpenCodeBridgeHarness {
   workspaceDir: string;
   fake: FakeOpenCodeRuntime;
   rpc: BridgeJsonRpcTestHarness;
+  warnings: string[];
+  closeAll(): Promise<void>;
   handleLine: (line: string) => void;
   takeMessages: () => BridgeJsonRpcOutputMessage[];
   request(
@@ -55,13 +62,28 @@ export async function startOpenCodeBridgeHarness(
   const workspaceDir = mkdtempSync(
     join(tmpdir(), options.prefix ?? "bb-opencode-bridge-"),
   );
-  const fake = createFakeOpenCodeRuntime({
-    ...options.runtime,
-    scriptTurns: options.scriptTurns === true,
-  });
+  const fake =
+    options.fake ??
+    createFakeOpenCodeRuntime({
+      ...options.runtime,
+      scriptTurns: options.scriptTurns === true,
+    });
+  const runtime = options.wrapRuntime?.(fake) ?? fake;
+  const warnings: string[] = [];
   const bridge = createOpenCodeBridge({
-    createRuntime: async () => fake,
+    ...options.bridge,
+    createRuntime: async () => runtime,
+    warn: (message) => {
+      warnings.push(message);
+    },
   });
+  if (options.dataDir !== undefined) {
+    bridge.experimental_providerBridge.start?.({
+      pluginId: "provider-opencode",
+      dataDir: options.dataDir,
+      tempDir: options.dataDir,
+    });
+  }
   const rpc = createBridgeJsonRpcTestHarness(bridge.handleLine);
   let requestId = 1;
 
@@ -87,6 +109,8 @@ export async function startOpenCodeBridgeHarness(
     workspaceDir,
     fake,
     rpc,
+    warnings,
+    closeAll: () => bridge.closeAll(),
     handleLine: bridge.handleLine,
     takeMessages: rpc.takeMessages,
     async request(id, method, params) {

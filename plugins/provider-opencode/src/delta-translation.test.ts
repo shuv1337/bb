@@ -273,6 +273,37 @@ describe("delta translation turn lifecycle", () => {
     ]);
   });
 
+  it("closes open items and delegations before an interrupted boundary", () => {
+    const deltas = translateAll([
+      { type: "session.execution.started", data: { sessionID: "SES_1" } },
+      {
+        type: "session.tool.input.started",
+        data: { sessionID: "SES_1", id: "call_1", name: "bash" },
+      },
+      {
+        type: "session.text.started",
+        data: { sessionID: "SES_1", assistantMessageID: "msg_1", ordinal: 0 },
+      },
+      {
+        type: "session.created",
+        data: { sessionID: "SES_CHILD", parentID: "SES_1", title: "helper" },
+      },
+      { type: "session.execution.interrupted", data: { sessionID: "SES_1" } },
+    ]);
+    const tail = deltas.slice(deltas.findIndex((delta) => delta.kind === "item.close"));
+    expect(
+      tail.map((delta) => [
+        delta.kind,
+        "status" in delta ? delta.status : undefined,
+      ]),
+    ).toEqual([
+      ["item.close", "interrupted"],
+      ["item.close", "interrupted"],
+      ["item.textClose", undefined],
+      ["turn.boundary", "interrupted"],
+    ]);
+  });
+
   it("forgets a detached session", () => {
     const translator = createOpenCodeDeltaTranslator();
     translateAll(

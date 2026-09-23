@@ -680,6 +680,14 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
   private assertReady(): void {
     this.assertOpen();
     if (
+      this.healthSnapshot.status === "unauthenticated" ||
+      this.healthSnapshot.status === "expired"
+    ) {
+      throw new OpenCodeUnauthenticatedError(
+        this.healthSnapshot.statusMessage ?? "OpenCode rejected authentication",
+      );
+    }
+    if (
       this.healthSnapshot.status !== "ready" ||
       this.client === null ||
       this.registration === null ||

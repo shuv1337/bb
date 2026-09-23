@@ -1,6 +1,7 @@
 import {
   type ProviderHealthResult,
   type ProviderInstallationCommand,
+  type ProviderInstallationRequirement,
   type ProviderInstallationRunResult,
   type ProviderInstallationStatus,
   experimental_downloadedInstallerCommand as downloadedInstallerCommand,
@@ -19,6 +20,7 @@ import {
 import type { OpenCodeDiscoveryHealth } from "../runtime/index.js";
 
 export const OPENCODE_MINIMUM_SUPPORTED_VERSION = "2.0.0";
+export const OPENCODE_REWIND_MINIMUM_SUPPORTED_VERSION = OPENCODE_MINIMUM_SUPPORTED_VERSION;
 export const OPENCODE_NPM_PACKAGE = "@opencode/cli";
 export const SHUVCODE_NPM_PACKAGE = "shuvcode";
 export const OPENCODE_INSTALL_SCRIPT_URL = "https://opencode.ai/v2/install";
@@ -36,7 +38,16 @@ export type OpenCodeMaintenanceDeps = {
   resolveExecutablePath?: typeof resolveExecutablePath;
   npmLatestVersion?: typeof npmLatestVersion;
   probeNpmGlobalPackage?: typeof probeNpmGlobalPackage;
+  requirement?: ProviderInstallationRequirement;
 };
+
+export function minimumSupportedOpenCodeVersion(
+  requirement: ProviderInstallationRequirement | undefined,
+): string {
+  return requirement === "thread_rewind"
+    ? OPENCODE_REWIND_MINIMUM_SUPPORTED_VERSION
+    : OPENCODE_MINIMUM_SUPPORTED_VERSION;
+}
 
 function envOf(deps: OpenCodeMaintenanceDeps): NodeJS.ProcessEnv {
   return deps.env ?? process.env;
@@ -256,7 +267,7 @@ export async function getOpenCodeProviderInstallationStatus(
     }),
     currentVersion: health.installedVersion ?? health.version,
     latestVersion,
-    minimumSupportedVersion: OPENCODE_MINIMUM_SUPPORTED_VERSION,
+    minimumSupportedVersion: minimumSupportedOpenCodeVersion(deps.requirement),
     npmPackageName,
     npmGlobalPackageVersion: npmGlobal.npmGlobalPackageVersion,
     installAction:

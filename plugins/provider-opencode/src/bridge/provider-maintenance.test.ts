@@ -9,6 +9,7 @@ import {
   openCodeHealthResult,
   openCodeInstallCommand,
   OPENCODE_INSTALL_SCRIPT_URL,
+  OPENCODE_REWIND_MINIMUM_SUPPORTED_VERSION,
   SHUVCODE_NPM_PACKAGE,
   WINDOWS_OPENCODE_INSTALL_MESSAGE,
   presentOpenCodeAppId,
@@ -385,5 +386,22 @@ describe("OpenCode installation plans", () => {
       }),
     });
     expect(run.available).toBe(false);
+  });
+});
+
+describe("OpenCode installation requirements", () => {
+  it("reports the thread_rewind minimum for a rewind requirement", async () => {
+    const status = await getOpenCodeProviderInstallationStatus({
+      env: {},
+      platform: "linux",
+      health: async () =>
+        health({ status: "unsupported_version", version: "1.9.0", appId: "opencode" }),
+      ...emptyProbe,
+      requirement: "thread_rewind",
+    });
+    expect(status.minimumSupportedVersion).toBe(
+      OPENCODE_REWIND_MINIMUM_SUPPORTED_VERSION,
+    );
+    expect(status.versionUnsupported).toBe(true);
   });
 });
