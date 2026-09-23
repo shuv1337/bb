@@ -18,6 +18,29 @@ What lives here:
 The provider is always visible, so hosts without OpenCode still show its
 Install action.
 
+## Install from GitHub
+
+Requires bb 0.43.4 or newer with Plugin SDK 0.5.16 or newer (0.5.x).
+
+```sh
+bb plugin install 'git:https://github.com/shuv1337/bb@main' --subdirectory plugins/provider-opencode --yes
+bb plugin enable provider-opencode
+```
+
+The installer builds the server and host artifacts from source. No separate
+release branch or monorepo dependency installation is needed. Start an OpenCode
+v2 or Shuvcode service on each machine you want to use; this plugin does not
+start one automatically. OpenCode v1 is not supported.
+
+Update an existing Git installation with `bb plugin update provider-opencode --yes`.
+An existing bundled installation already contains this plugin; do not install a
+second copy over it.
+
+On our bb fork, disable the legacy ACP provider with
+`bb plugin config provider-acp set enableOpenCode false`. That setting is specific
+to our fork; stock bb users should select the native `opencode` provider instead
+of `acp-opencode`. Disabling the entire ACP plugin also disables its other agents.
+
 ## Skills and commands
 
 Declared roots (`experimental_nativeSkillRoots` / `experimental_nativeCommandRoots`):

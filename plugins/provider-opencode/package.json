@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Run bb threads with OpenCode v2.",
   "engines": {
-    "bb": ">=0.0",
-    "bbPluginSdk": ">=0.4.90"
+    "bb": ">=0.43.4",
+    "bbPluginSdk": ">=0.5.16 <0.6.0"
   },
   "bb": {
     "name": "OpenCode provider",
@@ -23,15 +23,14 @@
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit",
-    "prepare:bundled": "bb-plugin-build prepare-bundled"
+    "prepare:bundled": "node ../../packages/plugin-build/dist/cli.js prepare-bundled"
   },
   "dependencies": {
-    "@get-bb/plugin-sdk": "workspace:*",
     "@opencode/client": "2.0.10",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@get-bb/plugin-sdk": "^0.5.16"
   },
   "devDependencies": {
-    "@bb/plugin-build": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-7": "npm:typescript@^7.0.2",

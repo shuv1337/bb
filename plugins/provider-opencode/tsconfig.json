@@ -8,11 +8,6 @@
     "esModuleInterop": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "paths": {
-      "@get-bb/plugin-sdk": [
-        "../../packages/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts"
-      ]
-    },
     "types": ["node"]
   },
   "include": ["*.ts", "src", "vitest.config.ts"]

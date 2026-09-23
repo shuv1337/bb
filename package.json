@@ -79,7 +79,8 @@
     },
     "overrides": {
       "zod": "4.3.6",
-      "@expo/metro-config>lightningcss": "1.30.1"
+      "@expo/metro-config>lightningcss": "1.30.1",
+      "bb-plugin-provider-opencode>@get-bb/plugin-sdk": "workspace:*"
     },
     "patchedDependencies": {
       "expo-modules-jsi@57.0.4": "patches/expo-modules-jsi@57.0.4.patch",

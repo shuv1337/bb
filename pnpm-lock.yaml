@@ -7,6 +7,7 @@ settings:
 overrides:
   zod: 4.3.6
   '@expo/metro-config>lightningcss': 1.30.1
+  bb-plugin-provider-opencode>@get-bb/plugin-sdk: workspace:*
 
 patchedDependencies:
   '@pierre/diffs@1.2.9':
@@ -4198,9 +4199,6 @@ importers:
         specifier: 4.3.6
         version: 4.3.6
     devDependencies:
-      '@bb/plugin-build':
-        specifier: workspace:*
-        version: link:../../packages/plugin-build
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.10
@@ -20990,9 +20988,7 @@ snapshots:
       metro-runtime: 0.84.5
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
 
   '@react-native/normalize-colors@0.79.6': {}
 

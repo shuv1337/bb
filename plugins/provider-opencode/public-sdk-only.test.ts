@@ -28,14 +28,16 @@ describe("provider-opencode imports only the public SDK", () => {
     expect(scan.violations).toEqual([]);
   });
 
-  it("allows only the bundled build tool as a private dev dependency", () => {
-    expect(scan.privateDependencies).toEqual(["@bb/plugin-build"]);
+  it("has no private dependencies that would prevent a Git subdirectory install", () => {
+    expect(scan.privateDependencies).toEqual([]);
     const manifest: unknown = JSON.parse(
       readFileSync(new URL("./package.json", import.meta.url), "utf8"),
     );
     expect(manifest).toMatchObject({
-      dependencies: { "@opencode/client": "2.0.10" },
-      devDependencies: { "@bb/plugin-build": "workspace:*" },
+      dependencies: {
+        "@opencode/client": "2.0.10",
+        "@get-bb/plugin-sdk": "^0.5.16",
+      },
     });
   });
 });
