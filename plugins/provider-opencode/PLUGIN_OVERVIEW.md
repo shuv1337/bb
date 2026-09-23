@@ -4,12 +4,13 @@ Start a thread, pick OpenCode, and talk to the OpenCode v2 service already runni
 
 - Native OpenCode sessions, checkpoint forks, resume, rename, and compact.
 - Plan mode maps to the OpenCode `plan` agent. `defaultAgent` covers new threads. `defaultVariant` selects a catalog variant the picker cannot name.
-- Skills from OpenCode's catalog and `.opencode` / `.agents` / `.claude` directories, plus `.opencode/commands` and `.opencode/command`.
+- Skills from OpenCode's catalog and `.opencode` / `.agents` / `.claude` directories.
+- Slash commands from OpenCode's catalog, plus project `.opencode/commands` and `.opencode/command`.
 - Health and install status on each host. Install runs only when no v2-capable app is present.
 
 ## How it works
 
-bb attaches to a live OpenCode v2 registration (`opencode`, `shuvcode`, or another app) or to `OPENCODE_SERVER_URL`. It never calls OpenCode's destructive `Service.ensure`. Deleting a bb thread leaves the OpenCode session in place.
+bb attaches to a live OpenCode v2 registration (`opencode`, `shuvcode`, or another app) or to `OPENCODE_SERVER_URL`. It never calls OpenCode's destructive `Service.ensure`, and it sends a registration's password only when that registration is on this host; use `OPENCODE_SERVER_URL` for a service elsewhere. Deleting a bb thread leaves the OpenCode session in place.
 
 OpenCode (ACP) remains available as `acp-opencode` for v1 binaries.
 

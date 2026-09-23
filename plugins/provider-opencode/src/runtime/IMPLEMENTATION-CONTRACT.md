@@ -1,6 +1,6 @@
 # OpenCode runtime seam
 
-Bridge consumes **only** `plugins/provider-opencode/src/runtime/index.ts` (plus `../models.ts` and `../permissions.ts`). HTTP, SSE, `service*.json`, and `@opencode/client` stay behind this module.
+From this directory the bridge imports `plugins/provider-opencode/src/runtime/index.ts`. HTTP, SSE, and `@opencode/client` stay behind that module. One exception: `src/bridge/provider-maintenance.ts` imports `discoveryDepsFrom` and `resolveAttachedRegistration` directly from `runtime/discovery.ts` and runs the read-only `service*.json` scan itself for `provider/health` and installation status.
 
 Pinned client: `@opencode/client@2.0.10`, imports `@opencode/client/promise` and `@opencode/client/service` only. Never `Service.ensure`, never `./effect`, never `./solid`, never `@opencode/sdk`, never `@bb/*`.
 
@@ -17,6 +17,8 @@ createFakeOpenCodeRuntime(options?: CreateFakeOpenCodeRuntimeOptions): OpenCodeR
 2. Else read-only scan of `$XDG_STATE_HOME` (default `~/.local/state`) `service*.json`.
 
 No auto-start. A runtime may be constructed while unhealthy. `health()` re-resolves and **reattaches** the HTTP client when a usable URL appears. `status: "ready"` is never returned without an attached client on a non-zero port. Session methods throw `OpenCodeRuntimeNotReadyError` until then.
+
+**Production gap.** The bridge never calls `health()` on its live runtime. `bridge.ts` builds the runtime once and keeps it for the bridge's lifetime; `provider/health` goes through provider-maintenance's `resolveAttachedRegistration`, and `host.ts` builds a short-lived runtime of its own. So the reattach and subscriber-moving behavior below runs only in tests today. A bridge started while the service is down keeps throwing `OpenCodeRuntimeNotReadyError`, and a service restart with a new pid or password makes the pump reconnect to the old URL with the old password, get a 401, and detach its sessions with `authRequired`. Both cases need a bridge restart until the bridge calls `health()` itself.
 
 `health()` first re-probes the attached registration (`kill(pid, 0)` for scanned registrations, then `/api/info` with a matching pid). Only when that fails does it rescan the state roots and PATH. While the attached registration answers, `health()` returns the health cached from the last scan: a PATH change (`installedVersion`, `pathBinaryAppId`), a changed `OPENCODE_APP`, or a newly started service of the preferred app is not picked up until the attached service stops answering or the runtime is recreated.
 
@@ -197,9 +199,30 @@ type OpenCodeNativeEvent = {
 
 Reconnect: backoff (250ms → 8s, abortable), new subscribe, wait for `server.connected`, **then** emit `resync`/`reconnect`. Do not resync on the disconnect itself. The backoff returns to 250ms only after a connection that stayed up for at least 10s past `server.connected`, so a server that accepts and drops keeps climbing to 8s.
 
-Per-subscriber buffer 1024 events. Overflow: drop everything queued, emit one `resync`/`overflow`, then keep queueing. The bridge answers `resync` by reading `session.context()`, so an overflow costs one context fetch, not lost state.
+Per-subscriber buffer `SUBSCRIBER_BUFFER_LIMIT` (1024) events. When an event arrives at a full queue, the queue and that event are dropped and replaced by one `resync`/`overflow`; later events queue normally. A consumer that keeps falling behind sees one `resync`/`overflow` per overflow.
 
 `close()` / `iterator.return()`: remove subscriber + abort listener, clear child maps, abort backoff timers.
+
+How a subscription ends:
+
+| Cause | Iterator |
+| --- | --- |
+| Caller aborts its signal or calls `return()` | clean `done` |
+| 401 on the stream (fatal) | throws `OpenCodeUnauthenticatedError` |
+| `health()` finds `unauthenticated` / `expired` | throws `OpenCodeUnauthenticatedError` |
+| `runtime.close()` | throws `OpenCodeRuntimeNotReadyError` |
+| Transient stream error or clean SSE end | does not end: `stream.error` once, then `resync`/`reconnect` after the next `server.connected` |
+| `health()` attaches a different registration | does not end: moves to the new pump, then `resync`/`reconnect` (tests only; the bridge never calls `health()` on its live runtime) |
+
+### Bridge handling
+
+- `stream.error` → `provider.warning` "OpenCode event stream disconnected; reconnecting". The session stays attached.
+- `resync` (either reason) → `session.context()`, then `translator.reconcileAfterResync`: open tool items close as `completed`, open text and compaction items close, the last context message becomes the checkpoint id, and an open turn closes as `completed`. Events dropped by the outage or the overflow are not replayed. A turn still running in OpenCode reopens on its next event.
+- A `durable.seq` gap on one aggregate runs the same reconcile for that session before the event's own deltas.
+- A handler that throws while applying a native event → `provider.error` scoped to the thread or turn, then one extra `resync`. If that extra resync fails, it is only logged and not retried.
+- A `resync` from the pump (reconnect or overflow) or from a resubscribe whose `context()` read fails → `provider.error` scoped to the thread or turn, not retried.
+- A subscription that throws → pending accepts settle as a zero-work `failed` turn, an open turn gets `provider.error` and a `failed` `turn.boundary`, otherwise a thread-scoped `provider.error`. `OpenCodeUnauthenticatedError` also sends `provider/recovery { authRequired }`. The session is detached, so a later `turn/start` fails with `No active OpenCode session`.
+- A subscription that ends with `done` while the session is open → resubscribe with backoff (250ms → 8s, reset after an event arrives) and apply one `resync` before the next event.
 
 ## Models (`../models.ts`)
 
@@ -218,6 +241,22 @@ Empty `variants[]`: `supportedReasoningEfforts` is **empty**; `defaultReasoningE
 ## Out of scope (this module)
 
 No session delete/import, no revert, no usage windows, no auto-start, no installer, no user config mutation, no `skills/configure` roots.
+
+## Recorded wire facts
+
+From live captures against `@opencode/client@2.0.10` (shuvcode 2.0.8) and upstream `@opencode/cli@2.0.11`. The sanitized captures are `../fixtures/events-owned.sanitized.json`, `../fixtures/child-events.sanitized.json` and `../fixtures/event-types.json`.
+
+- **Registrations.** Latest-channel binaries write unkeyed `$XDG_STATE_HOME/<app>/service.json`. Keyed `service-<sha1(channel)>.json` files are legacy channel names, so the scan globs `service*.json`. `Service.discover()` without `file` reads only `opencode/service.json` and cannot see shuvcode. `Service.ensure` SIGTERMs, SIGKILLs and deletes a registration on a version mismatch or timeout, which is why it is never called.
+- **Auth.** Unauthenticated `GET /api/info` is 401 with an empty body. Basic auth username is always `opencode`, also on shuvcode. The password is re-read from the registration and never persisted.
+- **Client shapes.** `session.create` returns `SessionInfo`, not `{ data }`. `event.subscribe({ signal })` yields decoded events. Permission replies go through `client.permission.reply({ sessionID, requestID, decision })`, while the `permission.replied` event carries `reply`. `session.form.reply` takes `answer`, not `answers`. `model.list`, `model.default` and `agent.list` are location-scoped (`{ location: { directory } }`); a directory outside a configured project can return zero models.
+- **SSE.** One process-wide stream, live only, no replay and no client reconnect. A late subscriber gets only `server.connected`. Child sessions carry `data.parentID` on `session.created` and inherit the parent's `metadata` and `permissions`.
+- **Envelopes.** Most session events carry `durable: { aggregateID, seq, version }`. `permission.asked`, `permission.replied`, `form.created`, `form.replied`, `session.usage.updated` and `session.text.delta` do not. `session.tool.called.data.state.thoughtSignature` is sensitive; `context()` and `unhandled` raw payloads strip it. Token usage lives on `Session.Info.tokens` as `{ input, output, reasoning, cache: { read, write } }`; the key `tokens` is not a secret.
+- **Recorded event names** are in `event-types.json`. The translator maps or ignores every recorded name, and also maps `session.execution.failed` and `session.execution.interrupted`, which settle turns. Never recorded: `session.idle`, `session.reasoning.*`, `session.tool.failed`, `session.tool.progress`, `session.tool.input.delta`, `session.compaction.failed`, `form.cancelled`, `session.forked`. Those stay `unhandled` until a capture shows their shape.
+- **Instructions.** No `instructions` field on session create or update. `session.instructions.entry.put` keys must match `^[a-z0-9][a-z0-9._-]*$` (a `/` is a 400). Entries are combined with `AGENTS.md`; putting `core.instructions` adds a second entry and does not replace the ambient one.
+- **Skills.** No session API registers a skill root. `prompt.skills[].id` and `session.skill` accept only catalog ids; unknown ids and filesystem paths are rejected.
+- **Commands.** `CommandInfo` is `{ name, description? }` with no path. An unknown name is `CommandNotFoundError`.
+- **Fork.** `before` is exclusive and must be a `msg_` id. Raw HTTP accepts `through`, but a capture still contained later messages, so inclusive truncation is unproven.
+- **Variants.** Some providers expose effort as separate model ids (`…-high`, `…-low`) with `variants: []`. Switching effort there is a different `ModelRef.id`.
 
 ## Fake runtime
 

@@ -91,12 +91,15 @@ Claude process before its next turn and keeps the conversation.
 The native OpenCode provider (`opencode`) attaches to a live OpenCode v2
 service on the host. OpenCode (ACP) remains `acp-opencode` for v1 binaries.
 Native skills and slash commands prefer that service's `GET /api/skill` and
-`GET /api/command` catalogs; OpenCode (ACP) does not. Set the native default
-agent with
+`GET /api/command` catalogs; OpenCode (ACP) does not. Project
+`.opencode/commands` and `.opencode/command` are always scanned. Set the
+native default agent with
 `bb plugin config provider-opencode set defaultAgent <name>` and a catalog
 variant with `bb plugin config provider-opencode set defaultVariant <id>`.
 Host daemon env: `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_PASSWORD`,
-`OPENCODE_APP`.
+`OPENCODE_APP`. A registration whose URL is not on this host is never sent
+its password; set `OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` to
+attach to it.
 
 Known ACP agents can appear automatically when their CLI is installed on the
 host. For example, opencode, omp, Grok Build's grok CLI, or Hermes' hermes CLI

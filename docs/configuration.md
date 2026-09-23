@@ -466,6 +466,16 @@ prefix because the host worker that resolves skills and commands drops every
   OpenCode has no Windows install plan; download the Windows CLI from the
   v2 docs.
 
+Without `OPENCODE_SERVER_URL`, bb reads the `service*.json` registrations
+under `$XDG_STATE_HOME` (default `~/.local/state`) and never starts a
+service. It sends a registration's password only when the registration URL
+is on this host: loopback, `0.0.0.0`/`[::]`, or an IP address of one of this
+host's interfaces. A registration on any other host is skipped and never
+contacted. When no local registration is live or rejects authentication,
+health is `unknown` with a message pointing to `OPENCODE_SERVER_URL`. Set
+`OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` to attach to a service
+on another host.
+
 Default agent and variant for new threads:
 
 ```bash
@@ -477,7 +487,10 @@ bb plugin config provider-opencode unset defaultVariant
 
 Empty `defaultAgent` uses OpenCode's `default_agent` (usually `build`). Plan
 mode always uses the OpenCode `plan` agent. Empty `defaultVariant` uses the
-model's native default. A picker reasoning level overrides `defaultVariant`.
+model's native default. A picker reasoning level is sent as the variant only
+when it is not `none` and the model lists it; otherwise `defaultVariant`
+applies, and it must be one of the model's variants or thread start fails.
+Variant `none` is reachable only through `defaultVariant`.
 These settings travel as `providerOptions.agent` and
 `providerOptions.variant`. Deleting a bb thread does not remove the OpenCode
 session.
@@ -485,11 +498,13 @@ session.
 While a v2 service is up, the composer prefers that workspace's
 `GET /api/skill` and `GET /api/command` catalogs. Command entries have names,
 not paths, so bb writes them as markdown under the plugin's data directory
-on the host and removes them when the host worker stops. When the service is
-down, or that directory cannot be written, skills fall back to the
-**OpenCode** roots in the table below and commands to
+on the host (`opencode-command-catalog/<app>/<cwd hash>`) and removes them
+when the host worker stops. When the service is down, skills fall back to
+the **OpenCode** roots in the table below. When the service is down or that
+directory cannot be written, commands fall back to
 `~/.config/<app>/commands` and `~/.config/<app>/command` (plus both under
-`$OPENCODE_CONFIG_DIR` for upstream `opencode`). Project commands in
+`$OPENCODE_CONFIG_DIR` for upstream `opencode`); a write failure never drops
+skills. Project commands in
 `.opencode/commands` and `.opencode/command`, from the repository root to the
 current directory, are always scanned. `acp-opencode` does not call these HTTP
 catalogs and has no command roots.

@@ -33,9 +33,9 @@ filesystem when that request did not succeed:
 - Skills: `GET /api/skill` at the workspace. `~/.config/<app>/skills` (and
   upstream `OPENCODE_CONFIG_DIR/skills`) is always included, because that
   directory depends on the attached app. Catalog entries are added when
-  `path` is an accessible host file outside those directories and the
-  declared home and workspace roots. Virtual `/builtin/…` paths and URLs
-  are skipped. Nested catalog ids become skill-file fallback names.
+  `path` is an accessible host `SKILL.md` file or skill directory outside
+  those directories and the declared home and workspace roots. Virtual
+  `/builtin/…` paths and URLs are skipped. Nested catalog ids become skill-file fallback names.
 - Commands: `GET /api/command` at the workspace. The payload is
   `{ name, description? }` with no path, so each safe name is written as
   markdown under `<plugin dataDir>/opencode-command-catalog/<app>/<cwd hash>`
@@ -67,6 +67,17 @@ host worker's `BB_*` strip, which is where `resolveNativeRoots` runs.
 Username for explicit URL auth is always `opencode`. A 401 is
 `unauthenticated`.
 
+Without `OPENCODE_SERVER_URL`, discovery reads `service*.json` under
+`$XDG_STATE_HOME/{opencode,shuvcode,opencode-next/opencode,<OPENCODE_APP>}`
+and never starts a service. A registration's password is sent only when its
+URL is on this host: loopback, `0.0.0.0`/`[::]`, or an IP literal equal to
+one of this host's interface addresses. Host names other than `localhost`
+are not resolved. Any other registration is `remote`: it is skipped and
+never probed. Health reports `unknown`, with a message pointing to
+`OPENCODE_SERVER_URL`, only when no local registration is live or rejects
+authentication. Use `OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` to
+attach to a service on another host.
+
 PATH `opencode` may be a symlink; app identity comes from `--version`
 (`shuvcode v2.0.8` → `shuvcode`). The installer runs only when no
 v2-capable binary and no registration exist. A discovered app (PATH branding
@@ -90,6 +101,19 @@ sends `null` or that setting; the bridge resolves OpenCode's `default_agent`.
 `providerOptions.variant`. Empty means the model's native default (`null`).
 The bb picker only lists closed reasoning levels (`none`…`max`). Catalog ids
 outside that ladder (`thinking`, `minimal`) are selected through this
-setting. Bridge contract: an explicit user reasoning level overrides
-`providerOptions.variant`; send OpenCode variant `none` only when that id is
-in the model's `variants[]`; validate any variant against `model.list`.
+setting. Bridge contract: a picker reasoning level is sent as the OpenCode
+variant only when it is not `none` and the model's `variants[]` lists it.
+Otherwise `defaultVariant` (`providerOptions.variant`) applies, and it must
+be in that model's `variants[]` or thread start fails with an unknown-variant
+error. OpenCode variant `none` is reachable only through `defaultVariant`.
+
+## Tests
+
+`src/bridge/bridge.conformance.test.ts` runs the shared bridge conformance
+suite against `createFakeOpenCodeRuntime`. `bridge.recorded-conformance.test.ts`
+replays the sanitized event fixtures in `src/fixtures/` through the fake
+runtime for the `turn-tools`, `user-question`, `steer`, `stop-interrupt`,
+`fork`, `resume`, and `compaction` cells. There is no HTTP/SSE replay lane:
+the parity recordings under `packages/provider-bridge-protocol/recordings`
+assume a provider child on stdio. Raw record-mode output under
+`plugins/*/recordings/` is gitignored; commit only sanitized fixtures.
