@@ -24,8 +24,13 @@ import {
   APP_SURFACE_DESKTOP,
   APP_SURFACE_ENV_NAME,
 } from "@bb/config/app-surface";
+import { findMachineServiceFile } from "@bb/config/machine-service";
 import type { ConnectCredential } from "@bb/connect-client";
-import type { AppKeybindings } from "@bb/domain";
+import {
+  appCommandIdSchema,
+  type AppCommandId,
+  type AppKeybindings,
+} from "@bb/domain";
 import {
   bbDesktopBrowserImportCookiesRequestSchema,
   bbDesktopThemeSchema,
@@ -41,8 +46,15 @@ import {
   assertPathExists,
   resolveDesktopBridgePath,
   resolveDesktopIconPath,
+  resolveDesktopMachineInstallerPath,
   type DesktopPathContext,
 } from "./app-paths.js";
+import {
+  keepMovedMachineConnected,
+  MACHINE_SERVICE_INSTALL_LOG_FILE_NAME,
+  MACHINE_SERVICE_NOTICE_FILE_NAME,
+  runMachineInstaller,
+} from "./moved-machine-service.js";
 import {
   resolveBbAppProcessRuntime,
   type BbAppProcess,
@@ -175,6 +187,8 @@ import {
 } from "./desktop-update-ipc.js";
 import {
   BB_DESKTOP_APP_COMMAND_CHANNEL,
+  BB_DESKTOP_OPEN_WINDOW_FIND_CHANNEL,
+  BB_DESKTOP_SET_SPLIT_NAVIGATION_ENABLED_CHANNEL,
   BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
   BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
   BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
@@ -189,6 +203,10 @@ import {
 } from "./desktop-browser-view.js";
 import { resolveDesktopBrowserAppCommand } from "./desktop-browser-shortcuts.js";
 import { registerDesktopBrowserIpc } from "./desktop-browser-main-ipc.js";
+import {
+  createDesktopFindViewManager,
+  type DesktopFindViewManager,
+} from "./desktop-find-view.js";
 import { createBrowserImportService } from "./browser-import/browser-import.js";
 import { readMacAppIcon } from "./browser-import/mac-app-icon.js";
 import {
@@ -196,7 +214,10 @@ import {
   type DesktopBrowserBroker,
 } from "./desktop-browser-broker.js";
 import { createDesktopBrowserBrokerClient } from "./desktop-browser-broker-client.js";
-import { bbDesktopBrowserTabRefSchema } from "@bb/desktop-contract";
+import {
+  bbDesktopBrowserTabRefSchema,
+  bbDesktopWindowFindRequestSchema,
+} from "@bb/desktop-contract";
 import {
   BB_DESKTOP_BROWSER_TARGET_CHANNEL,
   BB_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
@@ -338,6 +359,7 @@ const logViewerCopyRequestSchema = z
 
 let desktopWindowFactory: DesktopWindowFactory | null = null;
 let desktopBrowserViewManager: DesktopBrowserViewManager | null = null;
+let desktopFindViewManager: DesktopFindViewManager | null = null;
 let desktopBrowserBroker: DesktopBrowserBroker | null = null;
 let desktopBrowserBrokerClient: ReturnType<
   typeof createDesktopBrowserBrokerClient
@@ -356,6 +378,11 @@ let systemConfigSync: SystemConfigSync | null = null;
 let systemConfigRefreshToken = 0;
 let refreshRemoteSystemConfig: (() => void) | null = null;
 const applicationWindowWebContentsIds = new Set<number>();
+const splitNavigationEnabledWebContentsIds = new Set<number>();
+const splitNavigationCommandsByWebContentsId = new Map<
+  number,
+  readonly AppCommandId[]
+>();
 let bbAppLoaded = false;
 let startupRetryUrl: string | null = null;
 let startupRetryPending = false;
@@ -375,6 +402,8 @@ let desktopBridgePath: string | null = null;
 let desktopUserDataPath: string | null = null;
 let builtinDataDir: string | null = null;
 let serverMoveNoticeStore: ServerMoveNoticeStore | null = null;
+let machineServiceNoticeStore: ServerMoveNoticeStore | null = null;
+let movedMachineConnection: Promise<void> | null = null;
 let localServerMove: DesktopServerMove | null = null;
 let serverMovedWatcher: ServerMovedWatcher | null = null;
 let serverUrlDialogPreloadPath: string | null = null;
@@ -1032,7 +1061,25 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
   const webContentsId = browserWindow.webContents.id;
   applicationWindowWebContentsIds.add(webContentsId);
   const nativeWindow = BrowserWindow.fromId(browserWindow.id);
-  if (nativeWindow !== null) desktopBrowserBroker?.registerWindow(nativeWindow);
+  if (nativeWindow !== null) {
+    desktopBrowserBroker?.registerWindow(nativeWindow);
+    nativeWindow.webContents.on(
+      "did-start-navigation",
+      (_event, _url, isInPlace, isMainFrame) => {
+        if (isMainFrame && !isInPlace) {
+          splitNavigationEnabledWebContentsIds.delete(webContentsId);
+          splitNavigationCommandsByWebContentsId.delete(webContentsId);
+          desktopFindViewManager?.close(nativeWindow);
+        }
+      },
+    );
+    const layoutFindView = () => {
+      desktopFindViewManager?.layout(nativeWindow);
+    };
+    nativeWindow.on("resize", layoutFindView);
+    nativeWindow.on("enter-full-screen", layoutFindView);
+    nativeWindow.on("leave-full-screen", layoutFindView);
+  }
   registerApplicationRendererReloadShortcut(
     (browserWindow as BrowserWindow).webContents,
   );
@@ -1044,8 +1091,11 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
     sendDesktopWindowStateChanged(browserWindow);
   });
   browserWindow.on("closed", () => {
+    desktopFindViewManager?.releaseWindow(webContentsId);
     desktopBrowserBroker?.releaseWindow(webContentsId);
     applicationWindowWebContentsIds.delete(webContentsId);
+    splitNavigationEnabledWebContentsIds.delete(webContentsId);
+    splitNavigationCommandsByWebContentsId.delete(webContentsId);
   });
 }
 
@@ -1202,8 +1252,10 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
   if (
     serverTargetStore === null ||
     serverMoveNoticeStore === null ||
+    machineServiceNoticeStore === null ||
     desktopBridgePath === null ||
-    desktopUserDataPath === null
+    desktopUserDataPath === null ||
+    builtinDataDir === null
   ) {
     return;
   }
@@ -1220,28 +1272,89 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
     showNotice: showServerMovedNotice,
     targetStore: serverTargetStore,
   });
-  await ensureServerMovedRuntime({
-    hasLocalRuntime: () => currentRuntime !== null,
-    async isLocalAddressFree() {
-      const probe = await probeBbServer({
-        serverUrl: builtinServerUrl,
-        timeoutMs: ATTACH_PROBE_TIMEOUT_MS,
-      });
-      return probe.kind === "unavailable";
-    },
-    localServerUrl: builtinServerUrl,
-    logInfo: (message) => {
-      desktopLogger.info(message);
-    },
-    async startLocalRuntime() {
-      await spawnOwnedRuntime({
-        bridgePath,
-        serverUrl: builtinServerUrl,
-        userDataPath,
-      });
-    },
-  });
   refreshApplicationMenu();
+  connectMovedMachine({
+    bridgePath,
+    dataDir: builtinDataDir,
+    move,
+    noticeStore: machineServiceNoticeStore,
+    userDataPath,
+  });
+}
+
+function connectMovedMachine(args: {
+  bridgePath: string;
+  dataDir: string;
+  move: DesktopServerMove;
+  noticeStore: ServerMoveNoticeStore;
+  userDataPath: string;
+}): void {
+  if (movedMachineConnection !== null) {
+    return;
+  }
+  const logPath = join(
+    args.dataDir,
+    "logs",
+    MACHINE_SERVICE_INSTALL_LOG_FILE_NAME,
+  );
+  movedMachineConnection = (async () => {
+    await keepMovedMachineConnected({
+      findService: () =>
+        findMachineServiceFile({
+          dataDir: args.dataDir,
+          homeDir: homedir(),
+          platform: process.platform,
+        }),
+      install: () =>
+        runMachineInstaller({
+          dataDir: args.dataDir,
+          env: process.env,
+          installerPath: resolveDesktopMachineInstallerPath(args.bridgePath),
+          logPath,
+        }),
+      logInfo: (message) => {
+        desktopLogger.info(message);
+      },
+      logPath,
+      move: args.move,
+      noticeStore: args.noticeStore,
+      showNotice: showServerMovedNotice,
+      stopLocalRuntime: stopOwnedRuntime,
+    });
+    if (quitting) {
+      return;
+    }
+    await ensureServerMovedRuntime({
+      hasLocalRuntime: () => currentRuntime !== null,
+      async isLocalAddressFree() {
+        const probe = await probeBbServer({
+          serverUrl: builtinServerUrl,
+          timeoutMs: ATTACH_PROBE_TIMEOUT_MS,
+        });
+        return probe.kind === "unavailable";
+      },
+      localServerUrl: builtinServerUrl,
+      logInfo: (message) => {
+        desktopLogger.info(message);
+      },
+      async startLocalRuntime() {
+        await spawnOwnedRuntime({
+          bridgePath: args.bridgePath,
+          serverUrl: builtinServerUrl,
+          userDataPath: args.userDataPath,
+        });
+      },
+    });
+    refreshApplicationMenu();
+  })()
+    .catch((error: unknown) => {
+      desktopLogger.warn(
+        `[desktop] could not keep this computer connected as a machine: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    })
+    .finally(() => {
+      movedMachineConnection = null;
+    });
 }
 
 async function confirmLocalServerMove(
@@ -1840,6 +1953,7 @@ async function finishQuit(): Promise<void> {
   desktopUpdateService?.stop();
   desktopAutoUpdateService?.stop();
   desktopBrowserViewManager?.destroyAll();
+  desktopFindViewManager?.destroyAll();
   await desktopWindowFactory?.persistOpenWindows();
   await stopOwnedRuntime();
 }
@@ -1884,6 +1998,34 @@ function registerDesktopUpdateIpc(): void {
     await finishQuit();
     desktopAutoUpdateService.installUpdate();
   });
+  ipcMain.on(
+    BB_DESKTOP_SET_SPLIT_NAVIGATION_ENABLED_CHANNEL,
+    (event, enabled: unknown, directionalCommands: unknown) => {
+      if (
+        !applicationWindowWebContentsIds.has(event.sender.id) ||
+        event.senderFrame !== event.sender.mainFrame ||
+        typeof enabled !== "boolean"
+      ) {
+        return;
+      }
+      const parsed = appCommandIdSchema
+        .array()
+        .safeParse(directionalCommands ?? []);
+      if (!parsed.success) return;
+      if (enabled) {
+        splitNavigationEnabledWebContentsIds.add(event.sender.id);
+        if (directionalCommands !== undefined) {
+          splitNavigationCommandsByWebContentsId.set(
+            event.sender.id,
+            parsed.data,
+          );
+        }
+      } else {
+        splitNavigationEnabledWebContentsIds.delete(event.sender.id);
+        splitNavigationCommandsByWebContentsId.delete(event.sender.id);
+      }
+    },
+  );
   ipcMain.on(BB_DESKTOP_SET_THEME_CHANNEL, (_event, payload: unknown) => {
     const parsed = bbDesktopThemeSchema.safeParse(payload);
     if (!parsed.success) {
@@ -2352,6 +2494,11 @@ async function runDesktopApp(): Promise<void> {
     "dist",
     "browser-page-preload.cjs",
   );
+  const findBarPreloadPath = join(
+    paths.appPath,
+    "dist",
+    "find-bar-preload.cjs",
+  );
   const resolvedExistingServerDialogPreloadPath = join(
     paths.appPath,
     "dist",
@@ -2389,6 +2536,10 @@ async function runDesktopApp(): Promise<void> {
     path: browserPagePreloadPath,
   });
   assertPathExists({
+    label: "find bar preload script",
+    path: findBarPreloadPath,
+  });
+  assertPathExists({
     label: "server URL dialog preload script",
     path: resolvedServerUrlDialogPreloadPath,
   });
@@ -2418,6 +2569,9 @@ async function runDesktopApp(): Promise<void> {
   builtinDataDir = dataDir;
   serverMoveNoticeStore = createServerMoveNoticeStore({
     storagePath: join(userDataPath, SERVER_MOVE_NOTICE_FILE_NAME),
+  });
+  machineServiceNoticeStore = createServerMoveNoticeStore({
+    storagePath: join(userDataPath, MACHINE_SERVICE_NOTICE_FILE_NAME),
   });
   connectCredentialCache = createConnectCredentialCache({
     encryption: safeStorage,
@@ -2507,6 +2661,23 @@ async function runDesktopApp(): Promise<void> {
     sendDesktopInfoChanged();
   });
   registerDesktopUpdateIpc();
+  desktopFindViewManager = createDesktopFindViewManager({
+    preloadPath: findBarPreloadPath,
+  });
+  ipcMain.on(BB_DESKTOP_OPEN_WINDOW_FIND_CHANNEL, (event, payload: unknown) => {
+    if (
+      !applicationWindowWebContentsIds.has(event.sender.id) ||
+      event.senderFrame !== event.sender.mainFrame
+    ) {
+      return;
+    }
+    const parsed = bbDesktopWindowFindRequestSchema.safeParse(payload);
+    const browserWindow = resolveApplicationWindow(event.sender);
+    if (!parsed.success || browserWindow === null) {
+      return;
+    }
+    desktopFindViewManager?.open(browserWindow, parsed.data);
+  });
   desktopBrowserViewManager = createDesktopBrowserViewManager({
     pagePreloadPath: browserPagePreloadPath,
     dispatchAppCommand({ command, hostWebContentsId }) {
@@ -2530,17 +2701,26 @@ async function runDesktopApp(): Promise<void> {
         browserWindow.webContents.focus();
       }
     },
-    resolveAppCommand(input) {
+    resolveAppCommand(input, hostWebContentsId) {
       return resolveDesktopBrowserAppCommand({
         input,
         isMac: process.platform === "darwin",
         keybindings: currentAppKeybindings,
+        splitNavigationEnabled:
+          splitNavigationEnabledWebContentsIds.has(hostWebContentsId),
+        splitNavigationCommands:
+          splitNavigationCommandsByWebContentsId.get(hostWebContentsId),
       });
     },
   });
   registerDesktopBrowserIpc(desktopBrowserViewManager);
   const browserImportService = createBrowserImportService({
-    context: { platform: process.platform, home: homedir() },
+    context: {
+      platform: process.platform,
+      home: homedir(),
+      configHome: process.env.XDG_CONFIG_HOME,
+      excludedDirectories: [app.getPath("userData")],
+    },
     resolveIcon: (appPath) => readMacAppIcon(appPath),
     log(message, details) {
       desktopLogger.info(

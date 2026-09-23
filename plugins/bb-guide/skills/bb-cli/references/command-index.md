@@ -79,7 +79,6 @@ This index lists every command path that the core CLI registers, including alias
 - `bb machine create`
 - `bb machine list`
 - `bb machine show`
-- `bb machine join-code`
 - `bb machine rename`
 - `bb machine remove`
 - `bb machine suspend`
@@ -108,17 +107,25 @@ configures the machine with optional configured `preset` and `image` names;
 - `bb server unlock`
 - `bb server allow-connect`
 - `bb server delete-old-copy`
+- `bb server install-machine-service`
 
 `move`, `move status`, `move cancel`, and `export` call the running server.
+Server moves are experimental; agents run `move` (without `--check`),
+`move cancel`, and `unlock` only after the user explicitly confirms.
 `import`, `unlock`, `allow-connect`, and `delete-old-copy` act on a local data
 directory (`--data-dir`, else `BB_DATA_DIR`, else `~/.bb`) and never call a
-server.
+server. `install-machine-service` acts on the same local data directory after a
+move and downloads the new server's bb-app package for its service.
 
 ## updates
 
 - `bb updates`
 - `bb updates status`
 - `bb updates apply`
+- `bb updates app`
+- `bb updates app status`
+- `bb updates app apply`
+- `bb updates app dismiss`
 
 ## terminal
 
@@ -341,3 +348,7 @@ Machine environment: `bb machine env list`, `bb machine env set NAME`
 (value from stdin), and `bb machine env unset NAME`; all accept `--project <id>` for project overrides and `--json`. Omit `--project` for global settings.
 
 Standalone `bb machine create` machines remain until explicitly removed.
+
+To enroll an existing machine, run `bb machine create --provider manual`, then
+run its printed enrollment command on the target. The CLI waits until the daemon
+connects. With `--no-wait`, it returns the creating host ID immediately.

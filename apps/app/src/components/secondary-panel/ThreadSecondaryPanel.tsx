@@ -56,10 +56,7 @@ import type {
   SecondaryPanelTabReorderHandler,
 } from "./secondaryPanelTab";
 import { useEnvironmentDiffFiles } from "@/hooks/queries/environment-queries";
-import {
-  DEFAULT_CODE_OVERFLOW_MODE,
-  type CodeOverflowMode,
-} from "@/lib/code-overflow-mode";
+import { useGitDiffLineOverflowModePreference } from "@/lib/git-diff-view-preferences";
 import type { DiffPresentation } from "@/components/code/code-rendering";
 import { useGitDiffPanelState } from "./git-diff/useGitDiffPanelState";
 import { useResponsiveGitDiffPanelDisplay } from "./git-diff/useResponsiveGitDiffPanelDisplay";
@@ -167,6 +164,7 @@ export interface SecondaryPanelFixedTab {
 export interface ThreadSecondaryPanelProps {
   activeTab: SecondaryFixedPanelTab | MarketplacePluginDetailPanelTab | null;
   canUseGitUi: boolean;
+  canNavigateTabs?: boolean;
   gitDiffTabStatus?: GitDiffTabStatus;
   onRetryGitDiffEligibility?: () => void;
   requestedMergeBaseBranch?: string;
@@ -209,6 +207,7 @@ export function ThreadSecondaryPanel(props: ThreadSecondaryPanelProps) {
 function ThreadSecondaryPanelContent({
   activeTab,
   canUseGitUi,
+  canNavigateTabs = true,
   gitDiffTabStatus,
   requestedMergeBaseBranch,
   environmentId,
@@ -380,7 +379,7 @@ function ThreadSecondaryPanelContent({
   );
   const [desktopInfo] = useState(getBbDesktopInfo);
   const [gitDiffLineOverflowMode, setGitDiffLineOverflowMode] =
-    useState<CodeOverflowMode>(DEFAULT_CODE_OVERFLOW_MODE);
+    useGitDiffLineOverflowModePreference();
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const isSidebarShowing = useOptionalIsSidebarShowing();
@@ -930,6 +929,21 @@ function ThreadSecondaryPanelContent({
     <SidebarSplitContainer
       key={splitPanelStateId}
       activeTabId={globalActiveTabId}
+      canNavigateTabs={canNavigateTabs && isLayoutOpen}
+      fixedTabIds={fixedTabs.map((tab) => tab.tab.id)}
+      hasNewTabButton={showNewTabButton}
+      onTabNavigated={(paneId, isNewTabButton) => {
+        window.requestAnimationFrame(() => {
+          const control = isNewTabButton
+            ? "button[data-panel-new-tab]"
+            : 'button[aria-pressed="true"]';
+          panelRef.current
+            ?.querySelector<HTMLElement>(
+              `[data-sidebar-split-tab-group="${CSS.escape(paneId)}"] ${control}`,
+            )
+            ?.focus({ preventScroll: true });
+        });
+      }}
       isFullScreen={isConversationCollapsed}
       onActivateTab={(tabId) => {
         const fixedTab = fixedTabs.find(
@@ -1163,10 +1177,11 @@ function NewTabButton({
         compact
           ? PANEL_TAB_CONTROL_CLASS
           : SECONDARY_PANEL_CHROME_ICON_BUTTON_CLASS,
-        "text-muted-foreground/70 hover:text-foreground",
+        "text-muted-foreground/70 hover:text-foreground focus:ring-1 focus:ring-ring",
         usesDesktopChrome && MACOS_WINDOW_NO_DRAG_CLASS,
       )}
       onClick={onOpenNewTab}
+      data-panel-new-tab=""
       aria-label={shortcut ? `${ariaLabel} (${shortcut.label})` : ariaLabel}
       aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
     >

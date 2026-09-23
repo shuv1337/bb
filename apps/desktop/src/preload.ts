@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame } from "electron";
-import { appCommandIdSchema } from "@bb/domain";
+import { appCommandIdSchema, type AppCommandId } from "@bb/domain";
 import {
   desktopBrowserImportOutcomeSchema,
   desktopBrowserImportSourceSchema,
@@ -25,6 +25,7 @@ import {
   type BbDesktopAppCommandHandler,
   type BbDesktopBrowserApi,
   type BbDesktopBrowserFindResultHandler,
+  type BbDesktopWindowFindRequest,
   type BbDesktopBrowserPageMessageHandler,
   type BbDesktopBrowserOpenTabHandler,
   type BbDesktopBrowserScopedOpenTabHandler,
@@ -83,6 +84,8 @@ import {
 } from "./desktop-browser-ipc.js";
 import {
   BB_DESKTOP_APP_COMMAND_CHANNEL,
+  BB_DESKTOP_OPEN_WINDOW_FIND_CHANNEL,
+  BB_DESKTOP_SET_SPLIT_NAVIGATION_ENABLED_CHANNEL,
   BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
   BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
   BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
@@ -412,11 +415,26 @@ const bbDesktopApi: BbDesktopApi = {
   onCloseWindowRequest(listener): BbDesktopInfoUnsubscribe {
     return addListener(closeWindowRequestListeners, listener);
   },
+  openWindowFind(request): void {
+    ipcRenderer.send(BB_DESKTOP_OPEN_WINDOW_FIND_CHANNEL, {
+      topOffset: Math.round(request.topOffset * webFrame.getZoomFactor()),
+    } satisfies BbDesktopWindowFindRequest);
+  },
   openExternalUrl(url: string): void {
     ipcRenderer.send(BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL, url);
   },
   async openServerDaemonLogs(): Promise<void> {
     await ipcRenderer.invoke(BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL);
+  },
+  setSplitNavigationEnabled(
+    enabled: boolean,
+    directionalCommands?: readonly AppCommandId[],
+  ): void {
+    ipcRenderer.send(
+      BB_DESKTOP_SET_SPLIT_NAVIGATION_ENABLED_CHANNEL,
+      enabled,
+      directionalCommands,
+    );
   },
   setTheme(theme: BbDesktopTheme): void {
     ipcRenderer.send(BB_DESKTOP_SET_THEME_CHANNEL, theme);

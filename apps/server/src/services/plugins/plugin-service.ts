@@ -147,7 +147,11 @@ import {
   forgetMutableRoot,
   type PluginLoadHold,
 } from "./plugin-runtime.js";
-import { nextCronRunAt, raceTimeout } from "./plugin-time-box.js";
+import {
+  nextCronRunAt,
+  raceTimeout,
+  settledWithin,
+} from "./plugin-time-box.js";
 import { createPluginUpdates } from "./plugin-updates.js";
 
 import type {
@@ -295,6 +299,10 @@ export interface PluginService {
    */
   getAppAsset(
     id: string,
+    kind: "js" | "css",
+  ): { path: string; hash: string } | undefined;
+  getAppAssetByHash(
+    hash: string,
     kind: "js" | "css",
   ): { path: string; hash: string } | undefined;
   getBrandingAsset(
@@ -531,6 +539,24 @@ function normalizeMentionSearchItems(
 
 export function createPluginService(deps: PluginServiceDeps): PluginService {
   const logger = deps.logger;
+  const installHandlerTimeoutMs = deps.installHandlerTimeoutMs ?? 30_000;
+
+  async function runInstallHandlers(id: string): Promise<void> {
+    const plugin = loaded.get(id);
+    if (plugin === undefined) return;
+    const handlers = [...plugin.handle.installHandlers];
+    if (handlers.length === 0) return;
+    const run = (async () => {
+      for (const handler of handlers) {
+        await invokeWrapped(id, "install handler", handler);
+      }
+    })();
+    if (!(await settledWithin(run, installHandlerTimeoutMs))) {
+      logger.warn(
+        `[plugin:${id}] install handlers were still running after ${installHandlerTimeoutMs / 1000}s; the install finished without waiting for them`,
+      );
+    }
+  }
   const bundledPlugins =
     deps.bundledPlugins ?? listBundledPluginRegistrations();
   const mentionSearchTimeoutMs =
@@ -631,6 +657,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     restoreRegistration,
     sourceFingerprint,
   } = createPluginRegistration({
+    runInstallHandlers,
     deps,
     bundledPlugins,
     withLifecycleLock,
@@ -1620,6 +1647,16 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       const path = kind === "js" ? assets.jsPath : assets.cssPath;
       if (path === null) return undefined;
       return { path, hash: assets.hash };
+    },
+
+    getAppAssetByHash(hash, kind) {
+      for (const [id, snapshot] of appBundles) {
+        if (!loaded.has(id) || snapshot.assets?.hash !== hash) continue;
+        const path =
+          kind === "js" ? snapshot.assets.jsPath : snapshot.assets.cssPath;
+        if (path !== null) return { path, hash };
+      }
+      return undefined;
     },
 
     getBrandingAsset(id, variant) {

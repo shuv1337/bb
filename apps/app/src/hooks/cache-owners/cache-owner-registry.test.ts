@@ -87,7 +87,9 @@ const CACHE_OWNER_QUERY_KEY_IMPORTS: CacheOwnerQueryKeyImportRegistry = {
   ],
   "hooks/cache-owners/environment-workspace-cache-owner.ts": [
     "environmentQueryKey",
+    "sidebarNavigationQueryKey",
     "threadSearchQueryKeyPrefix",
+    "threadsQueryKey",
   ],
   "hooks/cache-owners/host-directory-cache-owner.ts": ["hostDirectoryQueryKey"],
   "hooks/cache-owners/mutation-cache-effects.ts": [
@@ -164,6 +166,7 @@ const CACHE_OWNER_QUERY_KEY_IMPORTS: CacheOwnerQueryKeyImportRegistry = {
     "hostsQueryKey",
     "serverMoveStatusQueryKey",
     "sidebarNavigationQueryKey",
+    "systemAppUpdateQueryKey",
     "systemConfigQueryKey",
     "threadDefaultExecutionOptionsQueryKey",
     "threadQueryKey",
@@ -217,6 +220,7 @@ const CACHE_OWNER_QUERY_KEY_IMPORTS: CacheOwnerQueryKeyImportRegistry = {
     "threadSearchQueryKeyPrefix",
     "threadsQueryKey",
   ],
+  "hooks/cache-owners/app-update-cache-owner.ts": ["systemAppUpdateQueryKey"],
   "hooks/cache-owners/server-move-cache-owner.ts": ["serverMoveStatusQueryKey"],
   "hooks/cache-owners/provider-cli-status-cache-owner.ts": [
     "hostProviderCliStatusQueryKey",

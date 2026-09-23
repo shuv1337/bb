@@ -105,6 +105,7 @@ import {
 const PLUGIN_WIRE_HTTP_PATH = /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
 import { rankAcceptedAssetEncodings } from "./asset-content-encoding.js";
 import { apiJsonCompression } from "./api-response-compression.js";
+import { APP_SURFACE_WEB, type AppSurface } from "@bb/config/app-surface";
 import type { ServerBindHost } from "@bb/config/server";
 import { registerServerMoveRoutes } from "./routes/server-move.js";
 import {
@@ -165,6 +166,7 @@ function normalizeInternalAuthPath(path: string): string {
 }
 
 export interface ServerMoveAppOptions {
+  appSurface: AppSurface;
   bindHost: ServerBindHost | null;
   manualImportPending: boolean;
   pending: PendingServerMove | null;
@@ -197,7 +199,7 @@ const SLOW_API_REQUEST_LOG_THRESHOLD_MS = 1_000;
 const THREAD_EVENT_WAIT_PATH_PATTERN =
   /^\/api\/v1\/threads\/[^/]+\/events\/wait$/u;
 const PLUGIN_APP_ASSET_PATH_PATTERN =
-  /^\/api\/v1\/plugins\/[^/]+\/assets\/app\.(?:js|css)$/u;
+  /^\/api\/v1\/(?:plugins\/[^/]+\/assets|plugin-app-assets\/[a-f0-9]{16})\/app\.(?:js|css)$/u;
 const PRECOMPRESSED_STATIC_FILES = [
   { encoding: "br", extension: ".br" },
   { encoding: "gzip", extension: ".gz" },
@@ -457,6 +459,7 @@ export function createApp(
       serverEntryUrl: import.meta.url,
     });
   const serverMoveOptions: ServerMoveAppOptions = options?.serverMove ?? {
+    appSurface: APP_SURFACE_WEB,
     bindHost: null,
     manualImportPending: false,
     pending: null,
@@ -708,6 +711,7 @@ export function createApp(
   setPluginAgentContributions(pluginService);
   const serverMove = createServerMoveCoordinator(
     createDefaultServerMoveEnvironment({
+      appSurface: serverMoveOptions.appSurface,
       bindHost: serverMoveOptions.bindHost,
       deps,
       env: process.env,

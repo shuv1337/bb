@@ -49,7 +49,10 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import type { BridgeJsonRpcOutputMessage } from "@get-bb/plugin-sdk/provider-bridge/testing";
 
-import { BRIDGE_INBOUND_REQUEST_METHODS } from "@bb/provider-bridge-protocol";
+import {
+  BRIDGE_INBOUND_REQUEST_METHODS,
+  BRIDGE_JSON_RPC_ERRORS,
+} from "@bb/provider-bridge-protocol";
 
 type BridgeSessionOptions = ReturnType<typeof buildSessionOptions>;
 type BridgeSessionHooks = NonNullable<BridgeSessionOptions["hooks"]>;
@@ -809,6 +812,44 @@ describe("bridge", () => {
       });
     } finally {
       await stopBridgeThread({ bridge, queries, threadId });
+      bridge.restore();
+    }
+  });
+
+  it("answers model/list with the missing-executable code when the Claude CLI is absent", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    queryMock.mockReturnValue({
+      initializationResult: vi
+        .fn()
+        .mockRejectedValue(
+          new Error("Native CLI binary for darwin-arm64 not found at /tmp/cli"),
+        ),
+      close: vi.fn(),
+    });
+
+    try {
+      bridge.sendRequest(1, "model/list", {});
+      const missing = await bridge.waitForResponse(1);
+
+      expect(missing.error?.code).toBe(
+        BRIDGE_JSON_RPC_ERRORS.MISSING_EXECUTABLE,
+      );
+      expect(missing.error?.message).toContain(
+        "could not find the Claude Code CLI",
+      );
+
+      queryMock.mockReturnValue({
+        initializationResult: vi
+          .fn()
+          .mockRejectedValue(new Error("Claude SDK stream closed")),
+        close: vi.fn(),
+      });
+      bridge.sendRequest(2, "model/list", {});
+      const other = await bridge.waitForResponse(2);
+
+      expect(other.error?.code).toBe(BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR);
+      expect(other.error?.message).toBe("Claude SDK stream closed");
+    } finally {
       bridge.restore();
     }
   });
@@ -1788,6 +1829,58 @@ describe("bridge", () => {
     }
   });
 
+  it("translates tagged dollar skill mentions without changing plain dollar text", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+
+    try {
+      const threadId = "thread-dollar-skill";
+      await startBridgeThread({ bridge, threadId });
+      const call = getLatestQueryCall();
+      bridge.sendRequest(
+        2,
+        "turn/start",
+        canonicalTurnParams({
+          threadId,
+          input: [
+            {
+              type: "text",
+              text: "Use $review but keep $PATH and $review",
+              mentions: [
+                {
+                  start: 4,
+                  end: 11,
+                  resource: {
+                    kind: "command",
+                    trigger: "$",
+                    name: "review",
+                    source: "skill",
+                    origin: "user",
+                    label: "review",
+                    argumentHint: null,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      expect(await readNextPromptText(call)).toBe(
+        "Use /review but keep $PATH and $review",
+      );
+      await bridge.waitForResponse(2);
+      await stopBridgeThread({ bridge, queries, threadId });
+    } finally {
+      bridge.restore();
+    }
+  });
+
   it("switches a live session into Plan mode when a later turn carries /plan", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
@@ -2362,10 +2455,7 @@ describe("bridge", () => {
       PATH: binDir,
     });
     expect(models.map((model) => model.model)).toEqual([
-      "claude-fable-5-1",
       "claude-opus-5[1m]",
-      "claude-opus-4-8[1m]",
-      "claude-opus-4-7[1m]",
       "claude-sonnet-5",
     ]);
     expect(models.filter((model) => model.isDefault)).toEqual([
@@ -2386,6 +2476,22 @@ describe("bridge", () => {
         persistSession: false,
       }),
     });
+    const probeOptions = queryMock.mock.calls.at(-1)?.[0]?.options;
+    expect(probeOptions).not.toHaveProperty("allowDangerouslySkipPermissions");
+    expect(probeOptions).not.toHaveProperty("permissionMode");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("treats an empty Claude model report as a discovery failure", async () => {
+    const close = vi.fn();
+    queryMock.mockReturnValueOnce({
+      initializationResult: vi.fn().mockResolvedValue({ models: [] }),
+      close,
+    });
+
+    await expect(listClaudeCodeBridgeModels()).rejects.toThrow(
+      "Claude Code reported no models.",
+    );
     expect(close).toHaveBeenCalledOnce();
   });
 

@@ -287,6 +287,7 @@ function buildInlineDraftComposer(options: InlineDraftComposerOptions) {
       typeahead={options.typeahead}
       promptActions={options.promptActions}
       collapseResetKey={options.collapseResetKey}
+      preferExpanded
       focusEndKey={`${options.focusSessionKey}:${options.editFocusNonce}`}
       isPrimaryComposer={false}
       showScrollToBottomButton={false}
@@ -547,10 +548,12 @@ export function ThreadDetailPromptArea({
     setBottomAttachmentError,
     handleAttachBottomFiles,
     isAttachingBottomFiles,
+    bottomPendingUploads,
     inlineAttachmentError,
     setInlineAttachmentError,
     handleAttachInlineFiles,
     isAttachingInlineFiles,
+    inlinePendingUploads,
   } = useComposerAttachmentUploads({
     projectId,
     addDraftAttachment: promptDraft.addAttachment,
@@ -561,6 +564,7 @@ export function ThreadDetailPromptArea({
     attachmentError: sentMessageAttachmentError,
     handleAttachFiles: handleAttachSentMessageFiles,
     isAttachingFiles: isAttachingSentMessageFiles,
+    pendingUploads: sentMessagePendingUploads,
   } = useDraftAttachmentUploads({
     projectId,
     target: sentMessageEdit
@@ -1412,6 +1416,7 @@ export function ThreadDetailPromptArea({
       items: currentPromptDraft.attachments,
       projectId,
       isAttaching: isAttachingBottomFiles,
+      pendingUploads: bottomPendingUploads,
       error: bottomAttachmentError,
       onAttachFiles: handleAttachBottomFiles,
       onRemove: promptDraft.removeAttachment,
@@ -1421,6 +1426,7 @@ export function ThreadDetailPromptArea({
       currentPromptDraft.attachments,
       handleAttachBottomFiles,
       isAttachingBottomFiles,
+      bottomPendingUploads,
       projectId,
       promptDraft.removeAttachment,
     ],
@@ -1495,7 +1501,6 @@ export function ThreadDetailPromptArea({
     !isFollowUpSubmitting &&
     !isQueueMutationPending &&
     !sentMessageEdit.isSubmitting &&
-    queuedMessages.length === 0 &&
     activeBackgroundAgentCount === 0 &&
     activeWorkflows.length === 0 &&
     activeBackgroundCommands.length === 0;
@@ -1774,6 +1779,7 @@ export function ThreadDetailPromptArea({
           items: activeComposerDraft.attachments,
           projectId,
           isAttaching: isAttachingInlineFiles,
+          pendingUploads: inlinePendingUploads,
           error: inlineAttachmentError,
           onAttachFiles: handleAttachInlineFiles,
           onRemove: removeActiveComposerAttachment,
@@ -1817,6 +1823,7 @@ export function ThreadDetailPromptArea({
     inlineExecutionConfig,
     inlinePermissionConfig,
     isAttachingInlineFiles,
+    inlinePendingUploads,
     isUpdateQueuedMessagePending,
     projectId,
     inlinePromptActions,
@@ -1879,6 +1886,7 @@ export function ThreadDetailPromptArea({
             items: draft.attachments,
             projectId,
             isAttaching: isAttachingSentMessageFiles,
+            pendingUploads: sentMessagePendingUploads,
             error: sentMessageAttachmentError,
             onAttachFiles: handleAttachSentMessageFiles,
             onRemove: (path) => {
@@ -1932,6 +1940,7 @@ export function ThreadDetailPromptArea({
     handleAttachSentMessageFiles,
     handleSentMessageEditSubmit,
     isAttachingSentMessageFiles,
+    sentMessagePendingUploads,
     projectId,
     inlinePromptActions,
     runtimeDisplayStatus,

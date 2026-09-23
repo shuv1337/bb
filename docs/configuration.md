@@ -137,6 +137,55 @@ Two things read that file:
 Both confirm that the recorded process really is a bb launcher before they
 signal it, so a stale file left by a crash cannot stop an unrelated process.
 
+## In-App Updates
+
+In-app updates are off unless you start bb with `--in-app-updates`:
+`npx bb-app start --in-app-updates` (or a global `bb-app`), or
+`pnpm start --in-app-updates` from a source checkout. bb then runs under a small
+update shim, so Settings → Updates and `bb updates app apply` can update bb
+without a terminal. Without the flag, bb starts as before and Settings → Updates
+shows the upgrade command.
+
+- **npm installs** download the new release into
+  `<dataDir>/app-versions/<version>/` while bb keeps running, then restart into
+  it. The shim runs whichever is newer, that install or the `npx` copy you
+  launched; pass `--bundled` to run the launched copy regardless. bb keeps the
+  running and previous versions and deletes older ones. Stable installs follow
+  the `latest` dist-tag and nightly builds follow `nightly`.
+- **Source checkouts** update only from a clean `main` that fast-forwards to
+  `origin/main`. bb stops, fast-forwards, runs `pnpm install --frozen-lockfile`,
+  rebuilds, and restarts. Other branches, local commits, and uncommitted tracked
+  changes block the update with an explanation.
+
+bb does not roll back an update. If the new version fails to start, bb exits
+with its error and the next start runs the new version again, as it would after
+a manual upgrade. Run a newer release (`npx bb-app@latest`) or fix the cause; an
+older release may not open a database the new version migrated. A source
+checkout whose rebuild fails stays on the new commit; fix the build and run
+`pnpm start` again. Download, install, and fast-forward failures happen before
+bb stops, so the current version keeps running.
+
+The outcome is recorded in `<dataDir>/bb-app-update.json` once bb starts
+cleanly, and shown in Settings → Updates, `bb updates app`, and the API until
+dismissed. Do not edit that file. If bb is stopped during the restart, an npm
+install starts the new version next time, while a source checkout stays on its
+current commit and reports the update as failed. Only one launcher manages
+updates for a data directory:
+a second `bb-app start` on the same data directory runs with in-app updates off,
+and `bb-app stop` stops the managing launcher. If threads start while an update
+downloads and you did not agree to interrupt threads, bb cancels the restart and
+asks you to update again.
+
+A server the desktop app starts updates with the desktop app instead. When the
+desktop app connects to a server it did not start, Settings → Updates lists
+**bb server** (updated in-app on that server's machine) and **bb desktop** (this
+app's own relaunch update) separately. `pnpm dev`, `bb-server`, and a standalone
+`bb-host-daemon` do not offer in-app updates. Updating restarts bb,
+which interrupts running threads; the app and CLI ask first.
+
+`BB_APP_UPDATE_MODE` is an internal marker the launcher passes to its server
+child; do not set it yourself.
+
 ## Common Keys
 
 | Key                            | Command                                            | When to set             | Used for                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -350,6 +399,25 @@ pane shortcuts follow Slack's browser-safe convention: web uses
 uses `Mod+1…9`. The web aliases leave native browser `Mod+1…9` tab switching
 untouched. Previous and next thread use `Mod+Shift+[/]` on desktop and
 `Control+Shift+[/]` on the web.
+
+On macOS, right-panel tabs use `panel.previousTab` / `panel.nextTab` with
+`Command+Control+ArrowLeft` / `Command+Control+ArrowRight`. They wrap through visible
+tabs and each pane's New tab button in displayed order across the active
+chat's right-panel groups. Press Enter or Space on New tab to open the picker.
+On the selected New tab page, `panel.previousNewTabItem` /
+`panel.nextNewTabItem` use `Command+Control+ArrowUp` / `Command+Control+ArrowDown` to
+move through search, enabled actions, and recent items in displayed order.
+Search results replace actions and recents while searching. Enter activates
+the focused item.
+Chat splits use `pane.focus.left` / `right` / `up` / `down` with
+`Command+Shift+ArrowLeft` / `ArrowRight` / `ArrowUp` / `ArrowDown` on macOS. These move
+spatially to the adjacent chat pane, including stacked splits, and stop at the
+layout edge. The initially unassigned `pane.focus.previous` / `pane.focus.next`
+commands still cycle in reading order. On Windows/Linux, these arrow navigation
+commands start unassigned to preserve native Control-arrow editing shortcuts.
+Rebind any of these commands in Settings → Keyboard, via
+`bb settings keyboard set <command> <shortcut|disabled>`, or SDK
+`system.updateKeyboardSettings`; read bindings with `system.config`.
 
 Plugin commands use `plugin:<plugin-id>/<command-id>` as their stable binding
 ID. For example: `bb settings keyboard set plugin:example/open-issue Mod+Shift+I`.
@@ -572,6 +640,21 @@ so a configured agent shows the generic tool glyph, and bb drops the field when
 it reads the old array. A setting entry wins over a config entry with the same
 `id`.
 
+## OpenCode Go Usage
+
+OpenCode Go subscription usage uses the credentials configured on the selected
+machine. Sign in to Go in OpenCode there, then select that machine in Provider
+usage or run `bb settings usage --machine <id-or-name> --json`. BB reads
+`OPENCODE_API_KEY` first, then the active official Console account and organization
+from `$XDG_DATA_HOME/opencode/opencode.db`, then `OPENCODE_AUTH_CONTENT` or
+`$XDG_DATA_HOME/opencode/auth.json` (default data directory `~/.local/share/opencode`).
+Console account storage is read only; OpenCode owns refreshing expired sessions.
+The `opencode-go` API key takes precedence over the shared `opencode` key.
+Custom ACP launch `env` overrides apply to credential lookup; a custom wrapper
+must declare `dialect: "opencode"` and `providerUsage: true`. The endpoint requires
+an active Go subscription and reports its five-hour, weekly, and monthly quota
+windows, not other providers' usage or Zen pay-as-you-go spending.
+
 ## Custom Models
 
 Register extra picker models by editing top-level `customModels` in
@@ -640,10 +723,13 @@ runs. When both files exist, `<dataDir>/AGENTS.md` is appended first and
 `<workspace>/.bb/AGENTS.md` second. An empty or whitespace-only file is treated
 as absent.
 
-No agent loads `.bb/AGENTS.md` natively, and provider-native instruction files
-(`CLAUDE.md` for Claude Code, a repo-root `AGENTS.md` for Codex) remain
-provider-specific. bb reads the files above itself and injects them, so use them
-for guidance you want every bb thread to receive regardless of provider.
+No agent loads `.bb/AGENTS.md` natively. Provider-native instruction files
+remain separate. Codex reads a repo-root `AGENTS.md`. Claude Code 2.1.277 and
+later also reads `AGENTS.md` when no project or ancestor `CLAUDE.md` or
+`CLAUDE.local.md` takes precedence. Older Claude Code versions and sessions
+without its built-in `AGENTS.md` support still require `CLAUDE.md`. bb reads
+the files above itself and injects them, so use them for guidance you want every
+bb thread to receive regardless of provider.
 
 ## Skills
 
@@ -758,38 +844,85 @@ schema, a default, and a revision that increments on every write. Writes name
 the revision they expect and receive `409 ui_preference_conflict` when another
 client wrote first, so a stale window cannot silently clobber a newer value.
 
-| Key                               | Value                                               |
-| --------------------------------- | --------------------------------------------------- |
-| `sidebar.organizationMode`        | `project`, `chronological`, or `machine`            |
-| `sidebar.threadGrouping.environment` | `auto`, `true`, or `false`                       |
-| `sidebar.chronologicalSort`       | `updated`, `created`, `alpha`, or `none`            |
-| `sidebar.sectionOrder`            | Section id list for **By project**                  |
-| `sidebar.manualSectionOrder`      | Section id list for **Manually**                    |
-| `sidebar.machineSectionOrder`     | Section id list for **By machine**                  |
-| `sidebar.collapsedSections`       | Collapsed built-in sections (`pinned`, `threads`)   |
-| `sidebar.collapsedProjects`       | Collapsed project ids                               |
-| `sidebar.collapsedThreads`        | Thread ids whose children are collapsed             |
-| `sidebar.collapsedEnvironments`   | Collapsed environment ids                           |
-| `sidebar.collapsedThreadSections` | Collapsed thread section ids                        |
-| `sidebar.collapsedMachines`       | Collapsed machine ids                               |
-| `sidebar.footerOrder`             | Footer action order                                 |
-| `sidebar.hiddenFooterItems`       | Footer actions moved into More                      |
-| `sidebar.pluginPanelOrder`        | Navigation entry order                              |
-| `sidebar.visiblePluginPanels`     | Navigation entries shown, or `null` for every entry |
-| `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
-| `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
+| Key                                  | Value                                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `sidebar.organizationMode`           | `project`, `chronological`, or `machine`                                                  |
+| `sidebar.threadGrouping.environment` | `auto`, `true`, or `false`                                                                |
+| `sidebar.chronologicalSort`          | `updated`, `created`, `alpha`, or `none`                                                  |
+| `sidebar.sectionOrder`               | Section id list for **By project**                                                        |
+| `sidebar.manualSectionOrder`         | Section id list for **Manually**                                                          |
+| `sidebar.machineSectionOrder`        | Section id list for **By machine**                                                        |
+| `sidebar.hiddenGroups`               | Legacy project, custom section, and machine ids migrated once into the Thread list plugin |
+| `sidebar.collapsedSections`          | Collapsed built-in sections (`pinned`, `threads`)                                         |
+| `sidebar.collapsedProjects`          | Collapsed project ids                                                                     |
+| `sidebar.collapsedThreads`           | Thread ids whose children are collapsed                                                   |
+| `sidebar.collapsedEnvironments`      | Collapsed environment ids                                                                 |
+| `sidebar.collapsedThreadSections`    | Collapsed thread section ids                                                              |
+| `sidebar.collapsedMachines`          | Collapsed machine ids                                                                     |
+| `sidebar.footerOrder`                | Footer action order                                                                       |
+| `sidebar.hiddenFooterItems`          | Footer actions moved into More                                                            |
+| `sidebar.pluginPanelOrder`           | Navigation entry order                                                                    |
+| `sidebar.visiblePluginPanels`        | Navigation entries shown, or `null` for every entry                                       |
+| `sidebar.navigationProvider`         | Plugin key; defaults to `navigation/navigation`                                           |
+| `sidebar.headerProvider`             | Plugin key, or `__builtin__` for bb's header only                                         |
+| `sidebar.threadListProvider`         | Plugin key; defaults to `thread-list/thread-list`                                         |
 
-Custom (`chronological`) is the default for `sidebar.organizationMode` when no
-value is saved. Existing server and legacy browser choices are preserved.
+The sidebar thread list uses an explicit plugin selection and defaults to the bundled
+Thread list plugin (`thread-list/thread-list`). Existing `__automatic__` and
+`__builtin__` selections resolve to that default; other plugin selections are preserved.
+Use `bb settings ui reset sidebar.threadListProvider` to restore the default, or
+`bb settings ui set sidebar.threadListProvider <plugin-id>/<slot-id>` to select
+another plugin. The SDK exposes the same setting through `uiPreferences`.
+
+The sidebar navigation also uses an explicit plugin selection and defaults to the
+bundled Navigation plugin (`navigation/navigation`). Existing `__automatic__` and
+`__builtin__` selections resolve to that default. Order and visibility stay in
+`sidebar.pluginPanelOrder` and `sidebar.visiblePluginPanels`, shared by every
+navigation plugin.
+
+`sidebar.headerProvider` picks a plugin that draws controls in the sidebar header
+row, between the sidebar toggle and the back and forward buttons. It defaults to
+`__builtin__`, which leaves only bb's controls there. Set it with
+`bb settings ui set sidebar.headerProvider <plugin-id>/<slot-id>`.
+
+New installations default to Custom (`chronological`) for `sidebar.organizationMode`.
+Migrated installations with existing projects, threads, or UI preferences fall back
+to By project (`project`). Explicit server choices take precedence over legacy
+browser choices, which take precedence over this installation fallback. Reset
+saves the installation fallback as an explicit choice.
+
+The built-in sidebar defaults to Active, including threads with saved messages.
+Filter selects Active and Archived and remembers the selection in this browser,
+not in the server-backed preferences or SDK/CLI. There is no separate
+Drafts section or filter; saved messages remain in their owning thread. The
+selected archived threads retain their section, project, machine, and pin placement.
+Choose Filter in a sidebar header's combined actions menu to change the selection.
+The combined menu offers Organize, Sort by, and Filter.
+Organize retains its Sections choices and Groups → By environment toggle.
+Desktop archived rows have a persistent Unarchive icon
+that restores the thread without navigating away.
+Archived loads pages only while selected.
+Plugin sidebar replacements own their rendering.
+
+The palette's Filter independently selects Active and Archived before
+and after typing. It defaults to Active and remembers its selection in this
+browser only; it is not configurable through SDK/CLI.
+Active includes threads with saved messages. Search threads retains the existing
+title and conversation search behavior and opens the owning thread.
+Archived loads a bounded list in most-recently-archived order only while selected.
+Search uses the existing
+ranked Active/Archived response and displays the selected groups, with six initial
+rows in one group or three each when both are nonempty, plus Show more.
 
 `sidebar.threadGrouping.environment` decides whether two or more sibling threads
 that share one worktree environment collapse into a single worktree row inside
 their section. `true` groups them and `false` keeps every thread on its own row,
 in every organization mode. The default, `auto`, groups them in **By project**
 and **By machine** and leaves them flat in **Custom**, which is how each mode
-behaved before the preference existed. The thread-list header's Organize menu
-exposes it under Groups as the By environment toggle, which writes `true` or
-`false` and so applies to every mode once you use it.
+behaved before the preference existed. Set this preference through Organize →
+Groups → By environment, settings, or
+`bb settings ui set sidebar.threadGrouping.environment true`; an explicit
+`true` or `false` applies to every mode.
 
 Each `sidebar.threadGrouping.*` key toggles one grouping dimension
 independently, so a future dimension adds a key rather than changing this one.
@@ -823,6 +956,34 @@ value. A change on one device reaches every other connected window through the
 
 Sidebar width and open state stay in the browser because they depend on the
 window size.
+
+### Thread-list visibility
+
+Choose **Hide from list** in Threads, a project, custom section, or machine's menu to
+move it into **More**. Its menu in More offers **Add to list** to restore it.
+**Customize list** manages visibility and order for the current
+organization. Hiding a group preserves its threads, saved order, and collapse
+state; pinned threads stay in Pinned. Hidden work remains reachable through More,
+search, and direct links. More shows activity without automatically restoring
+hidden groups.
+
+The Thread list plugin's `hiddenGroups` preference defaults to `[]` and accepts `threads`,
+`project:<projectId>`, `section:<sectionId>`, and `machine:<hostId>` keys
+(`machine:no-machine` for the unassigned machine group). Each organization uses
+only its matching keys; `threads` applies to every organization. Pinned cannot
+be hidden. Duplicate keys are deduplicated; unavailable IDs are retained
+without creating sidebar rows, and new groups default to visible.
+
+```sh
+bb thread-list prefs get hiddenGroups
+bb thread-list prefs set hiddenGroups '["threads","project:proj_example","section:sec_example"]'
+bb thread-list prefs reset hiddenGroups
+```
+
+`set` replaces the complete list across organizations, so include any existing
+keys you want to keep hidden. `reset` restores the default empty list and shows
+every group. The plugin's `setPreference` and `resetPreference` RPCs expose the
+same operations to its app client.
 
 ### Sidebar footer
 
@@ -1070,10 +1231,9 @@ click. Revealed groups stay visible through activity and sort-order changes.
 **Manually** is unchanged. Toggle it with `bb settings experiment
 sidebarProgressiveDisclosure <true|false>`.
 
-The `timelineWindowing` experiment is off by default. When enabled, long
-timelines and large expanded timeline details retain stable height-preserving
-wrappers while mounting only rows near their active scrollport. Toggle it with
-`bb settings experiment timelineWindowing <true|false>`.
+Long timelines and large expanded timeline details retain stable
+height-preserving wrappers while mounting only rows near their active
+scrollport.
 
 The `serverMove` experiment is off by default. When enabled, Settings → Machines
 offers Move server here, and the server accepts `bb server move`,
@@ -1082,12 +1242,6 @@ offers Move server here, and the server accepts `bb server move`,
 While it is off those routes return 403 `server_move_experiment_disabled`;
 move status and cancel stay available. Toggle it with
 `bb settings experiment serverMove <true|false>`.
-
-The `multiMachinePicker` experiment is off by default. When enabled, projects
-with at least three machines use a searchable, target-first environment picker,
-and machine-only pickers become searchable when they have more than five
-machines. Toggle it with `bb settings experiment multiMachinePicker
-<true|false>`.
 
 ## Thread Timeline Window
 
@@ -1212,6 +1366,15 @@ refused — use `bb plugin update`. Before activation bb snapshots the plugin
 database, host-managed settings/storage/schedules, secrets, and registration.
 A failed activation restores that snapshot and records the latest failure on
 the plugin so it can be surfaced as needing attention.
+
+### Claude Code provider
+
+bb forwards only two environment variables to the Claude Code CLI, stripping
+every other. `BB_CLAUDE_CODE_EXECUTABLE` picks the `claude` binary;
+`CLAUDE_CODE_OAUTH_TOKEN` authenticates it on a machine with no interactive
+login, such as a CI runner. Mint the token with `claude setup-token`, which is
+long-lived where the credentials from `/login` are not. A logged-in machine
+needs neither.
 
 ### Provider retry plugin
 
@@ -1615,3 +1778,29 @@ or with `bb settings general telemetryEnabled false`. The saved server-wide pref
 takes effect immediately and persists across restarts. SDK callers can use
 `system.updateGeneralSettings` with `telemetryEnabled`. `BB_TELEMETRY=false`
 always disables telemetry, even when the saved preference is enabled.
+
+### Thread list lifecycle filter
+
+The Thread list plugin's `threadLifecycles` preference selects `["active"]`
+(the default), `["archived"]`, or `["active","archived"]`. Set it with
+`bb thread-list prefs set threadLifecycles '["archived"]'` or the header's
+Filter menu. It syncs to every window and rejects empty or duplicate values.
+
+## Desktop browser cookie discovery
+
+The desktop app combines known-browser definitions with schema-based discovery
+of Chromium and Firefox cookie stores matched to registered web browsers.
+Known-browser entries remain available without registration metadata.
+On Linux, an absolute `XDG_CONFIG_HOME`
+in the desktop process environment replaces `~/.config` for discovery and known
+Chromium profile locations; relative values are ignored. Flatpak and Snap data
+directories are also searched. On macOS, discovery searches Application Support.
+The desktop app's own profile is excluded. See `bb guide browser` for search
+bounds, encryption limitations, and the `import-sources` / `import-cookies`
+commands. No additional BB setting is required to enable discovery.
+
+To disable only the legacy OpenCode ACP provider, run
+`bb plugin config provider-acp set enableOpenCode false`. The setting defaults
+to `true` and applies to all machines, including custom `acp-opencode` overrides.
+Other ACP providers remain enabled. Use this with the native `provider-opencode`
+plugin; set it back to `true` to restore OpenCode ACP.

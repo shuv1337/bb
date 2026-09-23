@@ -38,10 +38,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
       experiments: {
         changelogPreview: false,
         mobileApp: false,
-        multiMachinePicker: false,
         serverMove: false,
         sidebarProgressiveDisclosure: false,
-        timelineWindowing: false,
       },
     },
   }),
@@ -80,6 +78,10 @@ vi.mock("@/components/project/ProjectActionsProvider", () => ({
   ProjectActionsProvider: ({ children }: { children: ReactNode }) => (
     <>{children}</>
   ),
+}));
+
+vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
+  useMoveThreadToSection: () => vi.fn(),
 }));
 
 vi.mock("@/components/thread/ThreadActionsProvider", () => ({

@@ -1,5 +1,6 @@
+import { usePluginCollectionParams } from "./usePluginCollectionParams";
 import { useMemo } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { Icon } from "@bb/shared-ui/icon";
 import {
   ResourceCollectionViewport,
@@ -7,7 +8,6 @@ import {
 } from "@bb/shared-ui/resource-list";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { TOOLS_PAGE_BAND_CLASSES } from "@/components/tools/tools-navigation";
-import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import {
   type PluginCatalogSearchEntry,
   usePluginCatalogSearch,
@@ -16,11 +16,7 @@ import { getPluginsRoutePath } from "@/lib/route-paths";
 import type { AddPluginInitial } from "./AddPluginDialog";
 import { PluginCatalogGrid } from "./PluginCatalogCard";
 import { PluginAuthorAvatar } from "./PluginAuthorAvatar";
-import {
-  PluginBrowseToolbar,
-  pluginBrowseSort,
-  pluginBrowseSortDirection,
-} from "./PluginBrowseControls";
+import { PluginCollectionToolbar } from "./PluginBrowseControls";
 import {
   pluginCategoryFilterId,
   pluginCategoryFilterOptions,
@@ -64,22 +60,26 @@ function authorForEntries(
 export function PluginAuthorPage({
   authorKey,
   onInstall,
+  onUninstall,
   onOpenPlugin,
 }: {
   authorKey: string;
   onInstall: (initial: AddPluginInitial) => void;
+  onUninstall?: (entry: PluginCatalogSearchEntry) => void;
   onOpenPlugin: (pluginId: string, trigger: HTMLButtonElement) => void;
 }) {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const query = searchParams.get("query") ?? "";
-  const debouncedQuery = useDebouncedValue(query.trim(), 300);
-  const selectedCategories = searchParams.getAll("category");
-  const requestedSort = pluginBrowseSort(searchParams.get("sort"));
-  const sortDirection =
-    pluginBrowseSortDirection(searchParams.get("direction")) ?? "desc";
+  const {
+    searchParams,
+    query,
+    requestedSort,
+    sortDirection,
+    selectedCategories,
+    changeSearchParams,
+  } = usePluginCollectionParams();
+  const trimmedQuery = query.trim();
   const catalogQuery = usePluginCatalogSearch("", { enabled: true });
-  const searchQuery = usePluginCatalogSearch(debouncedQuery, {
-    enabled: debouncedQuery !== "",
+  const searchQuery = usePluginCatalogSearch(trimmedQuery, {
+    enabled: trimmedQuery !== "",
   });
   const entries = useMemo(
     () =>
@@ -104,7 +104,7 @@ export function PluginAuthorPage({
   const visibleEntries = useMemo(() => {
     const selected = new Set(selectedCategories);
     const searchEntries =
-      debouncedQuery === ""
+      trimmedQuery === ""
         ? (catalogQuery.data?.entries ?? [])
         : (searchQuery.data?.entries ?? []);
     const filtered = entriesByMarketplaceAuthor(
@@ -120,22 +120,16 @@ export function PluginAuthorPage({
   }, [
     authorKey,
     catalogQuery.data?.entries,
-    debouncedQuery,
+    trimmedQuery,
     searchQuery.data?.entries,
     selectedCategories,
     sort,
     sortDirection,
   ]);
-  const searchPending = debouncedQuery !== "" && searchQuery.isPending;
+  const searchPending = trimmedQuery !== "" && searchQuery.isPending;
   const browseParams = new URLSearchParams(searchParams);
   browseParams.delete("author");
   const browseSearch = browseParams.toString();
-
-  const changeSearchParams = (change: (next: URLSearchParams) => void) => {
-    const next = new URLSearchParams(searchParams);
-    change(next);
-    setSearchParams(next, { replace: true });
-  };
 
   return (
     <ResourceCollectionViewport
@@ -178,7 +172,11 @@ export function PluginAuthorPage({
                     className="inline-flex items-center gap-1 rounded-sm text-xs text-subtle-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     {author.url.startsWith("https://github.com/") ? (
-                      <Icon name="Github" className="size-3.5" aria-hidden />
+                      <Icon
+                        name="GithubLogo"
+                        className="size-4.5 shrink-0 fill-current [&_*]:stroke-0"
+                        aria-hidden
+                      />
                     ) : null}
                     {formatUrlLabel(author.url)}
                     <Icon name="ExternalLink" className="size-3" aria-hidden />
@@ -202,7 +200,7 @@ export function PluginAuthorPage({
           <ResourceListState state="empty" message="Author not found." />
         ) : (
           <section className="space-y-6">
-            <PluginBrowseToolbar
+            <PluginCollectionToolbar
               query={query}
               selectedCategories={selectedCategories}
               categoryOptions={categoryOptions}
@@ -225,8 +223,10 @@ export function PluginAuthorPage({
               />
             ) : (
               <PluginCatalogGrid
+                resetKey={searchParams.toString()}
                 entries={visibleEntries}
                 onInstall={onInstall}
+                onUninstall={onUninstall}
                 onOpenPlugin={onOpenPlugin}
               />
             )}

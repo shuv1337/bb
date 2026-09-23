@@ -28,6 +28,11 @@ Model lists answer from the machine's last stored list while a background
 refresh runs, so a list can be hours old. A provider whose refresh keeps
 failing or timing out keeps answering from its last stored list.
 
+When no list can be served, bb provider models prints the failing provider,
+the failure code, and the underlying host message on stderr, then reports the
+empty catalog on stdout. The model pickers show the same underlying message
+beneath their summary line.
+
 Provider-native memory can be controlled on the separate Settings → Providers
 → Codex and Settings → Providers → Claude Code pages. Codex memory controls
 both recall (`memories.use_memories`) and future generation
@@ -128,6 +133,18 @@ appears automatically. Discover and select a native OpenCode model with:
 
 The ACP catalog uses the same listing against acp-opencode.
 
+OpenCode Go quotas appear in Provider usage for the selected machine after
+signing in to Go in OpenCode on that machine. Inspect the same five-hour,
+weekly, and monthly windows with bb settings usage --machine <id-or-name> --json
+or bb.sdk.system.usageLimits({ hostId, providerId: "acp-opencode" }).
+The collector uses OPENCODE_API_KEY, the active Console account in OpenCode's
+opencode.db, or OPENCODE_AUTH_CONTENT/auth.json under XDG_DATA_HOME (default
+~/.local/share), including custom launch env overrides. Console account storage
+is read only; OpenCode owns refreshing expired sessions.
+Custom OpenCode wrappers need dialect: "opencode" and providerUsage: true.
+This reports the Go subscription, not usage for other OpenCode providers or
+Zen pay-as-you-go spending.
+
 An OpenCode model and an OpenCode agent are different selections. An OpenCode
 agent (build, plan, or a custom primary agent such as an orchestrator) is a
 session mode, not a model. On provider opencode, set defaultAgent with
@@ -180,3 +197,9 @@ The bb user and project roots keep higher precedence than matching shared roots.
 
 OpenCode ACP declares support for the built-in /compact command. Cursor ACP does
 not expose compatible manual compaction through ACP.
+
+To disable only the legacy OpenCode ACP provider, run
+`bb plugin config provider-acp set enableOpenCode false`. The setting defaults
+to `true` and applies to all machines, including custom `acp-opencode` overrides.
+Other ACP providers remain enabled. Use this with the native `provider-opencode`
+plugin; set it back to `true` to restore OpenCode ACP.

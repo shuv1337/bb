@@ -51,6 +51,7 @@ function registeredIds(
 
 async function loadPlugin(options: {
   customAgents?: string;
+  enableOpenCode?: boolean;
   probe?: (command: string) => unknown;
   hosts?: { id: string; status: string }[];
 }) {
@@ -58,9 +59,14 @@ async function loadPlugin(options: {
     pluginId: PLUGIN_ID,
     dataDir: NO_LEGACY_CONFIG,
     experimental_declaredIconNames: DECLARED_ICON_NAMES,
-    ...(options.customAgents === undefined
-      ? {}
-      : { settings: { customAgents: options.customAgents } }),
+    settings: {
+      ...(options.customAgents === undefined
+        ? {}
+        : { customAgents: options.customAgents }),
+      ...(options.enableOpenCode === undefined
+        ? {}
+        : { enableOpenCode: options.enableOpenCode }),
+    },
     ...(options.probe === undefined
       ? {}
       : {
@@ -78,6 +84,28 @@ async function loadPlugin(options: {
 }
 
 describe("the ACP plugin's registrations", () => {
+  it("disables OpenCode alone, including custom overrides, and can re-enable it", async () => {
+    const host = await loadPlugin({
+      enableOpenCode: false,
+      customAgents: customAgents({
+        id: "opencode",
+        displayName: "Custom OpenCode",
+        command: "opencode",
+      }),
+    });
+    expect(registeredIds(host)).not.toContain("acp-opencode");
+    expect(registeredIds(host)).toContain("acp-cursor");
+    await host.harness.setSettings({ enableOpenCode: true });
+    await vi.waitFor(() =>
+      expect(registeredIds(host)).toContain("acp-opencode"),
+    );
+    await host.harness.setSettings({ enableOpenCode: false });
+    await vi.waitFor(() =>
+      expect(registeredIds(host)).not.toContain("acp-opencode"),
+    );
+    expect(registeredIds(host)).toContain("acp-cursor");
+  });
+
   it("registers every shipped agent, and a configured one beside them", async () => {
     const host = await loadPlugin({
       customAgents: customAgents({
