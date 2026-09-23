@@ -65,6 +65,8 @@
     "session.compaction.ended",
     "session.tool.progress",
     "session.step.failed",
-    "session.permissions"
+    "session.permissions",
+    "session.agent.selected",
+    "session.model.selected"
   ]
 }

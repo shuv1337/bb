@@ -369,7 +369,7 @@ describe("delta translation turn lifecycle", () => {
     expect(close).toMatchObject({ exitCode: 2 });
   });
 
-  it("ignores live permission, progress, and step-failure events", () => {
+  it("ignores live permission, progress, step-failure, and selection events", () => {
     const deltas = translateAll([
       { type: "session.execution.started", data: { sessionID: "SES_1" } },
       { type: "session.permissions", data: { sessionID: "SES_1", permissions: [] } },
@@ -378,6 +378,14 @@ describe("delta translation turn lifecycle", () => {
         data: { sessionID: "SES_1", id: "call_1", metadata: { shellID: "sh_1" } },
       },
       { type: "session.step.failed", data: { sessionID: "SES_1" } },
+      {
+        type: "session.agent.selected",
+        data: { sessionID: "SES_1", agent: "plan" },
+      },
+      {
+        type: "session.model.selected",
+        data: { sessionID: "SES_1", model: { id: "gpt", providerID: "openai" } },
+      },
     ]);
     expect(deltas.some((delta) => delta.kind === "unhandled")).toBe(false);
   });

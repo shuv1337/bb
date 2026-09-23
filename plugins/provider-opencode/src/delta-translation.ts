@@ -62,6 +62,8 @@ export const IGNORED_EVENT_TYPES: ReadonlySet<string> = new Set([
   "session.tool.progress",
   "session.step.failed",
   "session.permissions",
+  "session.agent.selected",
+  "session.model.selected",
 ]);
 
 const COMMAND_EXIT_TRAILER = /Command exited with code (-?\d+)\.?\s*$/;
