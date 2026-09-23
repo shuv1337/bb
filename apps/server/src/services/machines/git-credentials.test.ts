@@ -5,7 +5,11 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveGitCredentials, machineGitHealth } from "./git-credentials.js";
+import {
+  createGhRunner,
+  resolveGitCredentials,
+  machineGitHealth,
+} from "./git-credentials.js";
 
 const exec = promisify(execFile);
 const cleanup: Array<() => Promise<void>> = [];
@@ -55,6 +59,61 @@ function fill(
     child.stdin.end(input);
   });
 }
+
+async function fakeGh(body: string) {
+  const dir = await mkdtemp(join(tmpdir(), "bb-fake-gh-"));
+  cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const command = join(dir, "gh");
+  await writeFile(command, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return { dir, command };
+}
+
+function alive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("gh runner", () => {
+  it("kills the whole process tree when gh hangs past the timeout", async () => {
+    const { dir, command } = await fakeGh(
+      `sleep 30 &\necho $! > "$(dirname "$0")/grandchild"\nsleep 30`,
+    );
+    const run = createGhRunner(command, 300);
+    await expect(run(["auth", "token"])).rejects.toThrow("timed out");
+    const grandchild = Number(await readFile(join(dir, "grandchild"), "utf8"));
+    await vi.waitFor(() => expect(alive(grandchild)).toBe(false), {
+      timeout: 2_000,
+    });
+  });
+
+  it("shares one gh process between overlapping calls", async () => {
+    const { dir, command } = await fakeGh(
+      `echo started >> "$(dirname "$0")/calls"\nsleep 0.3\necho token`,
+    );
+    const run = createGhRunner(command, 5_000);
+    const results = await Promise.all([run(["auth"]), run(["auth"])]);
+    expect(results).toEqual(["token\n", "token\n"]);
+    expect(await readFile(join(dir, "calls"), "utf8")).toBe("started\n");
+    await run(["auth"]);
+    expect(await readFile(join(dir, "calls"), "utf8")).toBe(
+      "started\nstarted\n",
+    );
+  });
+
+  it("rejects when gh exits non-zero or is missing", async () => {
+    const { command } = await fakeGh("echo partial\nexit 1");
+    await expect(createGhRunner(command, 5_000)(["auth"])).rejects.toThrow(
+      "exited with 1",
+    );
+    await expect(
+      createGhRunner(join(tmpdir(), "bb-missing-gh"), 5_000)(["auth"]),
+    ).rejects.toThrow();
+  });
+});
 
 describe("machine Git environment", () => {
   it("lets agent-provider contributions override host credentials", async () => {
