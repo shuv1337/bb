@@ -1815,6 +1815,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           break;
         }
         await session.tools.abandon();
+        if (request.params.intent === "release") {
+          await enqueue(session, async () => {
+            await emitTurnDeltas(session, translator.settleUnobserved(session.handle.id));
+          });
+        }
         if (request.params.intent === "interrupt" && hasInterruptibleWork(session, request.params.activeTurnId)) {
           const deadline = Date.now() + interruptSettlementTimeoutMs;
           const remaining = (): number => Math.max(0, deadline - Date.now());

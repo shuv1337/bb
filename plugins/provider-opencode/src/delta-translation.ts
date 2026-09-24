@@ -211,6 +211,7 @@ export function nativeTerminalsFromEvents(
       tools.clear();
       turn = undefined;
       executionSeq = event.durable?.seq;
+      compactionEnded = false;
       continue;
     }
     if (event.type === "session.tool.success" && id !== undefined) {
@@ -865,6 +866,55 @@ export function createOpenCodeDeltaTranslator() {
     return settleOwnedTurn(state, status);
   }
 
+  function abandonUnobserved(state: NativeSessionState): ThreadDelta[] {
+    const parentRef = parentRefFor(state.sessionID);
+    const deltas: ThreadDelta[] = [];
+    for (const childId of [...state.children.keys()]) {
+      const child = natives.get(childId);
+      if (child !== undefined) {
+        for (const [id, tool] of [...child.tools]) {
+          if (!tool.opened) continue;
+          deltas.push(
+            closeSettledTool(child, id, tool, "failed", childId, UNOBSERVED_TOOL_OUTCOME),
+          );
+        }
+      }
+      deltas.push(...closeDelegation(state, childId, "failed"));
+    }
+    for (const [id, tool] of [...state.tools]) {
+      if (!tool.opened) continue;
+      deltas.push(
+        closeSettledTool(state, id, tool, "failed", parentRef, UNOBSERVED_TOOL_OUTCOME),
+      );
+    }
+    for (const textId of state.textOpen) {
+      deltas.push({
+        kind: "item.textClose",
+        key: keyFor(textId, parentRef),
+        channel: "agentMessage",
+      });
+    }
+    state.textOpen.clear();
+    if (state.compactionOpen) {
+      deltas.push({
+        kind: "item.close",
+        key: keyFor("compaction", parentRef),
+        status: "failed",
+        item: { type: "compaction" },
+        presentation: COMPACTION_PRESENTATION,
+      });
+      state.compactionOpen = false;
+    }
+    deltas.push(...closeTurn(state, "failed", UNOBSERVED_TOOL_OUTCOME));
+    return deltas;
+  }
+
+  function settleUnobserved(sessionID: string): ThreadDelta[] {
+    const state = natives.get(sessionID);
+    if (state === undefined || !state.turnOpen) return [];
+    return abandonUnobserved(state);
+  }
+
   function checkpoint(sessionID: string): string | undefined {
     return natives.get(sessionID)?.lastCheckpointId;
   }
@@ -945,7 +995,10 @@ export function createOpenCodeDeltaTranslator() {
       }
       state.textOpen.clear();
     }
-    if (state.compactionOpen && (snapshot?.compactionEnded === true || ending)) {
+    if (
+      state.compactionOpen &&
+      (ending || (logMatches && snapshot?.compactionEnded === true))
+    ) {
       deltas.push({
         kind: "item.close",
         key: keyFor("compaction", parentRef),
@@ -1027,8 +1080,8 @@ export function createOpenCodeDeltaTranslator() {
         break;
       }
       case "session.execution.started": {
-        native.settledTools.clear();
         if (isChild) {
+          native.settledTools.clear();
           const child = owner.children.get(eventSessionID);
           if (child !== undefined && !child.turnOpened) {
             deltas.push({
@@ -1040,8 +1093,19 @@ export function createOpenCodeDeltaTranslator() {
           }
           break;
         }
+        const nextExecutionId = `exec:${eventSessionID}:${seq ?? 0}`;
+        const prior = native.executionTurnId;
+        const staleExecution =
+          native.turnOpen &&
+          prior !== undefined &&
+          prior.startsWith("exec:") &&
+          prior !== nextExecutionId;
+        if (staleExecution) {
+          deltas.push(...abandonUnobserved(native));
+          native.settledTools.clear();
+        }
         if (!native.turnOpen) {
-          native.executionTurnId = `exec:${eventSessionID}:${seq ?? 0}`;
+          native.executionTurnId = nextExecutionId;
         }
         deltas.push(...ensureTurnOpen(native, undefined));
         break;
@@ -1462,6 +1526,7 @@ export function createOpenCodeDeltaTranslator() {
     executionTurnId,
     reconcileAfterResync,
     settleTurn,
+    settleUnobserved,
     configureInjectedTools,
     noteNativeTerminals,
     noteSessionLiveness,

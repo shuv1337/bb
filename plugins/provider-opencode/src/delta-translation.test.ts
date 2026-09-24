@@ -670,6 +670,37 @@ describe("bb tool rows", () => {
     expect(reconciled).toContainEqual(expect.objectContaining({ kind: "turn.boundary", status: "failed" }));
   });
 
+  it("keeps a new compaction open when an earlier execution already compacted", () => {
+    const translator = bbTranslator();
+    translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 1 } },
+        { type: "session.compaction.started", data: { sessionID: "SES_1" } },
+        { type: "session.compaction.ended", data: { sessionID: "SES_1" } },
+        { type: "session.execution.succeeded", data: { sessionID: "SES_1" } },
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 8 } },
+        { type: "session.compaction.started", data: { sessionID: "SES_1" } },
+      ],
+      CTX,
+      translator,
+    );
+    translator.noteNativeTerminals(
+      "SES_1",
+      nativeTerminalsFromEvents(
+        [
+          { type: "session.execution.started", durable: { seq: 1 } },
+          { type: "session.compaction.ended" },
+          { type: "session.execution.succeeded" },
+          { type: "session.execution.started", durable: { seq: 8 } },
+        ],
+        true,
+      ),
+    );
+    const reconciled = translator.reconcileAfterResync("SES_1", []);
+    expect(reconciled.some((delta) => delta.kind === "item.close")).toBe(false);
+    expect(reconciled.some((delta) => delta.kind === "turn.boundary")).toBe(false);
+  });
+
   it("does not close a new turn with the previous execution's success", () => {
     const translator = bbTranslator();
     translateAll(

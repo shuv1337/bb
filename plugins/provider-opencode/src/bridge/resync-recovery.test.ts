@@ -59,6 +59,78 @@ it("closes an idle session from its outcome when the log has no terminal", async
   }
 });
 
+it("closes a stale turn as unobserved when a new execution starts after two failed activity reads", async () => {
+  const { harness, sessionId } = await openTurn("thr_stale");
+  try {
+    harness.fake.setActivity(sessionId, "fail");
+    await harness.injectResync("thr_stale");
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(harness.deltasOf("thr_stale").some((delta) => delta.kind === "turn.boundary")).toBe(false);
+    const started = await harness.request("creq_23456789ab", "turn/start", {
+      threadId: "thr_stale",
+      providerThreadId: sessionId,
+      clientRequestId: "creq_23456789ab",
+      input: [{ type: "text", text: "again", mentions: [] }],
+      options: {
+        permissionMode: "full",
+        permissionScope: "full",
+        approvalReviewer: null,
+        permissionEscalation: null,
+      },
+    });
+    expect(started.error).toBeUndefined();
+    await harness.fake.play({
+      type: "session.execution.started",
+      data: { sessionID: sessionId },
+      durable: { aggregateID: sessionId, seq: 9, version: 1 },
+    });
+    await harness.rpc.flushWork();
+    const boundary = harness.deltasOf("thr_stale").find((delta) => delta.kind === "turn.boundary");
+    expect(boundary).toMatchObject({
+      status: "failed",
+      providerTurnId: `exec:${sessionId}:1`,
+      error: { message: UNOBSERVED_TOOL_OUTCOME },
+    });
+    expect(boundary?.status).not.toBe("completed");
+    expect(harness.deltasOf("thr_stale")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "item.close",
+          status: "failed",
+          resultText: UNOBSERVED_TOOL_OUTCOME,
+        }),
+        expect.objectContaining({
+          kind: "turn.open",
+          providerTurnId: `exec:${sessionId}:9`,
+        }),
+      ]),
+    );
+  } finally {
+    await harness.teardown();
+  }
+});
+
+it("releases a stale open turn as unobserved rather than successful", async () => {
+  const { harness, sessionId } = await openTurn("thr_release");
+  try {
+    const stopped = await harness.request(81, "thread/stop", {
+      threadId: "thr_release",
+      providerThreadId: sessionId,
+      intent: "release",
+      activeTurnId: null,
+    });
+    expect(stopped.error).toBeUndefined();
+    const boundary = harness.deltasOf("thr_release").find((delta) => delta.kind === "turn.boundary");
+    expect(boundary).toMatchObject({
+      status: "failed",
+      error: { message: UNOBSERVED_TOOL_OUTCOME },
+    });
+    expect(boundary?.status).not.toBe("completed");
+  } finally {
+    await harness.teardown();
+  }
+});
+
 it("keeps the turn open after a failed activity read and retries once", async () => {
   const { harness, sessionId } = await openTurn("thr_retry");
   try {
