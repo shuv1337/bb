@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import {
   collectDurableLog,
+  sessionLivenessFrom,
   DURABLE_LOG_MAX_EVENTS,
   DURABLE_LOG_MAX_PAGES,
   DURABLE_LOG_PAGE,
@@ -63,6 +64,14 @@ it("marks recovery incomplete when paging hits the bound before log.synced", asy
   expect(read.events.length).toBe(DURABLE_LOG_MAX_EVENTS);
 });
 
+it("does not treat a log.synced-only page as complete evidence of no terminal", async () => {
+  const read = await collectDurableLog(async () =>
+    page([], { synced: true, syncedSeq: 12, truncated: false }),
+  );
+  expect(read.complete).toBe(false);
+  expect(read.events).toEqual([]);
+});
+
 it("keeps the last durable sequence when a page ends before log.synced", () => {
   const events = filler(1, DURABLE_LOG_PAGE);
   const raw = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
@@ -71,4 +80,21 @@ it("keeps the last durable sequence when a page ends before log.synced", () => {
   expect(parsed.truncated).toBe(true);
   expect(parsed.lastSeq).toBe(DURABLE_LOG_PAGE);
   expect(parsed.events).toHaveLength(DURABLE_LOG_PAGE);
+});
+
+it("reads idle outcome and active membership from the session payloads", () => {
+  expect(
+    sessionLivenessFrom(
+      { data: { outcome: "succeeded", time: { idle: 9 } } },
+      { data: {} },
+      "ses_1",
+    ),
+  ).toEqual({ outcome: "succeeded", idleAt: 9, active: false });
+  expect(
+    sessionLivenessFrom(
+      { data: { outcome: "failed", time: { idle: 3 } } },
+      { data: { ses_1: { type: "running" } } },
+      "ses_1",
+    ),
+  ).toEqual({ outcome: "failed", idleAt: 3, active: true });
 });

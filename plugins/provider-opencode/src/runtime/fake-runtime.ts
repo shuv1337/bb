@@ -25,6 +25,7 @@ import type {
   OpenCodePromptInput,
   OpenCodeRuntime,
   OpenCodeSessionInfo,
+  OpenCodeSessionLiveness,
   OpenCodeSessionMessage,
   OpenCodeSkill,
   RuntimeSessionEvent,
@@ -92,6 +93,7 @@ export interface FakeOpenCodeRuntime extends OpenCodeRuntime {
   emit(event: Record<string, unknown>): void;
   play(event: Record<string, unknown>): Promise<void>;
   failStream(error: unknown): void;
+  setActivity(sessionID: string, liveness: OpenCodeSessionLiveness | "fail"): void;
   readonly calls: FakeOpenCodeCallLog;
 }
 
@@ -102,6 +104,7 @@ export function createFakeOpenCodeRuntime(
   let closed = false;
   let streamFailure: Error | null = null;
   const sessions = new Map<string, FakeSession>();
+  const activity = new Map<string, OpenCodeSessionLiveness | "fail">();
   let seq = 0;
   const nextId = (prefix: string) => {
     seq += 1;
@@ -271,6 +274,12 @@ export function createFakeOpenCodeRuntime(
       info: async () => {
         assertOpen();
         return session.info;
+      },
+      activity: async () => {
+        assertOpen();
+        const next = activity.get(id);
+        if (next === "fail") throw new Error("session activity failed");
+        return next ?? { outcome: undefined, idleAt: undefined, active: true };
       },
       prompt: async (input: OpenCodePromptInput) => {
         assertOpen();
@@ -564,6 +573,9 @@ export function createFakeOpenCodeRuntime(
     },
     emit,
     play: (event) => queueEvent(event),
+    setActivity: (sessionID, liveness) => {
+      activity.set(sessionID, liveness);
+    },
     calls,
     failStream: (error: unknown) => {
       reportStreamFailure(error);

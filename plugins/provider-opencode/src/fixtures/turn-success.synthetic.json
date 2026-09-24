@@ -1,0 +1,37 @@
+[
+  {
+    "type": "session.execution.started",
+    "data": { "sessionID": "SES_1" },
+    "durable": { "aggregateID": "SES_1", "seq": 1, "version": 1 }
+  },
+  {
+    "type": "session.tool.input.started",
+    "data": { "sessionID": "SES_1", "id": "call_syn", "name": "bb_echo" },
+    "durable": { "aggregateID": "SES_1", "seq": 2, "version": 1 }
+  },
+  {
+    "type": "session.tool.called",
+    "data": {
+      "sessionID": "SES_1",
+      "id": "call_syn",
+      "input": { "text": "hi" },
+      "executed": true
+    },
+    "durable": { "aggregateID": "SES_1", "seq": 3, "version": 1 }
+  },
+  {
+    "type": "session.tool.success",
+    "data": {
+      "sessionID": "SES_1",
+      "id": "call_syn",
+      "content": [{ "type": "text", "text": "echo: hi" }],
+      "executed": true
+    },
+    "durable": { "aggregateID": "SES_1", "seq": 4, "version": 2 }
+  },
+  {
+    "type": "session.execution.succeeded",
+    "data": { "sessionID": "SES_1" },
+    "durable": { "aggregateID": "SES_1", "seq": 5, "version": 1 }
+  }
+]

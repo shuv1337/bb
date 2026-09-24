@@ -741,43 +741,29 @@ it.each(CELLS)(
         });
         expect(resumed.error).toBeUndefined();
         expect(providerThreadId(resumed)).toBe(sessionId);
-        const secondClosed = [
-          ...second,
-          {
-            type: "session.execution.succeeded",
-            data: { sessionID: sessionId },
-            durable: { aggregateID: sessionId, seq: 200, version: 1 },
-          },
-        ];
-        await playAll(harness, secondClosed);
-        await checkCell(harness, cell, "thr_resume", sessionId, [
-          first,
-          secondClosed,
-        ]);
+        await checkCell(harness, cell, "thr_resume", sessionId, [first]);
+        await playAll(harness, second);
         expectDurableOpen(harness, "thr_resume", first[0] ?? {});
         expectDurableOpen(harness, "thr_resume", second[0] ?? {});
+        expect(
+          harness.deltasOf("thr_resume").filter((delta) => delta.kind === "turn.boundary"),
+        ).toHaveLength(1);
         return;
       }
 
       const started = await harness.startThread("thr_compact");
       const sessionId = providerThreadId(started);
-      const compact = sliceBetween(
+      const played = sliceBetween(
         owned,
         "session.execution.started",
         "session.compaction.ended",
         1,
       ).map((event) => rewrite(event, new Map([["SES_1", sessionId]])));
-      const played = [
-        ...compact,
-        {
-          type: "session.execution.succeeded",
-          data: { sessionID: sessionId },
-          durable: { aggregateID: sessionId, seq: 200, version: 1 },
-        },
-      ];
       await playAll(harness, played);
-      await checkCell(harness, cell, "thr_compact", sessionId, [played]);
       expectDurableOpen(harness, "thr_compact", played[0] ?? {});
+      expect(
+        harness.deltasOf("thr_compact").some((delta) => delta.kind === "turn.boundary"),
+      ).toBe(false);
       expect(
         harness
           .deltasOf("thr_compact")
@@ -787,3 +773,59 @@ it.each(CELLS)(
   },
   30_000,
 );
+
+it("replays a contiguous synthetic success without a capture gap", async () => {
+  const harness = await startOpenCodeBridgeHarness({
+    prefix: "bb-opencode-recorded-synthetic-",
+    scriptTurns: false,
+  });
+  try {
+    const started = await harness.startThread("thr_synthetic", {
+      dynamicTools: [BB_ECHO],
+    });
+    const sessionId = providerThreadId(started);
+    const played = loadFixture("turn-success.synthetic.json").map((event) =>
+      rewrite(event, new Map([["SES_1", sessionId]])),
+    );
+    await playAll(harness, played);
+    await checkCell(harness, "turn-tools", "thr_synthetic", sessionId, [played]);
+    expect(
+      harness.deltasOf("thr_synthetic").some(
+        (delta) => delta.kind === "turn.boundary" && delta.status === "completed",
+      ),
+    ).toBe(true);
+  } finally {
+    await harness.teardown();
+  }
+});
+
+it("does not close a turn when a seq gap has no terminal", async () => {
+  const harness = await startOpenCodeBridgeHarness({
+    prefix: "bb-opencode-recorded-gap-",
+    scriptTurns: false,
+  });
+  try {
+    const started = await harness.startThread("thr_gap");
+    const sessionId = providerThreadId(started);
+    await playAll(harness, [
+      {
+        type: "session.execution.started",
+        data: { sessionID: sessionId },
+        durable: { aggregateID: sessionId, seq: 1, version: 1 },
+      },
+      {
+        type: "session.tool.input.started",
+        data: { sessionID: sessionId, id: "call_gap", name: "read" },
+        durable: { aggregateID: sessionId, seq: 4, version: 1 },
+      },
+    ]);
+    expect(
+      harness.deltasOf("thr_gap").some((delta) => delta.kind === "turn.boundary"),
+    ).toBe(false);
+    expect(
+      harness.deltasOf("thr_gap").some((delta) => delta.kind === "item.close"),
+    ).toBe(false);
+  } finally {
+    await harness.teardown();
+  }
+});

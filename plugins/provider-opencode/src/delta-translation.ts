@@ -26,7 +26,11 @@ import {
   OPENCODE_AGENT_EXTENSION_KIND,
   OPENCODE_MODEL_EXTENSION_KIND,
 } from "./extension-kinds.js";
-import type { OpenCodeNativeEvent, OpenCodeSessionMessage } from "./runtime/index.js";
+import type {
+  OpenCodeNativeEvent,
+  OpenCodeSessionLiveness,
+  OpenCodeSessionMessage,
+} from "./runtime/index.js";
 
 const AGENT_MESSAGE_PRESENTATION: DeltaPresentation = {
   label: { pending: "Writing", completed: "Wrote" },
@@ -166,9 +170,13 @@ export interface OpenCodeToolTerminal {
   error?: string;
 }
 
+export const UNOBSERVED_TOOL_OUTCOME =
+  "tool outcome was not observed after the event stream reconnected";
+
 export interface OpenCodeNativeTerminalSnapshot {
   tools: ReadonlyMap<string, OpenCodeToolTerminal>;
   turn: "completed" | "failed" | "interrupted" | undefined;
+  executionSeq: number | undefined;
   compactionEnded: boolean;
   complete: boolean;
 }
@@ -185,15 +193,26 @@ function toolFailureFrom(data: Record<string, unknown>): {
 }
 
 export function nativeTerminalsFromEvents(
-  events: readonly { type: string; data?: Record<string, unknown> }[],
+  events: readonly {
+    type: string;
+    data?: Record<string, unknown>;
+    durable?: { seq?: number };
+  }[],
   complete: boolean,
 ): OpenCodeNativeTerminalSnapshot {
   const tools = new Map<string, OpenCodeToolTerminal>();
   let turn: OpenCodeNativeTerminalSnapshot["turn"];
+  let executionSeq: number | undefined;
   let compactionEnded = false;
   for (const event of events) {
     const data = event.data ?? {};
     const id = asString(data.id);
+    if (event.type === "session.execution.started") {
+      tools.clear();
+      turn = undefined;
+      executionSeq = event.durable?.seq;
+      continue;
+    }
     if (event.type === "session.tool.success" && id !== undefined) {
       tools.set(id, { status: "completed" });
       continue;
@@ -209,7 +228,7 @@ export function nativeTerminalsFromEvents(
     else if (event.type === "session.compaction.ended") compactionEnded = true;
   }
   if (!complete && turn === "completed") turn = undefined;
-  return { tools, turn, compactionEnded, complete };
+  return { tools, turn, executionSeq, compactionEnded, complete };
 }
 
 interface ChildState {
@@ -685,6 +704,7 @@ export function createOpenCodeDeltaTranslator() {
   const catalogs = new Map<string, Map<string, DeltaPresentation | undefined>>();
   const aliases = new Map<string, Map<string, string>>();
   const terminals = new Map<string, OpenCodeNativeTerminalSnapshot>();
+  const liveness = new Map<string, OpenCodeSessionLiveness>();
 
   function nativeState(sessionID: string): NativeSessionState {
     const existing = natives.get(sessionID);
@@ -705,6 +725,7 @@ export function createOpenCodeDeltaTranslator() {
     catalogs.delete(sessionID);
     aliases.delete(sessionID);
     terminals.delete(sessionID);
+    liveness.delete(sessionID);
   }
 
   function configureInjectedTools(
@@ -729,6 +750,34 @@ export function createOpenCodeDeltaTranslator() {
     snapshot: OpenCodeNativeTerminalSnapshot,
   ): void {
     terminals.set(sessionID, snapshot);
+  }
+
+  function noteSessionLiveness(
+    sessionID: string,
+    next: OpenCodeSessionLiveness | undefined,
+  ): void {
+    if (next === undefined) {
+      liveness.delete(sessionID);
+      return;
+    }
+    liveness.set(sessionID, next);
+  }
+
+  function executionSeqOf(turnId: string | undefined): number | undefined {
+    if (turnId === undefined || !turnId.startsWith("exec:")) return undefined;
+    const seq = Number(turnId.slice(turnId.lastIndexOf(":") + 1));
+    return Number.isInteger(seq) ? seq : undefined;
+  }
+
+  function turnFromLiveness(
+    next: OpenCodeSessionLiveness | undefined,
+  ): "completed" | "failed" | "interrupted" | undefined {
+    if (next === undefined || next.active || next.outcome === undefined || next.idleAt === undefined) {
+      return undefined;
+    }
+    if (next.outcome === "succeeded") return "completed";
+    if (next.outcome === "failed") return "failed";
+    return "interrupted";
   }
 
   function resolveBb(
@@ -856,26 +905,36 @@ export function createOpenCodeDeltaTranslator() {
     const state = nativeState(sessionID);
     const snapshot = terminals.get(sessionID);
     const parentRef = parentRefFor(sessionID);
-    const turnStatus = snapshot?.turn;
+    const openSeq = executionSeqOf(state.executionTurnId);
+    const logMatches =
+      snapshot?.executionSeq !== undefined && snapshot.executionSeq === openSeq;
+    const logTurn = logMatches ? snapshot?.turn : undefined;
+    const sessionTurn = logTurn === undefined ? turnFromLiveness(liveness.get(sessionID)) : undefined;
+    const turnStatus = logTurn ?? sessionTurn;
     const deltas: ThreadDelta[] = [];
     for (const [id, tool] of [...state.tools]) {
       if (!tool.opened) continue;
-      const terminal = snapshot?.tools.get(id);
+      const terminal = logMatches ? snapshot?.tools.get(id) : undefined;
       if (terminal !== undefined) {
         deltas.push(
           closeSettledTool(state, id, tool, terminal.status, parentRef, terminal.error),
         );
         continue;
       }
-      if (turnStatus === "failed" || turnStatus === "interrupted") {
-        deltas.push(closeSettledTool(state, id, tool, turnStatus, parentRef));
-      }
+      if (turnStatus === undefined) continue;
+      const missing =
+        turnStatus === "interrupted" ? "interrupted" : "failed";
+      deltas.push(
+        closeSettledTool(state, id, tool, missing, parentRef, UNOBSERVED_TOOL_OUTCOME),
+      );
     }
     const toolsRemain = [...state.tools.values()].some((tool) => tool.opened);
     const ending =
       turnStatus !== undefined &&
       !toolsRemain &&
-      (turnStatus !== "completed" || snapshot?.complete === true);
+      (turnStatus !== "completed" ||
+        sessionTurn === "completed" ||
+        (logMatches && snapshot?.complete === true));
     if (ending) {
       for (const textId of state.textOpen) {
         deltas.push({
@@ -968,6 +1027,7 @@ export function createOpenCodeDeltaTranslator() {
         break;
       }
       case "session.execution.started": {
+        native.settledTools.clear();
         if (isChild) {
           const child = owner.children.get(eventSessionID);
           if (child !== undefined && !child.turnOpened) {
@@ -1044,10 +1104,9 @@ export function createOpenCodeDeltaTranslator() {
         if (id === undefined) {
           break;
         }
-        if (native.tools.get(id)?.opened) {
+        if (native.settledTools.has(id) || native.tools.get(id)?.opened) {
           break;
         }
-        native.settledTools.delete(id);
         const classified = rowFor(ctx.ownedSessionID, name, {}, ctx.cwd);
         native.tools.set(id, { name, input: {}, opened: true });
         deltas.push(...ensureTurnOpen(isChild ? owner : native, parentRef), {
@@ -1405,6 +1464,7 @@ export function createOpenCodeDeltaTranslator() {
     settleTurn,
     configureInjectedTools,
     noteNativeTerminals,
+    noteSessionLiveness,
   };
 }
 
