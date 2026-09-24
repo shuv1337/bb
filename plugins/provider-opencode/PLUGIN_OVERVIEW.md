@@ -1,4 +1,4 @@
-Start a thread, pick OpenCode, and talk to the OpenCode v2 service already running on the host. bb is a client of that shared service, not a second OpenCode process.
+Start a thread, pick OpenCode v2, and talk to the OpenCode v2 service already running on the host. bb is a client of that shared service, not a second OpenCode process.
 
 ## What you get
 

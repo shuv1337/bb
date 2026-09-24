@@ -49,7 +49,7 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     builtinName: "provider-opencode",
     pluginId: "provider-opencode",
     providerId: "opencode",
-    displayName: "OpenCode",
+    displayName: "OpenCode v2",
     supportsThreadArchive: false,
     supportsThreadRename: true,
     fork: "checkpoint",

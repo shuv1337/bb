@@ -9,7 +9,7 @@
     "bbPluginSdk": ">=0.5.9 <0.6.0"
   },
   "bb": {
-    "name": "OpenCode provider",
+    "name": "OpenCode v2 provider",
     "description": "Run bb threads with OpenCode v2.",
     "branding": {
       "icon": "./icons/opencode.svg"

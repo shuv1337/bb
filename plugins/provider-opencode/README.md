@@ -1,4 +1,4 @@
-# OpenCode provider
+# OpenCode v2 provider
 
 First-party plugin for [OpenCode](https://opencode.ai) v2. bb is an HTTP
 client of the host's shared OpenCode service via `@opencode/client@2.0.10`

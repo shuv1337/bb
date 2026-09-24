@@ -49,7 +49,7 @@ export function deriveOpenCodeProviderOptions(
 export function opencodeProviderDeclaration(): PluginProviderDeclaration {
   return {
     id: OPENCODE_PROVIDER_ID,
-    displayName: "OpenCode",
+    displayName: "OpenCode v2",
     icon: "./icons/opencode.svg",
     strings: {
       signInHint: OPENCODE_SIGN_IN_HINT,

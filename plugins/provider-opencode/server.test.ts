@@ -27,7 +27,7 @@ describe("the OpenCode plugin", () => {
   it("registers the native provider as always visible with workspace models", () => {
     const { declaration } = registeredDeclaration();
     expect(declaration.id).toBe("opencode");
-    expect(declaration.displayName).toBe("OpenCode");
+    expect(declaration.displayName).toBe("OpenCode v2");
     expect(declaration.experimental_visibility ?? "always").toBe("always");
     expect(declaration.strings?.installUrl).toBe(
       "https://www.npmjs.com/package/shuvcode",

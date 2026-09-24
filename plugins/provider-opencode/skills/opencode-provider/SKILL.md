@@ -1,9 +1,9 @@
 ---
 name: opencode-provider
-description: "Inspect BB OpenCode provider defaultAgent, defaultVariant, OPENCODE_SERVER_URL, OPENCODE_APP, OPENCODE_SERVER_PASSWORD, native skills and commands, and compaction."
+description: "Inspect BB OpenCode v2 provider defaultAgent, defaultVariant, OPENCODE_SERVER_URL, OPENCODE_APP, OPENCODE_SERVER_PASSWORD, native skills and commands, and compaction."
 ---
 
-# OpenCode provider
+# OpenCode v2 provider
 
 Provider id `opencode` is the native v2 client. `acp-opencode` is OpenCode
 (ACP) and stays for v1. Use the target host catalog for models.
