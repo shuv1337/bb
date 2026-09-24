@@ -202,9 +202,13 @@ export function prepareEngineRoot(model: MockModel, plugins: string[]): { root: 
   return { root, workspace };
 }
 
-export async function startEngine(root: string, workspace: string): Promise<Engine> {
+export async function startEngine(
+  root: string,
+  workspace: string,
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<Engine> {
   if (engineBinary === undefined) throw new Error("BB_OPENCODE_LIVE_ENGINE is not set");
-  const env = engineEnv(root);
+  const env = { ...engineEnv(root), ...extraEnv };
   const child = spawn(engineBinary, ["serve", "--stdio", "--port", "0"], { env, cwd: workspace });
   const stderr: string[] = [];
   child.stderr.on("data", (chunk: Buffer) => {
@@ -448,6 +452,8 @@ export interface StartThreadOptions {
 
 export interface LiveContextOptions {
   plugins?: (companionDir: string) => string[];
+  env?: NodeJS.ProcessEnv;
+  prepare?: (prepared: { root: string; workspace: string }) => void | Promise<void>;
 }
 
 export interface LiveContext {
@@ -479,7 +485,8 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
   beforeEach(async () => {
     model = await startMockModel();
     const prepared = prepareEngineRoot(model, resolvePlugins(companionDir));
-    engine = await startEngine(prepared.root, prepared.workspace);
+    await options.prepare?.(prepared);
+    engine = await startEngine(prepared.root, prepared.workspace, options.env);
     await waitForCompanion(engine);
     live = await startLiveBridge(engine);
   }, 90_000);
