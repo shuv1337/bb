@@ -52,7 +52,6 @@ export {
   extractConfigDefaultAgent,
   isSelectableAgent,
   resolveDefaultAgentId,
-  resolvePlanExitAgentId,
 } from "./agents.js";
 export { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
 export {

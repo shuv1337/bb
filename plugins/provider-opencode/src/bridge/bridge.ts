@@ -146,7 +146,7 @@ export interface OpenCodeBridgeDeps {
   warn?: (message: string) => void;
 }
 
-type OwnerRecord = { threadId: string; cwd: string };
+type OwnerRecord = { threadId: string; cwd: string; pendingDirectory?: string };
 
 interface PendingForm {
   fields: OpenCodeFormField[];
@@ -539,9 +539,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           typeof (record as OwnerRecord).threadId === "string" &&
           typeof (record as OwnerRecord).cwd === "string"
         ) {
+          const pending = (record as OwnerRecord).pendingDirectory;
           owners.set(sessionID, {
             threadId: (record as OwnerRecord).threadId,
             cwd: (record as OwnerRecord).cwd,
+            ...(typeof pending === "string" && pending.length > 0 ? { pendingDirectory: pending } : {}),
           });
         }
       }
@@ -550,25 +552,31 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
   }
 
-  function persistOwners(): void {
+  function enqueueOwnerWrite(): Promise<void> {
     const path = ownersPath;
-    if (path === null) {
-      return;
-    }
+    if (path === null) return Promise.resolve();
     const snapshot = JSON.stringify(Object.fromEntries(owners.entries()));
-    ownersWrite = ownersWrite.then(async () => {
-      const temporary = `${path}.${process.pid}.tmp`;
-      try {
-        await mkdir(dirname(path), { recursive: true });
-        await writeFile(temporary, snapshot, "utf8");
-        await rename(temporary, path);
-      } catch (error) {
-        warn(
-          `could not persist OpenCode session owners to ${path}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    const write = ownersWrite.then(async () => {
+      const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(temporary, snapshot, "utf8");
+      await rename(temporary, path);
+    });
+    ownersWrite = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
+  }
+
+  function persistOwners(): void {
+    void enqueueOwnerWrite().catch((error: unknown) => {
+      const path = ownersPath;
+      warn(
+        `could not persist OpenCode session owners to ${path}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     });
   }
 
@@ -1053,6 +1061,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     handle: SessionHandle,
     cwd: string,
     disallowedTools: readonly string[],
+    remember = true,
   ): ThreadSession {
     const session: ThreadSession = {
       threadId,
@@ -1079,7 +1088,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     session.tools = toolCalls.bind(toolHost(session));
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
-    rememberOwner(handle.id, threadId, cwd);
+    if (remember) rememberOwner(handle.id, threadId, cwd);
     return session;
   }
 
@@ -1128,12 +1137,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sendResult(id, { providerThreadId, sessionRestorable: true });
   }
 
+  function nativeDirectory(info: { location: { directory: string } }): string {
+    return info.location.directory;
+  }
+
   async function assertOwned(
     handle: SessionHandle,
     threadId: string,
     cwd: string,
   ): Promise<"ok" | "migrate"> {
     const info = await handle.info();
+    const native = nativeDirectory(info);
     const mapped = owners.get(handle.id);
     const metadataId = bbThreadIdFromMetadata(info.metadata);
     if (mapped !== undefined) {
@@ -1142,7 +1156,21 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           `OpenCode session ${handle.id} belongs to thread ${mapped.threadId}, not ${threadId}`,
         );
       }
+      if (mapped.pendingDirectory !== undefined) {
+        if (cwd !== mapped.pendingDirectory) {
+          throw new Error(
+            `OpenCode session ${handle.id} is moving to ${mapped.pendingDirectory}, not ${cwd}`,
+          );
+        }
+        if (native.length > 0 && native !== cwd) return "migrate";
+        return "ok";
+      }
       if (mapped.cwd !== cwd) return "migrate";
+      if (native.length > 0 && native !== cwd) {
+        throw new Error(
+          `OpenCode session ${handle.id} is bound to ${native}, not ${cwd}`,
+        );
+      }
       return "ok";
     }
     if (metadataId === undefined) {
@@ -1155,9 +1183,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         `OpenCode session ${handle.id} belongs to thread ${metadataId}, not ${threadId}`,
       );
     }
-    if (info.location.directory !== cwd && info.location.directory.length > 0) {
+    if (native.length > 0 && native !== cwd) {
       throw new Error(
-        `OpenCode session ${handle.id} is bound to ${info.location.directory}, not ${cwd}`,
+        `OpenCode session ${handle.id} is bound to ${native}, not ${cwd}`,
       );
     }
     return "ok";
@@ -1230,29 +1258,56 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     disallowedTools: readonly string[];
     instructions: "construct" | "frozen";
     dynamicTools: readonly DynamicTool[] | undefined;
+    previous?: ThreadSession;
+    skipRetire?: boolean;
+    durableOwner?: boolean;
+    toolAttachMode?: "construct" | "turn";
   }): Promise<void> {
-    const previous = await retireSession(args.threadId, args.handle.id);
+    const previous = args.skipRetire
+      ? args.previous
+      : await retireSession(args.threadId, args.handle.id);
     const oc = await runtime();
     const session = registerSession(
       args.threadId,
       args.handle,
       args.cwd,
       args.disallowedTools,
+      args.durableOwner !== true,
     );
     session.catalog = args.catalog;
     if (previous !== undefined) {
       sendReplaced(previous, args.handle, args.method);
     }
     startPump(session, oc);
-    await applyKnobs(session, args.knobs, args.instructions);
-    if (args.method === "thread/fork") {
-      const info = await args.handle.info();
-      await args.handle.update({
-        metadata: { ...(info.metadata ?? {}), bbThreadId: args.threadId },
-      });
+    try {
+      await applyKnobs(session, args.knobs, args.instructions);
+      if (args.method === "thread/fork") {
+        const info = await args.handle.info();
+        await args.handle.update({
+          metadata: { ...(info.metadata ?? {}), bbThreadId: args.threadId },
+        });
+      }
+      await session.tools.attach(args.dynamicTools, args.toolAttachMode ?? "construct");
+      if (args.durableOwner === true) {
+        const mapped = owners.get(args.handle.id);
+        owners.set(args.handle.id, { threadId: args.threadId, cwd: args.cwd });
+        try {
+          await enqueueOwnerWrite();
+        } catch (error) {
+          if (mapped !== undefined) owners.set(args.handle.id, mapped);
+          await detachSession(session);
+          throw new Error(
+            `OpenCode session ${args.handle.id} moved to ${args.cwd} but the new owner could not be saved: ${failureMessage(error)}. Resume this thread in ${args.cwd} to finish the move.`,
+          );
+        }
+      }
+      announce(args.id, args.threadId, args.handle.id);
+    } catch (error) {
+      if (sessions.get(args.threadId) === session && !session.closed) {
+        await detachSession(session);
+      }
+      throw error;
     }
-    await session.tools.attach(args.dynamicTools);
-    announce(args.id, args.threadId, args.handle.id);
   }
 
   function hasInterruptibleWork(
@@ -1425,14 +1480,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           );
           break;
         }
+        let ownership: "ok" | "migrate";
         try {
-          const ownership = await assertOwned(handle, request.params.threadId, request.params.cwd);
-          if (ownership === "migrate") {
-            const info = await handle.info();
-            if (info.location.directory !== request.params.cwd) {
-              handle = await handle.move(request.params.cwd);
-            }
-          }
+          ownership = await assertOwned(handle, request.params.threadId, request.params.cwd);
         } catch (error) {
           if (error instanceof OpenCodeUnauthenticatedError) throw error;
           sendError(
@@ -1442,7 +1492,45 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           );
           break;
         }
-        await constructSession({
+        const completingMigration =
+          ownership === "migrate" || owners.get(handle.id)?.pendingDirectory === request.params.cwd;
+        let previous: ThreadSession | undefined;
+        if (completingMigration) {
+          previous = await retireSession(request.params.threadId, handle.id);
+        }
+        if (ownership === "migrate") {
+          const before = await handle.info();
+          try {
+            if (before.location.directory !== request.params.cwd) {
+              handle = await handle.move(request.params.cwd);
+            }
+          } catch (error) {
+            if (error instanceof OpenCodeUnauthenticatedError) throw error;
+            sendError(
+              request.id,
+              BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+              `OpenCode session ${handle.id} could not be moved to ${request.params.cwd}: ${failureMessage(error)}. Resume this thread in ${request.params.cwd} to finish the move.`,
+            );
+            break;
+          }
+          const mapped = owners.get(handle.id);
+          owners.set(handle.id, {
+            threadId: request.params.threadId,
+            cwd: mapped?.cwd ?? before.location.directory,
+            pendingDirectory: request.params.cwd,
+          });
+          try {
+            await enqueueOwnerWrite();
+          } catch (error) {
+            sendError(
+              request.id,
+              BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+              `OpenCode session ${handle.id} moved to ${request.params.cwd} but the new owner could not be saved: ${failureMessage(error)}. Resume this thread in ${request.params.cwd} to finish the move.`,
+            );
+            break;
+          }
+        }
+        const construction = {
           id: request.id,
           method: request.method,
           threadId: request.params.threadId,
@@ -1451,9 +1539,32 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           catalog,
           knobs,
           disallowedTools: request.params.disallowedTools ?? [],
-          instructions: "construct",
+          instructions: "construct" as const,
           dynamicTools: request.params.dynamicTools,
-        });
+          previous,
+          skipRetire: completingMigration,
+          durableOwner: completingMigration,
+          toolAttachMode: completingMigration ? ("turn" as const) : ("construct" as const),
+        };
+        if (!completingMigration) {
+          await constructSession(construction);
+          break;
+        }
+        try {
+          await constructSession(construction);
+        } catch (error) {
+          if (error instanceof OpenCodeUnauthenticatedError) throw error;
+          const live = sessions.get(request.params.threadId);
+          if (live !== undefined && !live.closed) await detachSession(live);
+          const message = failureMessage(error);
+          sendError(
+            request.id,
+            BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+            message.includes("Resume this thread")
+              ? message
+              : `OpenCode session ${handle.id} moved to ${request.params.cwd} but could not be restored: ${message}. Resume this thread in ${request.params.cwd} to finish the move.`,
+          );
+        }
         break;
       }
       case "thread/fork": {

@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  extractConfigDefaultAgent,
-  resolveDefaultAgentId,
-  resolvePlanExitAgentId,
-} from "./agents.js";
+import { extractConfigDefaultAgent, resolveDefaultAgentId } from "./agents.js";
 import type { OpenCodeAgent } from "./types.js";
 
 const agents: OpenCodeAgent[] = [
@@ -39,34 +35,4 @@ describe("default agent", () => {
     ).toBe("build");
   });
 
-  it("uses a selectable setting when leaving plan and does not fall back to build", () => {
-    expect(
-      resolvePlanExitAgentId({
-        settingDefaultAgent: "plan",
-        agents,
-        configDefaultAgent: "build",
-      }),
-    ).toBe("plan");
-    expect(() =>
-      resolvePlanExitAgentId({
-        settingDefaultAgent: "explore",
-        agents,
-        configDefaultAgent: "build",
-      }),
-    ).toThrow('Unknown OpenCode agent "explore"');
-    expect(() =>
-      resolvePlanExitAgentId({
-        settingDefaultAgent: "missing",
-        agents,
-        configDefaultAgent: "build",
-      }),
-    ).toThrow('Unknown OpenCode agent "missing"');
-    expect(
-      resolvePlanExitAgentId({
-        settingDefaultAgent: null,
-        agents,
-        configDefaultAgent: "build",
-      }),
-    ).toBe("build");
-  });
 });

@@ -124,7 +124,7 @@ type BbToolsHold =
   | { kind: "failed"; error: unknown };
 
 export interface BbToolSession {
-  attach(tools: readonly DynamicTool[] | undefined): Promise<void>;
+  attach(tools: readonly DynamicTool[] | undefined, mode?: "construct" | "turn"): Promise<void>;
   ensure(): Promise<void>;
   pushDisallowed(): Promise<void>;
   onControl(data: Record<string, unknown> | undefined): void;
@@ -799,7 +799,11 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       return;
     }
     if (binding.cancelled.has(call.key) || state.host.closed || state.stale) {
-      await deliverCompanionResult(state, binding, call.key, failureResult(BB_TOOL_OUTCOME_UNKNOWN), 
+      await deliverCompanionResult(
+        state,
+        binding,
+        call.key,
+        failureResult(BB_TOOL_OUTCOME_UNKNOWN),
         state.host.closed || !bindingStillCurrent(state, binding),
       );
       return;
@@ -1008,9 +1012,9 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       });
     }
     const session: BbToolSession = {
-      attach(tools) {
+      attach(tools, mode = "construct") {
         state.descriptors = tools;
-        return withLock(state, () => syncWithWarning(state, "construct", (list, reason) => warnOnce(list, reason)));
+        return withLock(state, () => syncWithWarning(state, mode, (list, reason) => warnOnce(list, reason)));
       },
       ensure() {
         return host.enqueue(() =>
