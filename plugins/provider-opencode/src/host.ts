@@ -1,9 +1,10 @@
 import { homedir } from "node:os";
 import {
   experimental_defineHostEntry,
-  experimental_nativeRootsHostContract,
   type ExperimentalNativeRootsResolveAnswer,
 } from "@get-bb/plugin-sdk/host";
+import { readCompanionStatus } from "./companion-status.js";
+import { openCodeHostContract } from "./companion-status-contract.js";
 import { createOpenCodeRuntime } from "./runtime/index.js";
 import {
   createOpenCodeCommandCatalogStore,
@@ -99,8 +100,9 @@ export async function resolveOpenCodeHostNativeRoots(args: {
 export function createOpenCodeHostEntry() {
   let commandCatalogStore: OpenCodeCommandCatalogStore | null = null;
   return experimental_defineHostEntry({
-    contract: experimental_nativeRootsHostContract,
+    contract: openCodeHostContract,
     handlers: {
+      readCompanionStatus: () => readCompanionStatus(),
       resolveNativeRoots: async (input, context) => {
         const homeDir = homedir();
         const env = process.env;
