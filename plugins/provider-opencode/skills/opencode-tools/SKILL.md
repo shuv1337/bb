@@ -20,8 +20,7 @@ opencode plugin update opencode-bb-tools
 opencode plugin remove opencode-bb-tools
 ```
 
-Before npm publication, pin a tag:
-`github:shuv1337/opencode-bb-tools#vX.Y.Z`. Replace `opencode` with `shuvcode`
+Pin a version with `opencode-bb-tools@X.Y.Z`. Replace `opencode` with `shuvcode`
 on a Shuvcode host.
 
 Supported companion protocol is `bb.tools.v1` versions 1 through 1. A companion

@@ -34,14 +34,13 @@ Install on the engine host, as the user that runs the engine service. Use the
 CLI that matches the engine's app id. A stock `opencode` CLI writes stock
 config, not Shuvcode's.
 
-Once published:
-
 ```sh
 opencode plugin add opencode-bb-tools@0.1.0
 shuvcode plugin add opencode-bb-tools@0.1.0
 ```
 
-Until that package is on npm, pin the Git tag:
+The Git tag also works. The repository is private, so the engine host's service
+user needs GitHub access:
 
 ```sh
 opencode plugin add github:shuv1337/opencode-bb-tools#v0.1.0
