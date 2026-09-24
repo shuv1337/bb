@@ -426,7 +426,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
 });
 
 describe.skipIf(engineBinary === undefined)("OpenCode companion owner fence", () => {
-  const fenced = createLiveContext({ env: { BB_TOOLS_OWNER_LEASE_MS: "1500" } });
+  const fenced = createLiveContext({ testing: { ownerLeaseMs: 1500 } });
 
   it("rejects a foreign bridge that has no persisted capability while the owner is live", async () => {
     const { model, engine, live, startThread, startTurn } = fenced;

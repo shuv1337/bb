@@ -1162,7 +1162,6 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       try {
         const output = await client.attach({
           sessionID: state.host.handle.id,
-          bbThreadId: state.host.threadId,
           disallowedTools: state.host.disallowedTools,
           tools: catalogOf(catalog),
           ...(takeover === undefined ? {} : { takeover: { capability: takeover } }),

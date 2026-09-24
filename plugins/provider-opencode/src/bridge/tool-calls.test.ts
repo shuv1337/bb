@@ -171,7 +171,7 @@ describe("bb tool call lifecycle", () => {
         typeof item === "object" && item !== null && (item as { method?: string }).method === "attach",
     );
     expect(attach?.input.takeover).toEqual({ capability: "cap-old" });
-    expect(attach?.input.bbThreadId).toBe("thr");
+    expect(attach?.input.bbThreadId).toBeUndefined();
   });
 
   it("fails owner_active when the retry would exceed the lease", async () => {

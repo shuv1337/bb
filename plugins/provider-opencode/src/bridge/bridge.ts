@@ -139,11 +139,28 @@ type DecodedRequest =
   | { kind: "invalid-params"; id: string | number; method: string; issues: string }
   | { kind: "ignored" };
 
+export interface OpenCodeBridgeTesting {
+  injectResync(threadId: string): Promise<void>;
+  setIgnoreBbToolControl(enabled: boolean): void;
+  setIgnoredNativeEvents(types: readonly string[]): void;
+  forgetOriginMap(threadId: string): void;
+  injectTurnDeltas(threadId: string, deltas: ThreadDelta[]): Promise<void>;
+  bbToolCapability(threadId: string): string | undefined;
+}
+
 export interface OpenCodeBridgeDeps {
   createRuntime?: () => Promise<OpenCodeRuntime>;
   interruptSettlementTimeoutMs?: number;
   resubscribeBackoffMs?: { initial: number; max: number };
   warn?: (message: string) => void;
+  experimental_testing?: boolean;
+}
+
+interface OpenCodeBridge {
+  handleLine: (line: string) => void;
+  experimental_providerBridge: ReturnType<typeof experimental_defineProviderBridge>;
+  closeAll(): Promise<void>;
+  readonly closed: boolean;
 }
 
 type OwnerRecord = {
@@ -248,7 +265,13 @@ function bbThreadIdFromMetadata(metadata: Record<string, unknown> | undefined): 
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
+export function createOpenCodeBridge(deps: OpenCodeBridgeDeps & { experimental_testing: true }): OpenCodeBridge & {
+  experimental_testing: OpenCodeBridgeTesting;
+};
+export function createOpenCodeBridge(deps?: OpenCodeBridgeDeps): OpenCodeBridge;
+export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}): OpenCodeBridge & {
+  experimental_testing?: OpenCodeBridgeTesting;
+} {
   const bridgeIo = createBridgeIo();
   const knownCapabilities = new Set<string>();
   function scrub<T>(value: T): T {
@@ -2166,18 +2189,24 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     return sessions.get(threadId)?.tools.capability();
   }
 
-  return {
+  const bridge: OpenCodeBridge = {
     handleLine,
     experimental_providerBridge,
     closeAll,
-    injectResync,
-    bbToolCapability,
-    setIgnoreBbToolControl,
-    setIgnoredNativeEvents,
-    forgetOriginMap,
-    injectTurnDeltas,
     get closed() {
       return closed;
+    },
+  };
+  if (deps.experimental_testing !== true) return bridge;
+  return {
+    ...bridge,
+    experimental_testing: {
+      injectResync,
+      setIgnoreBbToolControl,
+      setIgnoredNativeEvents,
+      forgetOriginMap,
+      injectTurnDeltas,
+      bbToolCapability,
     },
   };
 }

@@ -4,7 +4,6 @@
   "produces": "handler-error",
   "input": {
     "sessionID": "ses_1",
-    "bbThreadId": "thread_1",
     "tools": [
       {
         "name": "bb_echo",

@@ -78,6 +78,7 @@ export async function startOpenCodeBridgeHarness(
     warn: (message) => {
       warnings.push(message);
     },
+    experimental_testing: true,
   });
   if (options.dataDir !== undefined) {
     bridge.experimental_providerBridge.start?.({
@@ -131,8 +132,9 @@ export async function startOpenCodeBridgeHarness(
       });
     },
     deltasOf,
-    injectTurnDeltas: (threadId, deltas) => bridge.injectTurnDeltas(threadId, deltas as never),
-    injectResync: (threadId) => bridge.injectResync(threadId),
+    injectTurnDeltas: (threadId, deltas) =>
+      bridge.experimental_testing.injectTurnDeltas(threadId, deltas as never),
+    injectResync: (threadId) => bridge.experimental_testing.injectResync(threadId),
     async waitFor(predicate, what) {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {

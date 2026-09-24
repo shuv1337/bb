@@ -573,7 +573,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
 
 describe.skipIf(engineBinary === undefined)("OpenCode incompatible companion", () => {
   const incompatible = createLiveContext({
-    env: { BB_TOOLS_PROTOCOL_VERSION: "99" },
+    testing: { protocolVersion: 99 },
   });
 
   it("fails the turn with a setup error instead of running native-only", async () => {

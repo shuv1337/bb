@@ -21,7 +21,7 @@
     },
     "package": {
       "name": "opencode-bb-tools",
-      "version": "0.1.0-dev"
+      "version": "0.1.0"
     },
     "install": {
       "path": "/opt/opencode-bb-tools",

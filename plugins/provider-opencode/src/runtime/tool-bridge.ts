@@ -269,7 +269,6 @@ export type BbToolsCallOptions = {
 
 export type BbToolsAttachInput = {
   sessionID: string;
-  bbThreadId?: string;
   disallowedTools: readonly string[];
   tools: readonly { name: string; description: string; inputSchema: unknown }[];
   takeover?: { capability: string };
@@ -378,7 +377,6 @@ export function createBbToolsClient(rpc: BbToolsRpc): BbToolsClient {
     async attach(input, options) {
       const wire = {
         sessionID: input.sessionID,
-        ...(input.bbThreadId === undefined ? {} : { bbThreadId: input.bbThreadId }),
         disallowedTools: [...input.disallowedTools],
         tools: input.tools.map((tool) => ({
           name: tool.name,

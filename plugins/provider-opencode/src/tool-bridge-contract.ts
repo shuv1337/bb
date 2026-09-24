@@ -53,7 +53,6 @@ export const helloInputSchema = z
         name: z.string().min(1),
         version: z.string().min(1),
       })
-      
       .optional(),
     protocol: bbToolsProtocolRangeSchema.optional(),
   });
@@ -122,7 +121,6 @@ const catalogToolSchema = z
 export const attachInputSchema = z
   .object({
     sessionID: z.string().min(1),
-    bbThreadId: z.string().min(1).optional(),
     tools: z.array(catalogToolSchema).min(1).max(BB_TOOLS_MAX_TOOLS),
     disallowedTools: z.array(z.string()).optional(),
     takeover: z.object({ capability: z.string().min(1) }).optional(),

@@ -90,7 +90,6 @@ describe("bb tools RPC client", () => {
     await expect(
       client.attach({
         sessionID: "ses",
-        bbThreadId: "thread_1",
         disallowedTools: [],
         tools: [{ name: "bb_echo", description: "Echo.", inputSchema: { type: "object" } }],
         takeover: { capability: "cap_old" },

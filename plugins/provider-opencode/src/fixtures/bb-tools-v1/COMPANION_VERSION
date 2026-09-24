@@ -1,4 +1,4 @@
 package=opencode-bb-tools
-version=0.1.0-dev
-commit=fb0a952b66c5c94125a28ed599d26a97786afed3
-short=fb0a952
+version=0.1.0
+commit=d9770b5e201c0dcc2f570a6614702e204b38a328
+short=d9770b5

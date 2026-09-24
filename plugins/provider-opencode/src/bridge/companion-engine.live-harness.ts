@@ -185,9 +185,16 @@ function engineEnv(root: string): NodeJS.ProcessEnv {
   };
 }
 
+export interface CompanionTesting {
+  protocolVersion?: number;
+  ownerLeaseMs?: number;
+}
+
+export type EnginePluginConfig = string | { package: string; options: { testing: CompanionTesting } };
+
 export function prepareEngineRoot(
   model: MockModel,
-  plugins: string[],
+  plugins: readonly EnginePluginConfig[],
   modelInput: string[] = ["text"],
   root = mkdtempSync(join(tmpdir(), "bb-oc-live-")),
 ): { root: string; workspace: string } {
@@ -405,6 +412,7 @@ export async function startLiveBridge(
     warn: (message) => {
       warnings.push(message);
     },
+    experimental_testing: true,
   });
   const dataDir = options?.dataDir ?? join(engine.root, "bridge-data");
   mkdirSync(dataDir, { recursive: true });
@@ -423,16 +431,16 @@ export async function startLiveBridge(
     toolCalls,
     answered: new Set(),
     handleLine: bridge.handleLine,
-    injectResync: (threadId) => bridge.injectResync(threadId),
-    capability: (threadId) => bridge.bbToolCapability(threadId),
+    injectResync: (threadId) => bridge.experimental_testing.injectResync(threadId),
+    capability: (threadId) => bridge.experimental_testing.bbToolCapability(threadId),
     setIgnoreBbToolControl: (enabled) => {
-      bridge.setIgnoreBbToolControl(enabled);
+      bridge.experimental_testing.setIgnoreBbToolControl(enabled);
     },
     setIgnoredNativeEvents: (types) => {
-      bridge.setIgnoredNativeEvents(types);
+      bridge.experimental_testing.setIgnoredNativeEvents(types);
     },
     forgetOriginMap: (threadId) => {
-      bridge.forgetOriginMap(threadId);
+      bridge.experimental_testing.forgetOriginMap(threadId);
     },
     teardown: async () => {
       await bridge.closeAll();
@@ -550,6 +558,7 @@ export interface StartThreadOptions {
 export interface LiveContextOptions {
   plugins?: (input: { companionDir: string; root: string }) => string[];
   env?: NodeJS.ProcessEnv;
+  testing?: CompanionTesting;
   prepare?: (prepared: { root: string; workspace: string }) => void | Promise<void>;
   modelInput?: string[];
   requireCompanion?: boolean;
@@ -636,7 +645,14 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
     const root = mkdtempSync(join(tmpdir(), "bb-oc-live-"));
     const companionCopy = copyPluginTree(companionDir, join(root, "plugins", "companion"));
     const plugins = isolatePlugins(root, companionCopy, resolvePlugins({ companionDir: companionCopy, root }));
-    const prepared = prepareEngineRoot(model, plugins, modelInput, root);
+    const testing = options.testing;
+    const entries: EnginePluginConfig[] =
+      testing === undefined
+        ? plugins
+        : plugins.map((plugin) =>
+            plugin === companionCopy ? { package: plugin, options: { testing } } : plugin,
+          );
+    const prepared = prepareEngineRoot(model, entries, modelInput, root);
     await options.prepare?.(prepared);
     engine = await startEngine(prepared.root, prepared.workspace, options.env, {
       companionDir: companionCopy,
