@@ -49,6 +49,29 @@ function wrapAttach(
   };
 }
 
+function wrapMoveOrder(
+  runtime: OpenCodeRuntime,
+  notes: string[],
+  boundarySeen: () => boolean,
+): OpenCodeRuntime {
+  const wrap = (handle: SessionHandle): SessionHandle => ({
+    ...handle,
+    interrupt: async () => {
+      notes.push("interrupt");
+      await handle.interrupt();
+    },
+    move: async (directory) => {
+      notes.push(boundarySeen() ? "move-settled" : "move-unsettled");
+      return wrap(await handle.move(directory));
+    },
+  });
+  return {
+    ...runtime,
+    createSession: async (input) => wrap(await runtime.createSession(input)),
+    openSession: async (id) => wrap(await runtime.openSession(id)),
+  };
+}
+
 async function waitForOwnersFile(path: string): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
@@ -286,6 +309,108 @@ describe("environment directory migration", () => {
       expect(finished.result).toMatchObject({ providerThreadId: id, sessionRestorable: true });
     } finally {
       await chmod(dataDir, 0o755).catch(() => undefined);
+      await harness.teardown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("interrupts an active turn and moves only after that turn settles", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-oc-env-"));
+    const dirA = join(root, "a");
+    const dirB = join(root, "b");
+    const notes: string[] = [];
+    let harness: Awaited<ReturnType<typeof startOpenCodeBridgeHarness>> | undefined;
+    harness = await startOpenCodeBridgeHarness({
+      dataDir: join(root, "data"),
+      scriptTurns: true,
+      wrapRuntime: (fake) =>
+        wrapMoveOrder(fake, notes, () => {
+          if (harness === undefined) return false;
+          return harness.deltasOf("thr_active").some((delta) => delta.kind === "turn.boundary");
+        }),
+    });
+    try {
+      const started = await harness.request(70, "thread/start", {
+        threadId: "thr_active",
+        cwd: dirA,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      const id = providerThreadId(started);
+      const turn = await harness.request(71, "turn/start", {
+        threadId: "thr_active",
+        providerThreadId: id,
+        clientRequestId: "creq_23456789ad",
+        input: [{ type: "text", text: "/hold", mentions: [] }],
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(turn.error).toBeUndefined();
+      await harness.waitFor(
+        () => harness.deltasOf("thr_active").some((delta) => delta.kind === "turn.open"),
+        "active turn",
+      );
+      const resumed = await harness.request(72, "thread/resume", {
+        threadId: "thr_active",
+        cwd: dirB,
+        providerThreadId: id,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(resumed.error).toBeUndefined();
+      expect(notes).toEqual(["interrupt", "move-settled"]);
+      expect(harness.fake.calls.interruptedSessions).toEqual([id]);
+      expect(harness.fake.calls.moves).toEqual([{ sessionID: id, directory: dirB }]);
+    } finally {
+      await harness?.teardown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not move when an active turn does not settle before the interrupt bound", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-oc-env-"));
+    const dirA = join(root, "a");
+    const dirB = join(root, "b");
+    const harness = await startOpenCodeBridgeHarness({
+      dataDir: join(root, "data"),
+      scriptTurns: true,
+      runtime: { holdInterrupts: true },
+      bridge: { interruptSettlementTimeoutMs: 40 },
+    });
+    try {
+      const started = await harness.request(80, "thread/start", {
+        threadId: "thr_stuck",
+        cwd: dirA,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      const id = providerThreadId(started);
+      const turn = await harness.request(81, "turn/start", {
+        threadId: "thr_stuck",
+        providerThreadId: id,
+        clientRequestId: "creq_23456789ae",
+        input: [{ type: "text", text: "/hold", mentions: [] }],
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(turn.error).toBeUndefined();
+      await harness.waitFor(
+        () => harness.deltasOf("thr_stuck").some((delta) => delta.kind === "turn.open"),
+        "stuck turn",
+      );
+      const resumed = await harness.request(82, "thread/resume", {
+        threadId: "thr_stuck",
+        cwd: dirB,
+        providerThreadId: id,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(resumed.error?.code).toBe(BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE);
+      expect(resumed.error?.message).toContain("active turn");
+      expect(resumed.result).toBeUndefined();
+      expect(harness.fake.calls.interrupts).toBe(1);
+      expect(harness.fake.calls.moves).toEqual([]);
+      const info = await (await harness.fake.openSession(id)).info();
+      expect(info.location.directory).toBe(dirA);
+    } finally {
       await harness.teardown();
       rmSync(root, { recursive: true, force: true });
     }

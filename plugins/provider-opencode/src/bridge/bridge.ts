@@ -1019,6 +1019,20 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     };
   }
 
+  async function confirmIdleBeforeMove(session: ThreadSession): Promise<boolean> {
+    if (isSettled(session)) return true;
+    await session.tools.abandon();
+    try {
+      await session.handle.interrupt();
+    } catch (error) {
+      warn(
+        `could not interrupt OpenCode session ${session.handle.id} before move: ${failureMessage(error)}`,
+      );
+      return false;
+    }
+    return waitForSettlement(session);
+  }
+
   async function retireSession(
     threadId: string,
     nextHandleId: string,
@@ -1494,6 +1508,23 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         }
         const completingMigration =
           ownership === "migrate" || owners.get(handle.id)?.pendingDirectory === request.params.cwd;
+        const live = sessions.get(request.params.threadId);
+        if (
+          completingMigration &&
+          live !== undefined &&
+          live.handle.id === handle.id &&
+          !isSettled(live)
+        ) {
+          const settled = await confirmIdleBeforeMove(live);
+          if (!settled) {
+            sendError(
+              request.id,
+              BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+              `OpenCode session ${handle.id} still has an active turn and could not be interrupted before moving to ${request.params.cwd}. Resume this thread in ${request.params.cwd} to finish the move.`,
+            );
+            break;
+          }
+        }
         let previous: ThreadSession | undefined;
         if (completingMigration) {
           previous = await retireSession(request.params.threadId, handle.id);
