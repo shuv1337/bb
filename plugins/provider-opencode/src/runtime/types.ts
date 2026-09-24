@@ -183,6 +183,11 @@ export type OpenCodeNativeEvent = {
   };
 };
 
+export type DurableLogRead = {
+  events: readonly OpenCodeNativeEvent[];
+  complete: boolean;
+};
+
 export type RuntimeNativeEvent = {
   kind: "native";
   sessionID: string;
@@ -242,7 +247,7 @@ export interface SessionHandle {
   }): Promise<void>;
   fork(checkpointMessageId?: string): Promise<SessionHandle>;
   context(): Promise<readonly OpenCodeSessionMessage[]>;
-  durableLog(): Promise<readonly OpenCodeNativeEvent[]>;
+  durableLog(): Promise<DurableLogRead>;
   replyPermission(
     requestID: string,
     reply: "once" | "always" | "reject",

@@ -5,6 +5,7 @@ export type {
   OpenCodeAgentCatalog,
   OpenCodeCommand,
   OpenCodeCommandInput,
+  DurableLogRead,
   OpenCodeDiscoveryHealth,
   OpenCodeHealthStatus,
   OpenCodeInstructionMode,

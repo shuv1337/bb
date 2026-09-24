@@ -26,6 +26,7 @@ import { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
 import { BB_INSTRUCTION_ENTRY_KEY } from "./types.js";
 import type {
   CreateOpenCodeRuntimeOptions,
+  DurableLogRead,
   CreateSessionInput,
   OpenCodeAgent,
   OpenCodeAgentCatalog,
@@ -45,10 +46,21 @@ import type {
   SessionHandle,
 } from "./types.js";
 
-const DURABLE_LOG_PAGE = 4096;
+export const DURABLE_LOG_PAGE = 4096;
+export const DURABLE_LOG_MAX_PAGES = 8;
+export const DURABLE_LOG_MAX_EVENTS = DURABLE_LOG_PAGE * 4;
 
-function parseDurableLogText(raw: string): { events: OpenCodeNativeEvent[]; syncedSeq: number | undefined; truncated: boolean } {
+export type DurableLogPage = {
+  events: OpenCodeNativeEvent[];
+  synced: boolean;
+  syncedSeq: number | undefined;
+  truncated: boolean;
+  lastSeq: number | undefined;
+};
+
+export function parseDurableLogPage(raw: string): DurableLogPage {
   const events: OpenCodeNativeEvent[] = [];
+  let synced = false;
   let syncedSeq: number | undefined;
   let truncated = false;
   for (const block of raw.split(/\r?\n\r?\n/)) {
@@ -60,6 +72,7 @@ function parseDurableLogText(raw: string): { events: OpenCodeNativeEvent[]; sync
     if (data.length === 0) continue;
     const parsed = JSON.parse(data) as OpenCodeNativeEvent & { seq?: number };
     if (parsed.type === "log.synced") {
+      synced = true;
       syncedSeq = typeof parsed.seq === "number" ? parsed.seq : undefined;
       break;
     }
@@ -69,7 +82,46 @@ function parseDurableLogText(raw: string): { events: OpenCodeNativeEvent[]; sync
       break;
     }
   }
-  return { events, syncedSeq, truncated };
+  const tail = events.at(-1)?.durable?.seq;
+  return {
+    events,
+    synced,
+    syncedSeq,
+    truncated,
+    lastSeq: typeof tail === "number" ? tail : undefined,
+  };
+}
+
+export async function collectDurableLog(
+  readPage: (after: number) => Promise<DurableLogPage>,
+): Promise<DurableLogRead> {
+  const events: OpenCodeNativeEvent[] = [];
+  let after = 0;
+  let pages = 0;
+  let jumpedToTail = false;
+  while (pages < DURABLE_LOG_MAX_PAGES && events.length < DURABLE_LOG_MAX_EVENTS) {
+    pages += 1;
+    const page = await readPage(after);
+    if (
+      !jumpedToTail &&
+      after === 0 &&
+      page.synced &&
+      page.events.length === 0 &&
+      page.syncedSeq !== undefined &&
+      page.syncedSeq > DURABLE_LOG_PAGE
+    ) {
+      jumpedToTail = true;
+      after = page.syncedSeq - DURABLE_LOG_PAGE;
+      pages -= 1;
+      continue;
+    }
+    events.push(...page.events);
+    if (page.synced) return { events, complete: true };
+    if (!page.truncated) return { events, complete: true };
+    if (page.lastSeq === undefined || page.lastSeq <= after) return { events, complete: false };
+    after = page.lastSeq;
+  }
+  return { events, complete: false };
 }
 
 type Client = ReturnType<typeof OpenCode.make>;
@@ -475,7 +527,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     );
   }
 
-  private async readDurableLogPage(sessionID: string, after: number): Promise<{ events: OpenCodeNativeEvent[]; syncedSeq: number | undefined; truncated: boolean }> {
+  private async readDurableLogPage(sessionID: string, after: number): Promise<DurableLogPage> {
     const registration = this.registration;
     if (registration === null) {
       throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
@@ -490,18 +542,11 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     if (!response.ok) {
       throw new Error(`OpenCode session log failed: ${response.status} ${await response.text()}`);
     }
-    return parseDurableLogText(await response.text());
+    return parseDurableLogPage(await response.text());
   }
 
-  private async readDurableLog(sessionID: string): Promise<OpenCodeNativeEvent[]> {
-    const head = await this.readDurableLogPage(sessionID, 0);
-    const tailAfter =
-      head.syncedSeq !== undefined && (head.truncated || head.events.length === 0)
-        ? Math.max(0, head.syncedSeq - DURABLE_LOG_PAGE)
-        : 0;
-    if (tailAfter === 0) return head.events;
-    const tail = await this.readDurableLogPage(sessionID, tailAfter);
-    return tail.events.length > 0 ? tail.events : head.events;
+  private readDurableLog(sessionID: string): Promise<DurableLogRead> {
+    return collectDurableLog((after) => this.readDurableLogPage(sessionID, after));
   }
 
   private async patchSession(

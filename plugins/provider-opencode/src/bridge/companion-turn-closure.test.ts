@@ -25,6 +25,7 @@ interface CompanionHooks {
   onConfigure?: (capability: string) => void;
   epoch?: number;
   durableLog?: () => Promise<readonly OpenCodeNativeEvent[]>;
+  durableLogComplete?: boolean;
   resultPayloads?: Array<Record<string, unknown>>;
 }
 
@@ -32,7 +33,12 @@ function wrapCompanion(runtime: FakeOpenCodeRuntime, hooks: CompanionHooks): Ope
   let boundEpoch = hooks.epoch ?? 1;
   const wrap = (handle: SessionHandle): SessionHandle => ({
     ...handle,
-    durableLog: async () => hooks.durableLog?.() ?? handle.durableLog(),
+    durableLog: async () => {
+      if (hooks.durableLog !== undefined) {
+        return { events: await hooks.durableLog(), complete: hooks.durableLogComplete !== false };
+      }
+      return handle.durableLog();
+    },
     rpc: async (_rpcID, method, payload) => {
       const input = isRecord(payload) ? payload : {};
       const generation = hooks.generation?.() ?? "gen-1";
@@ -105,11 +111,11 @@ function openTurnId(harness: OpenCodeBridgeHarness): string {
   return open.providerTurnId;
 }
 
-function pendingCall(sessionID: string, messageID: string) {
+function pendingCall(sessionID: string, messageID: string, key = "k1") {
   return {
     calls: [
       {
-        key: "k1",
+        key,
         sessionID,
         messageID,
         callID: "call_1",
@@ -407,8 +413,8 @@ it("rejects a call whose origin is not in the durable log instead of borrowing t
       type: "rpc.bb.tools.v1.control",
       data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
     });
-    await opened.harness.waitFor(() => rejects.length > 0, "unlinked origin rejected");
-    expect(rejects).toEqual([ORIGIN_UNKNOWN]);
+    await opened.harness.waitFor(() => rejects.includes(ORIGIN_UNKNOWN), "unlinked origin rejected");
+    expect(rejects).toContain(ORIGIN_UNKNOWN);
     expect(opened.harness.rpc.messages.some((message) => message.method === "item/tool/call")).toBe(false);
   } finally {
     await opened.harness.teardown();
@@ -616,6 +622,136 @@ it("drops a stale boundary for turn N once turn N+1 is live and closes each open
       ),
     ).toBe(true);
     expect(opened.harness.warnings.some((message) => message.includes(String(later?.providerTurnId)))).toBe(true);
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 15_000);
+
+it("does not cancel an in-flight later turn when a late boundary for the previous turn arrives", async () => {
+  const payloads: Array<Record<string, unknown>> = [];
+  let offer = false;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    resultPayloads: payloads,
+    pending: () =>
+      offer ? pendingCall(opened.providerThreadId, "msg_n1", "k-next") : { calls: [], settled: [] },
+  });
+  try {
+    const first = await openExecution(opened.harness, opened.providerThreadId, "msg_n");
+    await opened.harness.fake.play({
+      type: "session.execution.succeeded",
+      data: { sessionID: opened.providerThreadId },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.deltasOf("thr_turn").some((delta) => delta.kind === "turn.boundary"),
+      "turn N boundary",
+    );
+    await opened.harness.fake.play({
+      type: "session.execution.started",
+      data: { sessionID: opened.providerThreadId },
+      durable: { seq: 9 },
+    });
+    await opened.harness.fake.play({
+      type: "session.step.started",
+      data: { sessionID: opened.providerThreadId, assistantMessageID: "msg_n1" },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.deltasOf("thr_turn").filter((delta) => delta.kind === "turn.open").length >= 2,
+      "turn N+1 open",
+    );
+    offer = true;
+    await opened.harness.fake.play({
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k-next" },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.rpc.messages.some((message) => message.method === "item/tool/call"),
+      "N+1 reverse item/tool/call",
+    );
+    const reverse = opened.harness.rpc.messages.find((message) => message.method === "item/tool/call");
+    const cancelledBefore = opened.harness.rpc.messages.filter((message) => message.method === "notifications/cancelled");
+    await opened.harness.injectTurnDeltas("thr_turn", [
+      { kind: "turn.boundary", providerTurnId: first, status: "completed" },
+    ]);
+    const cancelledAfter = opened.harness.rpc.messages.filter((message) => message.method === "notifications/cancelled");
+    expect(cancelledAfter).toEqual(cancelledBefore);
+    expect(JSON.stringify(cancelledAfter)).not.toContain(String(reverse?.id));
+    opened.harness.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: reverse?.id,
+        result: { success: true, contentItems: [{ type: "inputText", text: "echo: kept" }] },
+      }),
+    );
+    await opened.harness.waitFor(
+      () => payloads.some((payload) => payload.success === true && JSON.stringify(payload).includes("echo: kept")),
+      "N+1 result delivered",
+    );
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 15_000);
+
+it("rejects an unmapped call after one completed recovery instead of waiting for a step event", async () => {
+  const rejects: string[] = [];
+  let offer = false;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_missing") : { calls: [], settled: [] }),
+    durableLog: async () => [
+      {
+        type: "session.execution.started",
+        data: { sessionID: opened.providerThreadId },
+        durable: { seq: 4 },
+      },
+    ],
+    onReject: (input) => {
+      if (typeof input.message === "string") rejects.push(input.message);
+    },
+  });
+  try {
+    await openExecution(opened.harness, opened.providerThreadId, "msg_other");
+    offer = true;
+    await opened.harness.fake.play({
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
+    });
+    await opened.harness.waitFor(() => rejects.includes(ORIGIN_UNKNOWN), "unlinked origin rejected");
+    expect(rejects).toContain(ORIGIN_UNKNOWN);
+    expect(opened.harness.rpc.messages.some((message) => message.method === "item/tool/call")).toBe(false);
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 15_000);
+
+it("rejects an unmapped call when durable log recovery stops before log.synced", async () => {
+  const rejects: string[] = [];
+  let offer = false;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    durableLogComplete: false,
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_missing") : { calls: [], settled: [] }),
+    durableLog: async () => [
+      {
+        type: "session.step.started",
+        data: { sessionID: opened.providerThreadId, assistantMessageID: "msg_missing" },
+      },
+    ],
+    onReject: (input) => {
+      if (typeof input.message === "string") rejects.push(input.message);
+    },
+  });
+  try {
+    await openExecution(opened.harness, opened.providerThreadId, "msg_other");
+    offer = true;
+    await opened.harness.fake.play({
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
+    });
+    await opened.harness.waitFor(() => rejects.includes(ORIGIN_UNKNOWN), "incomplete recovery rejected");
+    expect(rejects).toContain(ORIGIN_UNKNOWN);
+    expect(opened.harness.rpc.messages.some((message) => message.method === "item/tool/call")).toBe(false);
+    expect(opened.harness.warnings.some((message) => message.includes("stopped before log.synced"))).toBe(true);
   } finally {
     await opened.harness.teardown();
   }

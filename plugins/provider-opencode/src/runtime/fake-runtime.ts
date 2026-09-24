@@ -418,7 +418,7 @@ export function createFakeOpenCodeRuntime(
       },
       durableLog: async () => {
         assertOpen();
-        return durable.get(id) ?? [];
+        return { events: durable.get(id) ?? [], complete: true };
       },
       replyPermission: async (requestID, reply) => {
         assertOpen();
