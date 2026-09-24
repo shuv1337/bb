@@ -878,6 +878,7 @@ export function createOpenCodeDeltaTranslator() {
             closeSettledTool(child, id, tool, "failed", childId, UNOBSERVED_TOOL_OUTCOME),
           );
         }
+        deltas.push(...closeOpenItems(child, childId, "failed", childId));
       }
       deltas.push(...closeDelegation(state, childId, "failed"));
     }

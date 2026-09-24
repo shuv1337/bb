@@ -670,6 +670,92 @@ describe("bb tool rows", () => {
     expect(reconciled).toContainEqual(expect.objectContaining({ kind: "turn.boundary", status: "failed" }));
   });
 
+  it("closes a child's open text and compaction when the root execution is lost", () => {
+    function childSetup(translator: ReturnType<typeof bbTranslator>) {
+      translateAll(
+        [
+          { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 1 } },
+          {
+            type: "session.created",
+            data: { sessionID: "SES_CHILD", parentID: "SES_1", title: "helper" },
+          },
+          {
+            type: "session.text.started",
+            data: { sessionID: "SES_CHILD", assistantMessageID: "MSG_CHILD", ordinal: 0 },
+          },
+          { type: "session.compaction.started", data: { sessionID: "SES_CHILD" } },
+        ],
+        CTX,
+        translator,
+      );
+    }
+    function childCloses(deltas: ThreadDelta[]) {
+      return deltas.filter((delta) => {
+        const key = "key" in delta ? delta.key : undefined;
+        return key?.parentRef === "SES_CHILD" || ("key" in delta && delta.key.providerItemId === "SES_CHILD");
+      });
+    }
+    const replaced = bbTranslator();
+    childSetup(replaced);
+    const next = translateAll(
+      [{ type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 9 } }],
+      CTX,
+      replaced,
+    );
+    expect(childCloses(next).map((delta) => delta.kind).sort()).toEqual([
+      "item.close",
+      "item.close",
+      "item.textClose",
+    ]);
+    expect(next).toContainEqual(
+      expect.objectContaining({
+        kind: "item.textClose",
+        key: { providerItemId: "text:MSG_CHILD:0", parentRef: "SES_CHILD" },
+      }),
+    );
+    expect(next).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "compaction", parentRef: "SES_CHILD" },
+        status: "failed",
+      }),
+    );
+    expect(next).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "SES_CHILD" },
+        status: "failed",
+        item: expect.objectContaining({ type: "delegation" }),
+      }),
+    );
+    expect(childCloses(replaced.settleUnobserved("SES_1"))).toEqual([]);
+
+    const released = bbTranslator();
+    childSetup(released);
+    const settled = released.settleUnobserved("SES_1");
+    expect(settled).toContainEqual(
+      expect.objectContaining({
+        kind: "item.textClose",
+        key: { providerItemId: "text:MSG_CHILD:0", parentRef: "SES_CHILD" },
+      }),
+    );
+    expect(settled).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "compaction", parentRef: "SES_CHILD" },
+        status: "failed",
+      }),
+    );
+    expect(settled).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "SES_CHILD" },
+        status: "failed",
+      }),
+    );
+    expect(childCloses(released.settleUnobserved("SES_1"))).toEqual([]);
+  });
+
   it("keeps a new compaction open when an earlier execution already compacted", () => {
     const translator = bbTranslator();
     translateAll(
