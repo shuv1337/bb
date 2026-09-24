@@ -1407,13 +1407,13 @@ it("serializes concurrent turn/start checks into one companion attach", async ()
             }
             if (method === "status") {
               return bound
-                ? { bound: true, generation, epoch: "b1" }
+                ? { bound: true, generation, epoch: 1 }
                 : { bound: false, generation };
             }
             if (method === "attach") {
               if (!armed) {
                 bound = true;
-                return { bindingID: "b1", capability: "cap-1", generation };
+                return { bindingID: "b1", capability: "cap-1", generation, epoch: 1 };
               }
               turnAttaches += 1;
               inFlight += 1;
@@ -1421,9 +1421,9 @@ it("serializes concurrent turn/start checks into one companion attach", async ()
               if (turnAttaches === 1) await firstAttach;
               bound = true;
               inFlight -= 1;
-              return { bindingID: "b1", capability: "cap-1", generation };
+              return { bindingID: "b1", capability: "cap-1", generation, epoch: 1 };
             }
-            if (method === "turn" || method === "detach") return {};
+            if (method === "configure" || method === "detach" || method === "reject") return {};
             return handle.rpc(rpcID, method, payload);
           },
         };

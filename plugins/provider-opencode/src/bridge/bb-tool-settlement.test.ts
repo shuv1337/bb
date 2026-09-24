@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import {
   createFakeOpenCodeRuntime,
   type FakeOpenCodeRuntime,
@@ -45,9 +45,9 @@ function wrapHangingRpc(fake: FakeOpenCodeRuntime, resultCalls: { count: number 
     rpc: async (_rpcID, method) => {
       const generation = "gen-hang";
       if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation };
-      if (method === "status") return { bound: true, generation, epoch: "b-hang" };
+      if (method === "status") return { bound: true, generation, epoch: 1 };
       if (method === "attach") {
-        return { bindingID: "b-hang", capability: "cap-hang", generation, epoch: "b-hang" };
+        return { bindingID: "b-hang", capability: "cap-hang", generation, epoch: 1 };
       }
       if (method === "pending") {
         return {
@@ -55,15 +55,18 @@ function wrapHangingRpc(fake: FakeOpenCodeRuntime, resultCalls: { count: number 
             {
               key: "k1",
               sessionID: handle.id,
+              messageID: "msg_1",
               callID: "call_1",
               tool: "bb_echo",
               arguments: { text: "x" },
+              origin: { rootSessionID: handle.id, rootMessageID: "msg_1" },
               state: "pending",
             },
           ],
           settled: [],
         };
       }
+      if (method === "configure" || method === "reject") return {};
       if (method === "claim") return {};
       if (method === "result") {
         resultCalls.count += 1;
@@ -101,6 +104,15 @@ async function openClaimedCall(resultCalls: { count: number }): Promise<{
   expect(started.error).toBeUndefined();
   const providerThreadId = (started.result as { providerThreadId: string }).providerThreadId;
   await fake.play({
+    type: "session.execution.started",
+    data: { sessionID: providerThreadId },
+    durable: { seq: 1 },
+  });
+  await fake.play({
+    type: "session.step.started",
+    data: { sessionID: providerThreadId, assistantMessageID: "msg_1" },
+  });
+  await fake.play({
     type: "rpc.bb.tools.v1.control",
     data: { type: "pending", sessionID: providerThreadId, key: "k1" },
   });
@@ -112,10 +124,6 @@ async function openClaimedCall(resultCalls: { count: number }): Promise<{
   if (reverse?.id === undefined || reverse.id === null) throw new Error("missing reverse id");
   return { harness, dataDir, providerThreadId, reverseId: reverse.id };
 }
-
-afterEach(() => {
-  // harness teardown is per test
-});
 
 it("thread/stop completes when companion result RPC never resolves", async () => {
   const resultCalls = { count: 0 };

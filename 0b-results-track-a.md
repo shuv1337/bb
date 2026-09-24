@@ -23,8 +23,9 @@ bb interrupts and releases through `thread/stop`. There is no `turn/interrupt` b
 
 ## Spike shortcuts left
 
-- No owner heartbeat, so takeover cannot wait out a live owner. Fencing is the new capability plus an epoch on the binding (`attach` returns `epoch`).
+- No owner heartbeat, so attach takeover cannot wait out a live owner (deferred; needs heartbeats, milestone 1). Fencing is the new capability plus a numeric epoch on the binding (`attach` returns `epoch`; the bridge does not coerce a string or fall back to `bindingID`).
 - `result` on an already-settled deferred is ignored (`Deferred.doneUnsafe` returns false) instead of identical-payload idempotency.
+- A failed companion `result` delivery is retried against the same binding (3 attempts). The record is removed only after acknowledgement or terminal revocation. Binding loss settles the call uncertain, warns `not retrying into a new companion generation`, and revokes only that binding. A boundary in progress on an older binding does not detach a newer one.
 - Unclaimed bridge cancel text `bb tool call cancelled`, unclaimed takeover text `bb tool call failed: owner replaced`, and revoke text `bb tool outcome unknown: the binding was revoked while the call was claimed` are implemented. The live cases above are the claimed paths.
 - `injectResync` / `bbToolCapability` / `setIgnoreBbToolControl` are test seams on the bridge return, not protocol methods.
 - A `pending` response acknowledges settled notices when it is built. If that response is lost on the wire, the notice is not replayed. The next poll still sees a missing key; cancellation of an outstanding reverse call depends on the notice or on `unbound`.

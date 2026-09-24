@@ -2,7 +2,7 @@
 
 Engine lifecycle for plugin reload, Location reload, and companion removal. Live suite: `plugins/provider-opencode/src/bridge/companion-reload.live.test.ts`. Companion: `src/server.ts` on `spike-0b-track-c`.
 
-Passed on both Shuvcode 2.0.15-shuv.1 and stock `@opencode/cli@2.0.15` (Bun-compiled Linux x64), except the Location inactivity TTL case, which released binaries cannot exercise. Unit check `pnpm exec turbo run typecheck test --filter=bb-plugin-provider-opencode`: 241 passed, live suites skipped.
+Passed on both Shuvcode 2.0.15-shuv.1 and stock `@opencode/cli@2.0.15` (Bun-compiled Linux x64), except the Location inactivity TTL case, which released binaries cannot exercise. Each live engine loads a private copy of the companion (and of any auxiliary plugin dir), with `node_modules` symlinked and `.git` excluded, so a reload bump cannot restart another engine’s companion. `BB_OPENCODE_LIVE_KEEP=1` copies the engine root to `/tmp/shuvcode/kept-roots/` before the vitest TMPDIR sandbox is deleted. Idle waits read `GET /api/session/:id` `{data}` `outcome` (`succeeded` | `failed` | `interrupted`) plus `time.idle`, and require the session to be absent from `GET /api/session/active`. Unit check `pnpm exec turbo run typecheck test --filter=bb-plugin-provider-opencode`: live suites skipped. All four live files passed together, 33 tests, three consecutive runs on each engine, including one overlapping pair.
 
 Activation order observed in `GET /api/plugin` (after builtins): discovered directory plugin `bb-spike-early` (`config/<appId>/plugin/aaa-early`), then configured companion `bb.tools`, then configured `bb-spike-later`. That matches plan N11 (directory plugins sorted by path, then configured packages in config order). Marker plugins expose `bb.spike.early` / `bb.spike.later` `hello` generations so a restart is visible without relying on `plugin.updated` alone.
 
@@ -26,7 +26,7 @@ There is no plugin-reload HTTP route. `packages/protocol/src/groups/plugin.ts` o
 
 ## Spike shortcuts left
 
-- No owner heartbeat, attach-takeover fencing, or catalog-digest compare. `status` returns epoch but the bridge only uses it to detect a replaced binding.
+- No owner heartbeat, so attach takeover cannot wait out a live owner (deferred; needs heartbeats, milestone 1). `status` returns a numeric epoch; the bridge uses it, with generation, to detect a replaced binding. No catalog-digest compare.
 - Supported protocol is exactly version 1, not a range. The version override is the test env var `BB_TOOLS_PROTOCOL_VERSION`.
 - No duplicate `bb.tools.v1` detection.
 - Mid-turn `bb tools reattaching` step failure is not implemented (infeasible on the current hook channel).

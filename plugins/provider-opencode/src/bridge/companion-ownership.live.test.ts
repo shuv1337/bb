@@ -12,6 +12,7 @@ import {
   type Engine,
   type ModelRequest,
   type ToolCallRequest,
+  waitForSessionIdle,
   waitUntil,
 } from "./companion-engine.live-harness.js";
 
@@ -50,12 +51,6 @@ async function promptNative(engine: Engine, sessionID: string, text: string): Pr
     method: "POST",
     body: JSON.stringify({ text }),
   });
-}
-
-async function sessionSettled(engine: Engine, sessionID: string): Promise<boolean> {
-  const info = payloadOf(await engineFetch(engine, `/api/session/${sessionID}`));
-  if (typeof info.outcome === "string") return true;
-  return isRecord(info.time) && info.time.idle !== undefined;
 }
 
 describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () => {
@@ -327,7 +322,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     const progressMeta = isRecord(progress?.data) && isRecord(progress.data.metadata) ? progress.data.metadata : {};
     const sessionID = typeof progressMeta.sessionID === "string" ? progressMeta.sessionID : "";
     expect(sessionID.startsWith("ses_")).toBe(true);
-    await waitUntil(() => sessionSettled(engine, sessionID), "background child idle");
+    await waitForSessionIdle(engine, sessionID);
     const before = collectToolCalls(live).length;
     await promptNative(engine, sessionID, "CALL_BB_AFTER_TURN");
     await waitUntil(() => {
@@ -406,6 +401,28 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     process.stderr.write(`\nLIVE stale child rejection: ${failure}\n`);
     expect(failure).toContain(TURN_ENDED);
     expect(collectToolCalls(live)).toHaveLength(before);
+  }, 180_000);
+
+  it("dispatches a tool call that is the first model response", async () => {
+    const { model, live, startThread, startTurn } = ctx;
+    model.script.push(
+      { kind: "tool", name: "bb_echo", args: { text: "immediate" } },
+      { kind: "text", text: "fast done" },
+    );
+    const root = await startThread("thread-fast");
+    await startTurn("thread-fast", root, "call echo immediately");
+    await waitUntil(() => collectToolCalls(live).length === 1, "fast first call");
+    const call = live.toolCalls[0];
+    if (call === undefined) throw new Error("missing fast call");
+    const opened = deltaKinds(live, "thread-fast").find(
+      (delta) => delta.kind === "turn.open" && delta.parentRef === undefined && typeof delta.providerTurnId === "string",
+    );
+    expect(call.params.turnId).toBe(opened?.providerTurnId);
+    expect(String(call.params.turnId)).toContain(root);
+    answerToolCall(live, call, { success: true, contentItems: [{ type: "inputText", text: "echo: immediate" }] });
+    await waitUntil(() => toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: immediate"), "fast call delivered");
+    expect(toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n")).not.toContain(TURN_ENDED);
+    expect(collectToolCalls(live)).toHaveLength(1);
   }, 180_000);
 
   it("does not authorize an imported session resumed through subagent", async () => {
