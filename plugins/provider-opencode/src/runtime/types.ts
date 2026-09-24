@@ -246,6 +246,7 @@ export interface SessionHandle {
     metadata?: Record<string, unknown>;
   }): Promise<void>;
   fork(checkpointMessageId?: string): Promise<SessionHandle>;
+  move(directory: string): Promise<SessionHandle>;
   context(): Promise<readonly OpenCodeSessionMessage[]>;
   durableLog(): Promise<DurableLogRead>;
   replyPermission(

@@ -667,6 +667,12 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
             permissions: patch.permissions,
           });
         }),
+      move: async (directory) => {
+        await run(async (client) => {
+          await client.session.move({ sessionID: id, directory });
+        });
+        return runtime.handle({ id, location: { directory } });
+      },
       fork: async (checkpointMessageId) => {
         runtime.assertReady();
         const client = runtime.requireClient();

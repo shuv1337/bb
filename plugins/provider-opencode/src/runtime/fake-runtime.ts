@@ -61,6 +61,8 @@ export interface FakeOpenCodeCallLog {
   interrupts: number;
   interruptedSessions: string[];
   forks: number;
+  moves: { sessionID: string; directory: string }[];
+  promptDirectories: { sessionID: string; directory: string }[];
   permissions: { sessionID: string; rules: readonly OpenCodePermissionRule[] }[];
   instructions: { sessionID: string; text: string }[];
 }
@@ -119,6 +121,8 @@ export function createFakeOpenCodeRuntime(
     interrupts: 0,
     interruptedSessions: [],
     forks: 0,
+    moves: [],
+    promptDirectories: [],
     permissions: [],
     instructions: [],
   };
@@ -255,6 +259,7 @@ export function createFakeOpenCodeRuntime(
 
   const handleOf = (session: FakeSession): SessionHandle => {
     const id = session.info.id;
+    const location = session.info.location;
     const assertOpen = () => {
       if (closed) {
         throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is closed");
@@ -262,7 +267,7 @@ export function createFakeOpenCodeRuntime(
     };
     return {
       id,
-      location: session.info.location,
+      location,
       info: async () => {
         assertOpen();
         return session.info;
@@ -270,6 +275,7 @@ export function createFakeOpenCodeRuntime(
       prompt: async (input: OpenCodePromptInput) => {
         assertOpen();
         calls.prompts.push(input);
+        calls.promptDirectories.push({ sessionID: id, directory: location.directory });
         const messageId = nextId("msg_");
         session.messages.push({
           id: messageId,
@@ -374,6 +380,12 @@ export function createFakeOpenCodeRuntime(
           title: patch.title ?? session.info.title,
           metadata: patch.metadata === undefined ? session.info.metadata : patch.metadata,
         };
+      },
+      move: async (directory) => {
+        assertOpen();
+        calls.moves.push({ sessionID: id, directory });
+        session.info = { ...session.info, location: { directory } };
+        return handleOf(session);
       },
       fork: async (checkpointMessageId) => {
         assertOpen();

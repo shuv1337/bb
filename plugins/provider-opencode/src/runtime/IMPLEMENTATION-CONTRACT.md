@@ -118,8 +118,9 @@ compact(): Promise<void>
 interrupt(): Promise<void>
 switchAgent(agent: string): Promise<void>
 switchModel(model: OpenCodeModelRef): Promise<void>
-update(patch: { title?: string; permissions?: OpenCodePermissionRule[] }): Promise<void>
+update(patch: { title?: string; permissions?: OpenCodePermissionRule[]; metadata?: Record<string, unknown> }): Promise<void>
 fork(checkpointMessageId?: string): Promise<SessionHandle>
+move(directory: string): Promise<SessionHandle>
 context(): Promise<readonly OpenCodeSessionMessage[]>
 // id, type, text?, agent?, model?, skill?, finish?, tokens?, cost?, content?
 // content is sanitized on every call: a key is stripped when its last word
@@ -133,6 +134,14 @@ replyForm(formID: string, answer: Record<string, string | number | boolean | str
 setEnvironment(variables: Record<string, string>): Promise<void>
 setInstructions(input: { mode: "append" | "replace"; text: string }): Promise<void>
 ```
+
+### Session update metadata
+
+`@opencode/client@2.0.15` and `@opencode/client@2.0.16` include `metadata` on `session.update`. This plugin stays on `@opencode/client@2.0.10`: that client's `session.update` drops `metadata`, and a client bump was not verified against both 2.0.15 engines or the pinned install contract (`./promise` and `./service` only, effect `4.0.0-rc.112`). A metadata patch is a typed runtime wrapper around raw `PATCH /api/session/:id`. Title and permission updates still use `client.session.update`.
+
+### Move
+
+`move(directory)` calls `client.session.move({ sessionID, directory })` (`POST /api/session/:id/move`, body `{ directory }`) and returns a new handle whose `location.directory` is the destination. The previous handle keeps its old Location. Plugin RPC is Location-scoped, so callers must use the returned handle before the next companion call.
 
 ### Fork (bb inclusive checkpoint)
 
@@ -158,9 +167,9 @@ Catalog ids from `skills()` / `commands()` only. `prompt.skills` is `{ id: strin
 
 `createSession` applies `sessionRulesForPermissionMode(permissionMode)` from `../permissions.ts`. Non-`full` **appends** `{ action:"*", resource:"*", effect:"ask" }` so agent wildcard allow cannot leak to webfetch/subagent/etc., then mode allows, then `external_directory` ask and **read+edit** `*.env` / `*.env.*` ask. No `.env.example` exemption in the overlay. Last-match-wins. Never writes `opencode.json`. Location scoping uses OpenCode's `external_directory` action, not path rewriting.
 
-### Default agent (leave plan)
+### Default agent
 
-`agents(location).defaultAgentId`:
+The OpenCode provider does not offer plan mode. `promptMode: "plan"` does not select the `plan` agent. `agents(location).defaultAgentId`:
 
 1. Last `default_agent` string on `config.get({ location })` document entries, if that id is selectable.
 2. Else `build` if selectable.
