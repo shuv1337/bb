@@ -268,6 +268,7 @@ export interface SessionHandle {
 
 export interface OpenCodeRuntime {
   info(): Promise<{ version: string; url: string; appId: string | null }>;
+  listPlugins(location: OpenCodeLocation): Promise<unknown>;
   health(): Promise<OpenCodeDiscoveryHealth>;
   models(location: OpenCodeLocation): Promise<OpenCodeModel[]>;
   agents(location: OpenCodeLocation): Promise<OpenCodeAgentCatalog>;

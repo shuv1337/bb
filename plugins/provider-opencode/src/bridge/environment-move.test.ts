@@ -32,10 +32,19 @@ function wrapAttach(
     move: async (directory) => wrap(await handle.move(directory)),
     rpc: async (rpcID, method, input) => {
       if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
-      if (method === "status") return { bound: true, generation: "g", epoch: 1 };
+      if (method === "status") {
+        return { bound: true, generation: "g", epoch: 1, catalogDigest: "a".repeat(64), leaseExpiresAt: 1 };
+      }
       if (method === "attach") {
         if (failAttach()) throw new Error("attach failed");
-        return { bindingID: "b1", capability: "cap", generation: "g", epoch: 1 };
+        return {
+          bindingID: "b1",
+          capability: "cap",
+          generation: "g",
+          epoch: 1,
+          catalogDigest: "a".repeat(64),
+          ownerLeaseMs: 30_000,
+        };
       }
       if (method === "pending") return { calls: [], settled: [] };
       if (method === "configure" || method === "detach" || method === "reject" || method === "result") return {};

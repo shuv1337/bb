@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -146,7 +146,12 @@ export interface OpenCodeBridgeDeps {
   warn?: (message: string) => void;
 }
 
-type OwnerRecord = { threadId: string; cwd: string; pendingDirectory?: string };
+type OwnerRecord = {
+  threadId: string;
+  cwd: string;
+  pendingDirectory?: string;
+  capability?: string;
+};
 
 interface PendingForm {
   fields: OpenCodeFormField[];
@@ -182,6 +187,7 @@ interface ThreadSession {
   childHandles: Map<string, SessionHandle>;
   catalog: OpenCodeModel[];
   disallowedTools: readonly string[];
+  bbToolsRequired: boolean;
   busyChildren: Set<string>;
   unopenableChildren: Set<string>;
   settleWaiters: Set<(settled: boolean) => void>;
@@ -540,10 +546,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           typeof (record as OwnerRecord).cwd === "string"
         ) {
           const pending = (record as OwnerRecord).pendingDirectory;
+          const capability = (record as OwnerRecord).capability;
           owners.set(sessionID, {
             threadId: (record as OwnerRecord).threadId,
             cwd: (record as OwnerRecord).cwd,
             ...(typeof pending === "string" && pending.length > 0 ? { pendingDirectory: pending } : {}),
+            ...(typeof capability === "string" && capability.length > 0 ? { capability } : {}),
           });
         }
       }
@@ -559,7 +567,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     const write = ownersWrite.then(async () => {
       const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
       await mkdir(dirname(path), { recursive: true });
-      await writeFile(temporary, snapshot, "utf8");
+      await writeFile(temporary, snapshot, { encoding: "utf8", mode: 0o600 });
+      await chmod(temporary, 0o600);
       await rename(temporary, path);
     });
     ownersWrite = write.then(
@@ -581,8 +590,20 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   }
 
   function rememberOwner(sessionID: string, threadId: string, cwd: string): void {
-    owners.set(sessionID, { threadId, cwd });
+    const previous = owners.get(sessionID);
+    owners.set(sessionID, {
+      threadId,
+      cwd,
+      ...(previous?.capability === undefined ? {} : { capability: previous.capability }),
+    });
     persistOwners();
+  }
+
+  function rememberCapability(sessionID: string, capability: string): Promise<void> {
+    const current = owners.get(sessionID);
+    if (current === undefined) return Promise.resolve();
+    owners.set(sessionID, { ...current, capability });
+    return enqueueOwnerWrite();
   }
 
   function forgetOwners(threadId: string, providerThreadId: string): void {
@@ -603,6 +624,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         : createOpenCodeRuntime();
     }
     return runtimePromise;
+  }
+
+  let cachedAppId: string | null | undefined;
+  async function engineAppId(): Promise<string | null> {
+    if (cachedAppId !== undefined) return cachedAppId;
+    try {
+      cachedAppId = (await (await runtime()).info()).appId;
+    } catch {
+      cachedAppId = null;
+    }
+    return cachedAppId;
   }
 
   async function refreshRuntime(): Promise<void> {
@@ -979,6 +1011,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     instructions: "construct" | "frozen",
   ): Promise<void> {
     session.persistApprovals = knobs.persistApprovals;
+    session.bbToolsRequired = knobs.bbToolsRequired;
     if (instructions === "construct") {
       await session.handle.setInstructions({
         mode: "append",
@@ -1023,6 +1056,13 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       get disallowedTools() {
         return session.disallowedTools;
       },
+      get bbToolsRequired() {
+        return session.bbToolsRequired;
+      },
+      appId: () => engineAppId(),
+      takeoverCapability: () => owners.get(session.handle.id)?.capability,
+      rememberCapability: (capability) => rememberCapability(session.handle.id, capability),
+      listPlugins: async () => (await runtime()).listPlugins(session.handle.location),
       get hasDeferredResync() {
         return session.deferredResyncMessages !== undefined;
       },
@@ -1110,6 +1150,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       childHandles: new Map(),
       catalog: [],
       disallowedTools,
+      bbToolsRequired: false,
       busyChildren: new Set(),
       unopenableChildren: new Set(),
       settleWaiters: new Set(),
@@ -1319,7 +1360,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       await session.tools.attach(args.dynamicTools, args.toolAttachMode ?? "construct");
       if (args.durableOwner === true) {
         const mapped = owners.get(args.handle.id);
-        owners.set(args.handle.id, { threadId: args.threadId, cwd: args.cwd });
+        owners.set(args.handle.id, {
+          threadId: args.threadId,
+          cwd: args.cwd,
+          ...(mapped?.capability === undefined ? {} : { capability: mapped.capability }),
+        });
         try {
           await enqueueOwnerWrite();
         } catch (error) {
@@ -1564,6 +1609,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
             threadId: request.params.threadId,
             cwd: mapped?.cwd ?? before.location.directory,
             pendingDirectory: request.params.cwd,
+            ...(mapped?.capability === undefined ? {} : { capability: mapped.capability }),
           });
           try {
             await enqueueOwnerWrite();
@@ -1659,6 +1705,13 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         }
         const incomingDisallowed = stringListParam(request.params, "disallowedTools");
         if (incomingDisallowed !== undefined) session.disallowedTools = incomingDisallowed;
+        const knobs = knobsFromExecution({
+          threadId: request.params.threadId,
+          options: request.params.options,
+          instructionMode: "append",
+          catalog: session.catalog,
+        });
+        session.bbToolsRequired = knobs.bbToolsRequired;
         try {
           await session.tools.ensure();
         } catch (error) {
@@ -1685,12 +1738,6 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
             });
           }
         }
-        const knobs = knobsFromExecution({
-          threadId: request.params.threadId,
-          options: request.params.options,
-          instructionMode: "append",
-          catalog: session.catalog,
-        });
         await assertRequestedAgent(session.cwd, knobs.agent);
         await applyKnobs(session, knobs, "frozen");
         await session.tools.pushDisallowed();

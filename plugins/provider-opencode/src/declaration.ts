@@ -4,6 +4,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 import { opencodeExtensionKinds } from "./extension-kinds.js";
 import { OPENCODE_NATIVE_ROOTS_DECLARATION } from "./native-roots.js";
+import { withBbToolsRequired } from "./bb-tools-required.js";
 import {
   OPENCODE_EXPIRED_HINT,
   OPENCODE_INSTALL_URL,
@@ -21,6 +22,7 @@ export const OPENCODE_ENV_PASSTHROUGH = [
 export type OpenCodeProviderOptions = {
   agent: string | null;
   variant: string | null;
+  bbToolsRequired: boolean;
 };
 
 function stringSetting(
@@ -37,10 +39,13 @@ export function deriveOpenCodeProviderOptions(
   context: PluginProviderOptionsContext,
 ): OpenCodeProviderOptions {
   const variant = stringSetting(context.settings, "defaultVariant");
-  return {
-    agent: stringSetting(context.settings, "defaultAgent"),
-    variant,
-  };
+  return withBbToolsRequired(
+    {
+      agent: stringSetting(context.settings, "defaultAgent"),
+      variant,
+    },
+    context.settings,
+  );
 }
 
 export function opencodeProviderDeclaration(): PluginProviderDeclaration {

@@ -43,7 +43,15 @@ function wrapCompanion(runtime: FakeOpenCodeRuntime, hooks: CompanionHooks): Ope
       const input = isRecord(payload) ? payload : {};
       const generation = hooks.generation?.() ?? "gen-1";
       if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation };
-      if (method === "status") return { bound: true, generation, epoch: boundEpoch };
+      if (method === "status") {
+        return {
+          bound: true,
+          generation,
+          epoch: boundEpoch,
+          catalogDigest: "a".repeat(64),
+          leaseExpiresAt: 1,
+        };
+      }
       if (method === "attach") {
         hooks.attaches.count += 1;
         boundEpoch = hooks.attaches.count;
@@ -52,6 +60,8 @@ function wrapCompanion(runtime: FakeOpenCodeRuntime, hooks: CompanionHooks): Ope
           capability: `cap-${hooks.attaches.count}`,
           generation,
           epoch: boundEpoch,
+          catalogDigest: "a".repeat(64),
+          ownerLeaseMs: 30_000,
         };
       }
       if (method === "pending") return hooks.pending?.() ?? { calls: [], settled: [] };

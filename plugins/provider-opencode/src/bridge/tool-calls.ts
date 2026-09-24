@@ -1,6 +1,15 @@
 import type { DynamicTool, ThreadDelta } from "@get-bb/plugin-sdk/provider-bridge";
+import { bbToolsRequiredSetupMessage } from "../bb-tools-required.js";
+import {
+  companionPluginSpecsFrom,
+  duplicateCompanionAttachmentMessage,
+} from "../companion-status-contract.js";
 import type { DurableLogRead, OpenCodeNativeEvent, OpenCodeSessionMessage, SessionHandle } from "../runtime/index.js";
 import { OpenCodeUnauthenticatedError } from "../runtime/index.js";
+import {
+  ABSENT_COMPANION_WARNING_SUMMARY,
+  absentCompanionWarningDetails,
+} from "../strings.js";
 import {
   BB_TOOL_TEARDOWN_RPC_MS,
   BB_TOOLS_RPC,
@@ -9,6 +18,7 @@ import {
   bbToolCallResultSchema,
   classifyBbToolsRpcError,
   createBbToolsClient,
+  DEFAULT_BB_TOOLS_LIMITS,
   failureMessage,
   isCompanionAbsent,
   isUnboundRpc,
@@ -18,6 +28,7 @@ import {
   type BbToolPendingOutput,
   type BbToolsClient,
   type BbToolsHello,
+  type BbToolsLimits,
   type BbToolsRpc,
 } from "../runtime/tool-bridge.js";
 
@@ -57,7 +68,12 @@ export interface BbToolHost {
   readonly busy: boolean;
   readonly handle: SessionHandle;
   readonly disallowedTools: readonly string[];
+  readonly bbToolsRequired: boolean;
   readonly hasDeferredResync: boolean;
+  appId(): Promise<string | null>;
+  takeoverCapability(): string | undefined;
+  rememberCapability(capability: string): Promise<void>;
+  listPlugins(): Promise<unknown>;
   liveTurnId(): string | undefined;
   executionTurnId(): string | undefined;
   warn(message: string): void;
@@ -78,6 +94,9 @@ interface BbToolBinding {
   capability: string;
   generation: string;
   epoch: number;
+  catalogDigest: string;
+  ownerLeaseMs: number;
+  lease: ReturnType<typeof setTimeout> | undefined;
   inFlight: Set<string>;
   draining: boolean;
   drainAgain: boolean;
@@ -155,6 +174,7 @@ export interface BbToolCalls {
 export interface CreateBbToolCallsOptions {
   now?: () => number;
   pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function clientOf(rpc: BbToolsRpc): BbToolsClient {
@@ -168,6 +188,7 @@ function failureResult(text: string): BbToolCallResult {
 export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToolCalls {
   const now = options.now ?? Date.now;
   const pollMs = options.pollMs ?? BB_TOOL_POLL_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const pending = new Map<string, PendingBbToolCall>();
   let serial = 0;
   let ignoreControl = false;
@@ -198,10 +219,53 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     return false;
   }
 
+  function stopLease(binding: BbToolBinding): void {
+    if (binding.lease === undefined) return;
+    clearTimeout(binding.lease);
+    binding.lease = undefined;
+  }
+
   function stopPoll(binding: BbToolBinding): void {
     if (binding.poll === undefined) return;
     clearTimeout(binding.poll);
     binding.poll = undefined;
+  }
+
+  function startLease(state: ToolState, binding: BbToolBinding): void {
+    stopLease(binding);
+    const interval = Math.max(1, Math.floor(binding.ownerLeaseMs / 3));
+    const tick = (): void => {
+      if (state.host.closed || state.binding !== binding) {
+        binding.lease = undefined;
+        return;
+      }
+      void renewLease(state, binding);
+      binding.lease = setTimeout(tick, interval);
+      binding.lease.unref?.();
+    };
+    binding.lease = setTimeout(tick, interval);
+    binding.lease.unref?.();
+  }
+
+  async function renewLease(state: ToolState, binding: BbToolBinding): Promise<void> {
+    if (state.binding !== binding || state.host.closed) return;
+    try {
+      const status = await clientOf(state.host.handle.rpc.bind(state.host.handle)).status(binding.capability);
+      if (state.binding !== binding) return;
+      const digestMismatch =
+        binding.catalogDigest.length > 0 &&
+        status.bound &&
+        status.catalogDigest !== binding.catalogDigest;
+      if (!status.bound || status.generation !== binding.generation || digestMismatch) {
+        state.stale = true;
+      }
+    } catch (error) {
+      if (isUnboundRpc(error) || (error instanceof BbToolsRpcError && error.kind === "unbound")) {
+        state.stale = true;
+        return;
+      }
+      state.host.warn(`bb tool owner heartbeat failed for ${state.host.threadId}: ${failureMessage(error)}`);
+    }
   }
 
   function chooseResult(call: PendingBbToolCall): boolean {
@@ -244,6 +308,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
   ): Promise<void> {
     if (!bindingStillCurrent(state, binding)) return;
     stopPoll(binding);
+    stopLease(binding);
     const settled = abandonForwarded(state, binding);
     if (!bindingStillCurrent(state, binding)) return;
     state.retired = binding;
@@ -266,7 +331,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     key: string,
     result: BbToolCallResult,
     bound: boolean,
-  ): Promise<"acked" | "lost" | "failed" | "conflict"> {
+  ): Promise<"acked" | "lost" | "failed" | "conflict" | "too_large"> {
     if (!bound && !bindingStillCurrent(state, binding)) {
       await detachCaptured(state, binding, 0);
       return "lost";
@@ -285,6 +350,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       return "acked";
     } catch (error) {
       if (error instanceof BbToolsRpcError && error.kind === "conflict") return "conflict";
+      if (error instanceof BbToolsRpcError && error.kind === "too_large") return "too_large";
       if (failureMessage(error).includes("conflict")) return "conflict";
       if (deliveryLost(state, binding, error)) {
         state.host.warn(
@@ -303,13 +369,13 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     binding: BbToolBinding,
     call: PendingBbToolCall,
     bound: boolean,
-  ): Promise<"acked" | "lost" | "failed" | "conflict"> {
+  ): Promise<"acked" | "lost" | "failed" | "conflict" | "too_large"> {
     if (call.result === undefined) return "failed";
     if (call.phase === "acknowledged") return "acked";
     if (call.companionDelivery === "started") return "failed";
     call.companionDelivery = "started";
     const outcome = await deliverCompanionResult(state, binding, call.key, call.result, bound);
-    if (outcome === "conflict") return "conflict";
+    if (outcome === "conflict" || outcome === "too_large") return outcome;
     if (outcome === "acked" || outcome === "lost") {
       call.phase = outcome === "acked" ? "acknowledged" : "uncertain";
       if (outcome === "acked") binding.acknowledged.add(call.key);
@@ -374,8 +440,9 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     if (call.companionDelivery === "started") return;
     const outcome = await deliverChosen(state, binding, call, bound);
     if (outcome === "acked" || outcome === "lost") return;
-    if (outcome === "conflict") {
+    if (outcome === "conflict" || outcome === "too_large") {
       call.phase = "acknowledged";
+      binding.acknowledged.add(call.key);
       pending.delete(call.id);
       return;
     }
@@ -389,6 +456,20 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
 
   function callBelongsToTurn(binding: BbToolBinding, key: string, turnId: string): boolean {
     return binding.callTurns.get(key) === turnId;
+  }
+
+  function settleClaimedUncertain(state: ToolState, key: string): void {
+    for (const call of [...pending.values()]) {
+      if (call.threadId !== state.host.threadId || call.key !== key) continue;
+      if (call.phase === "acknowledged" || call.phase === "uncertain") continue;
+      if (call.phase === "dispatched") {
+        call.phase = "uncertain";
+        call.result = failureResult(BB_TOOL_OUTCOME_UNKNOWN);
+        sendCancelled(state.host, call.id);
+        call.resolve();
+      }
+      pending.delete(call.id);
+    }
   }
 
   function cancelReverseCall(state: ToolState, key: string): void {
@@ -535,7 +616,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     const client = clientOf(state.host.handle.rpc.bind(state.host.handle));
     try {
       const parsed = await client.pending(
-        { capability: binding.capability, acknowledged },
+        { capability: binding.capability, acknowledged, waitMs: 0 },
         bound ? { timeoutMs: BB_TOOL_TEARDOWN_RPC_MS } : undefined,
       );
       for (const key of acknowledged) binding.acknowledged.delete(key);
@@ -551,14 +632,21 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     for (const notice of snapshot.settled ?? []) {
       binding.acknowledged.add(notice.key);
       binding.seenOpen.delete(notice.key);
-      if (notice.outcome === "cancelled") cancelReverseCall(state, notice.key);
+      binding.inFlight.delete(notice.key);
+      if (notice.disposition === "cancelled") cancelReverseCall(state, notice.key);
+      if (notice.disposition === "uncertain") settleClaimedUncertain(state, notice.key);
     }
     for (const call of snapshot.calls) {
       if (call.state === "claimed") {
         binding.seenOpen.add(call.key);
         continue;
       }
-      if (binding.cancelled.has(call.key) || binding.inFlight.has(call.key) || hasRetainedResult(state, call.key)) {
+      if (
+        binding.acknowledged.has(call.key) ||
+        binding.cancelled.has(call.key) ||
+        binding.inFlight.has(call.key) ||
+        hasRetainedResult(state, call.key)
+      ) {
         continue;
       }
       binding.seenOpen.add(call.key);
@@ -931,6 +1019,9 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     try {
       const status = await clientOf(state.host.handle.rpc.bind(state.host.handle)).status(binding.capability);
       if (status.bound && status.generation === generation && status.epoch === binding.epoch) {
+        if (binding.catalogDigest.length > 0 && status.catalogDigest !== binding.catalogDigest) {
+          return { kind: "unbound" };
+        }
         return { kind: "held" };
       }
       return { kind: "unbound" };
@@ -939,20 +1030,17 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     }
   }
 
-  async function install(state: ToolState, tools: readonly DynamicTool[]): Promise<BbToolBinding> {
-    const output = await clientOf(state.host.handle.rpc.bind(state.host.handle)).attach({
-      sessionID: state.host.handle.id,
-      disallowedTools: state.host.disallowedTools,
-      tools: tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-      })),
-    });
+  function bindingFrom(
+    output: { capability: string; generation: string; epoch: number; catalogDigest: string; ownerLeaseMs: number },
+    limits: BbToolsLimits,
+  ): BbToolBinding {
     return {
       capability: output.capability,
       generation: output.generation,
       epoch: output.epoch,
+      catalogDigest: output.catalogDigest,
+      ownerLeaseMs: output.ownerLeaseMs > 0 ? output.ownerLeaseMs : limits.ownerLeaseMs,
+      lease: undefined,
       inFlight: new Set(),
       draining: false,
       drainAgain: false,
@@ -962,6 +1050,106 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       callTurns: new Map(),
       poll: undefined,
     };
+  }
+
+  function catalogOf(tools: readonly DynamicTool[]) {
+    return tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    }));
+  }
+
+  function invalidToolReports(error: unknown): Array<{ tool?: string; reason: string; detail: string }> {
+    if (!(error instanceof BbToolsRpcError) || error.code !== "invalid" || !Array.isArray(error.data.tools)) {
+      return [];
+    }
+    const reports: Array<{ tool?: string; reason: string; detail: string }> = [];
+    for (const item of error.data.tools) {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+      const record = item as Record<string, unknown>;
+      if (typeof record.reason !== "string" || typeof record.detail !== "string") continue;
+      reports.push({
+        ...(typeof record.tool === "string" ? { tool: record.tool } : {}),
+        reason: record.reason,
+        detail: record.detail,
+      });
+    }
+    return reports;
+  }
+
+  function ownerActiveMessage(retryAfterMs: number): string {
+    return `OpenCode companion owner lease is active. A restarted bridge must present its saved capability; a second bridge without that proof cannot attach for another ${retryAfterMs}ms. Stop the other bridge or retry the turn after the lease expires.`;
+  }
+
+  async function duplicateAttachmentError(state: ToolState, instances: number): Promise<string | null> {
+    if (instances <= 1) return null;
+    let plugins: ReturnType<typeof companionPluginSpecsFrom>;
+    try {
+      plugins = companionPluginSpecsFrom(await state.host.listPlugins());
+    } catch (error) {
+      plugins = { kind: "failed", message: failureMessage(error) };
+    }
+    return duplicateCompanionAttachmentMessage({
+      instances,
+      specs: plugins.kind === "ok" ? plugins.specs : [],
+      pluginListError: plugins.kind === "failed" ? plugins.message : null,
+    });
+  }
+
+  function overloadedMessage(error: BbToolsRpcError): string {
+    const limit = typeof error.data.limit === "number" ? error.data.limit : DEFAULT_BB_TOOLS_LIMITS.maxBindings;
+    return `OpenCode companion cannot accept another binding (limit ${limit}). Detach another bb session in this directory, then retry the turn.`;
+  }
+
+  async function install(
+    state: ToolState,
+    tools: readonly DynamicTool[],
+    limits: BbToolsLimits,
+    warnDropped: (dropped: readonly { name: string; reason: string; detail: string }[]) => void,
+  ): Promise<BbToolBinding> {
+    const client = clientOf(state.host.handle.rpc.bind(state.host.handle));
+    const takeover = state.host.takeoverCapability();
+    let catalog = [...tools];
+    let droppedInvalid = false;
+    const started = now();
+    for (;;) {
+      try {
+        const output = await client.attach({
+          sessionID: state.host.handle.id,
+          bbThreadId: state.host.threadId,
+          disallowedTools: state.host.disallowedTools,
+          tools: catalogOf(catalog),
+          ...(takeover === undefined ? {} : { takeover: { capability: takeover } }),
+        });
+        await state.host.rememberCapability(output.capability);
+        return bindingFrom(output, limits);
+      } catch (error) {
+        if (error instanceof BbToolsRpcError && error.kind === "owner_active") {
+          const retryAfter = typeof error.data.retryAfterMs === "number" ? Math.max(0, error.data.retryAfterMs) : limits.ownerLeaseMs;
+          const elapsed = now() - started;
+          if (retryAfter <= 0 || elapsed + retryAfter > limits.ownerLeaseMs) {
+            throw new BbToolsSetupError(ownerActiveMessage(retryAfter));
+          }
+          await sleep(retryAfter);
+          continue;
+        }
+        if (error instanceof BbToolsRpcError && error.kind === "overloaded") {
+          throw new BbToolsSetupError(overloadedMessage(error));
+        }
+        const reports = invalidToolReports(error);
+        if (!droppedInvalid && reports.length > 0) {
+          droppedInvalid = true;
+          const named = reports.filter((item): item is { tool: string; reason: string; detail: string } => item.tool !== undefined);
+          warnDropped(named.map((item) => ({ name: item.tool, reason: item.reason, detail: item.detail })));
+          const drop = new Set(named.map((item) => item.tool));
+          catalog = catalog.filter((tool) => !drop.has(tool.name));
+          if (catalog.length === 0) throw error;
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 
   function withLock<T>(state: ToolState, body: () => Promise<T>): Promise<T> {
@@ -975,6 +1163,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
 
   async function retire(state: ToolState, binding: BbToolBinding): Promise<void> {
     stopPoll(binding);
+    stopLease(binding);
     if (state.binding === binding) await abandonForwarded(state);
   }
 
@@ -993,6 +1182,33 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       publishedBoundaries: new Set(),
     };
     let warned = false;
+    async function warnAbsent(tools: readonly { name: string }[], mode: "construct" | "turn"): Promise<void> {
+      if (host.bbToolsRequired) {
+        if (mode === "turn") {
+          throw new BbToolsSetupError(bbToolsRequiredSetupMessage(await host.appId()));
+        }
+        return;
+      }
+      if (warned || tools.length === 0) return;
+      warned = true;
+      host.send({
+        jsonrpc: "2.0",
+        method: "thread/delta",
+        params: {
+          threadId: host.threadId,
+          deltas: [
+            {
+              kind: "provider.warning",
+              summary: ABSENT_COMPANION_WARNING_SUMMARY,
+              details: absentCompanionWarningDetails({
+                toolNames: tools.map((tool) => tool.name),
+                appId: await host.appId(),
+              }),
+            },
+          ],
+        },
+      });
+    }
     function warnOnce(tools: readonly { name: string }[], reason: string): void {
       if (warned || tools.length === 0) return;
       warned = true;
@@ -1004,8 +1220,25 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           deltas: [
             {
               kind: "provider.warning",
-              summary: "OpenCode does not run bb plugin tools",
+              summary: ABSENT_COMPANION_WARNING_SUMMARY,
               details: `Dropped dynamicTools: ${tools.map((tool) => tool.name).join(", ")} (${reason})`,
+            },
+          ],
+        },
+      });
+    }
+    function warnDropped(dropped: readonly { name: string; reason: string; detail: string }[]): void {
+      if (dropped.length === 0) return;
+      host.send({
+        jsonrpc: "2.0",
+        method: "thread/delta",
+        params: {
+          threadId: host.threadId,
+          deltas: [
+            {
+              kind: "provider.warning",
+              summary: "Dropped invalid bb tools",
+              details: dropped.map((item) => `${item.name} (${item.reason}: ${item.detail})`).join("; "),
             },
           ],
         },
@@ -1107,6 +1340,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
         state.binding = null;
         if (binding === null) return;
         stopPoll(binding);
+        stopLease(binding);
         void withTimeout(
           clientOf(host.handle.rpc.bind(host.handle))
             .detach({ capability: binding.capability })
@@ -1141,7 +1375,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           const live = current.binding;
           if (live !== null) await retire(current, live);
           current.binding = null;
-          warnTools(tools, "opencode-bb-tools is not installed");
+          await warnAbsent(tools, mode);
           return;
         }
         if (hello.kind === "failed") {
@@ -1155,14 +1389,24 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           if (mode === "turn") throw new BbToolsSetupError(hello.message);
           return;
         }
+        const duplicate = await duplicateAttachmentError(current, hello.instances);
+        if (duplicate !== null) {
+          const bound = current.binding;
+          if (bound !== null) await retire(current, bound);
+          current.binding = null;
+          throw new BbToolsSetupError(duplicate);
+        }
         const live = current.binding;
         if (live !== null) {
           const held = await readHold(current, live, hello.generation, hello);
-          if (held.kind === "held") return;
+          if (held.kind === "held") {
+            if (live.lease === undefined) startLease(current, live);
+            return;
+          }
           if (held.kind === "absent") {
             await retire(current, live);
             current.binding = null;
-            warnTools(tools, "opencode-bb-tools is not installed");
+            await warnAbsent(tools, mode);
             return;
           }
           if (held.kind === "failed") {
@@ -1172,14 +1416,14 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
         }
         let installed: BbToolBinding;
         try {
-          installed = await install(current, tools);
+          installed = await install(current, tools, hello.limits, warnDropped);
         } catch (error) {
-          if (error instanceof OpenCodeUnauthenticatedError) throw error;
+          if (error instanceof BbToolsSetupError || error instanceof OpenCodeUnauthenticatedError) throw error;
           if (isCompanionAbsent(error)) {
             const bound = current.binding;
             if (bound !== null) await retire(current, bound);
             current.binding = null;
-            warnTools(tools, "opencode-bb-tools is not installed");
+            await warnAbsent(tools, mode);
             return;
           }
           if (mode === "turn" && attempt + 1 === BB_TOOLS_ATTACH_ATTEMPTS) {
@@ -1204,6 +1448,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
               `reattached bb tools for ${current.host.threadId}: generation ${previous.generation} -> ${installed.generation}`,
             );
           }
+          startLease(current, installed);
           if (current.host.turnOpen || current.host.busy || current.host.hasDeferredResync) {
             ensurePoll(current);
           }
@@ -1213,7 +1458,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           const bound = current.binding;
           if (bound !== null) await retire(current, bound);
           current.binding = null;
-          warnTools(tools, "opencode-bb-tools is not installed");
+          await warnAbsent(tools, mode);
           return;
         }
         if (confirmed.kind === "failed") {

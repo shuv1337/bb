@@ -293,6 +293,16 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     }
   }
 
+  async listPlugins(location: OpenCodeLocation): Promise<unknown> {
+    this.assertOpen();
+    const client = this.requireClient();
+    try {
+      return await client.plugin.list({ location });
+    } catch (error) {
+      wrapClientError(error);
+    }
+  }
+
   async health(): Promise<OpenCodeDiscoveryHealth> {
     this.assertOpen();
     const attached = await this.refreshAttachment();

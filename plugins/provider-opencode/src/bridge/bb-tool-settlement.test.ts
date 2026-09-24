@@ -45,9 +45,18 @@ function wrapHangingRpc(fake: FakeOpenCodeRuntime, resultCalls: { count: number 
     rpc: async (_rpcID, method) => {
       const generation = "gen-hang";
       if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation };
-      if (method === "status") return { bound: true, generation, epoch: 1 };
+      if (method === "status") {
+        return { bound: true, generation, epoch: 1, catalogDigest: "a".repeat(64), leaseExpiresAt: 1 };
+      }
       if (method === "attach") {
-        return { bindingID: "b-hang", capability: "cap-hang", generation, epoch: 1 };
+        return {
+          bindingID: "b-hang",
+          capability: "cap-hang",
+          generation,
+          epoch: 1,
+          catalogDigest: "a".repeat(64),
+          ownerLeaseMs: 30_000,
+        };
       }
       if (method === "pending") {
         return {

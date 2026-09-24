@@ -107,7 +107,7 @@ describe("deriveOpenCodeProviderOptions", () => {
         promptMode: "plan",
         settings: { defaultAgent: "reviewer", defaultVariant: "thinking" },
       }),
-    ).toEqual({ agent: "reviewer", variant: "thinking" });
+    ).toEqual({ agent: "reviewer", variant: "thinking", bbToolsRequired: false });
     expect(
       deriveOpenCodeProviderOptions({
         threadId: "thr_1",
@@ -117,7 +117,7 @@ describe("deriveOpenCodeProviderOptions", () => {
         promptMode: "plan",
         settings: {},
       }),
-    ).toEqual({ agent: null, variant: null });
+    ).toEqual({ agent: null, variant: null, bbToolsRequired: false });
   });
 
   it("leaves blank defaultAgent and defaultVariant as null so the bridge resolves them", () => {
@@ -129,7 +129,7 @@ describe("deriveOpenCodeProviderOptions", () => {
         permissionMode: "accept-edits",
         settings: { defaultAgent: "  ", defaultVariant: "" },
       }),
-    ).toEqual({ agent: null, variant: null });
+    ).toEqual({ agent: null, variant: null, bbToolsRequired: false });
     expect(
       deriveOpenCodeProviderOptions({
         threadId: "thr_1",
@@ -138,7 +138,7 @@ describe("deriveOpenCodeProviderOptions", () => {
         permissionMode: "accept-edits",
         settings: {},
       }),
-    ).toEqual({ agent: null, variant: null });
+    ).toEqual({ agent: null, variant: null, bbToolsRequired: false });
   });
 
   it("passes a named defaultAgent and catalog defaultVariant through", () => {
@@ -150,6 +150,6 @@ describe("deriveOpenCodeProviderOptions", () => {
         permissionMode: "full",
         settings: { defaultAgent: "reviewer", defaultVariant: "minimal" },
       }),
-    ).toEqual({ agent: "reviewer", variant: "minimal" });
+    ).toEqual({ agent: "reviewer", variant: "minimal", bbToolsRequired: false });
   });
 });

@@ -22,6 +22,7 @@ export const companionLimitsSchema = z
     maxOutstandingCalls: z.number().int().nonnegative(),
     maxResultBytes: z.number().int().nonnegative(),
     maxToolsPerBinding: z.number().int().nonnegative(),
+    maxBindings: z.number().int().nonnegative().optional(),
     ownerLeaseMs: z.number().int().positive(),
     maxPendingWaitMs: z.number().int().nonnegative(),
   })
@@ -296,6 +297,30 @@ function duplicatesFrom(
 ): boolean {
   if (instances !== null) return instances > 1;
   return specs.filter((spec) => spec.state === "active").length > 1;
+}
+
+export function duplicateCompanionAttachmentMessage(input: {
+  instances: number | null;
+  specs: readonly CompanionPluginSpec[];
+  pluginListError: string | null;
+}): string | null {
+  const active = input.specs.filter((spec) => spec.state === "active");
+  if (!duplicatesFrom(input.instances, input.specs)) return null;
+  const lines = [
+    "More than one bb.tools.v1 companion is registered. Remove every extra spec, then retry the turn.",
+  ];
+  if (input.instances !== null) lines.push(`Instances: ${input.instances}`);
+  if (active.length === 0) {
+    lines.push(
+      input.pluginListError === null
+        ? "The engine plugin list did not name the installed specs."
+        : `Plugin list failed: ${input.pluginListError}`,
+    );
+  }
+  for (const spec of active) {
+    lines.push(`Spec: ${spec.spec}${spec.id === null ? "" : ` (${spec.id})`}`);
+  }
+  return lines.join(" ");
 }
 
 function shellProbe(

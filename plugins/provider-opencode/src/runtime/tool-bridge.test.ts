@@ -46,16 +46,38 @@ describe("bb tools RPC client", () => {
       kind: "rejected",
       message: expect.stringContaining("did not match bb.tools.v1"),
     });
-    await expect(client.hello()).resolves.toEqual({ kind: "ok", generation: "gen-1" });
+    const ok = await client.hello();
+    expect(ok).toMatchObject({
+      kind: "ok",
+      generation: "gen-1",
+      versions: { min: 1, max: 1 },
+      instances: 1,
+      features: { richFailures: false },
+    });
   });
 
   it("validates every method output and classifies unbound, conflict, and timeout", async () => {
     const calls: string[] = [];
     const rpc: BbToolsRpc = async (_id, method) => {
       calls.push(method);
-      if (method === "status") return { bound: true, generation: "g", epoch: 2 };
+      if (method === "status") {
+        return {
+          bound: true,
+          generation: "g",
+          epoch: 2,
+          catalogDigest: "a".repeat(64),
+          leaseExpiresAt: 1,
+        };
+      }
       if (method === "attach") {
-        return { bindingID: "b1", capability: "cap", generation: "g", epoch: 2 };
+        return {
+          bindingID: "b1",
+          capability: "cap",
+          generation: "g",
+          epoch: 2,
+          catalogDigest: "a".repeat(64),
+          ownerLeaseMs: 30_000,
+        };
       }
       if (method === "pending") return { calls: [], settled: [] };
       if (method === "claim") return {};
@@ -64,9 +86,15 @@ describe("bb tools RPC client", () => {
       return {};
     };
     const client = createBbToolsClient(rpc);
-    await expect(client.status("cap")).resolves.toEqual({ bound: true, generation: "g", epoch: 2 });
+    await expect(client.status("cap")).resolves.toMatchObject({ bound: true, generation: "g", epoch: 2 });
     await expect(
-      client.attach({ sessionID: "ses", disallowedTools: [], tools: [] }),
+      client.attach({
+        sessionID: "ses",
+        bbThreadId: "thread_1",
+        disallowedTools: [],
+        tools: [{ name: "bb_echo", description: "Echo.", inputSchema: { type: "object" } }],
+        takeover: { capability: "cap_old" },
+      }),
     ).resolves.toMatchObject({ capability: "cap" });
     await expect(client.pending({ capability: "cap", acknowledged: [] })).resolves.toEqual({
       calls: [],

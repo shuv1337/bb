@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -796,6 +796,59 @@ it("persists owners atomically and forgets them on thread/discard", async () => 
   expect(readdirSync(dataDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 });
 
+it("persists the companion capability at mode 0600 for takeover", async () => {
+  const dataDir = tempDir("bb-opencode-owners-");
+  const fake = createFakeOpenCodeRuntime();
+  const digest = "e".repeat(64);
+  await useHarness({
+    fake,
+    dataDir,
+    wrapRuntime: (runtime) => ({
+      ...runtime,
+      createSession: async (input) => {
+        const handle = await runtime.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+            if (method === "status") {
+              return { bound: true, generation: "g", epoch: 1, catalogDigest: digest, leaseExpiresAt: 1 };
+            }
+            if (method === "attach") {
+              return {
+                bindingID: "b1",
+                capability: "cap-secret",
+                generation: "g",
+                epoch: 1,
+                catalogDigest: digest,
+                ownerLeaseMs: 30_000,
+              };
+            }
+            if (method === "pending") return { calls: [], settled: [] };
+            if (method === "configure" || method === "detach") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const started = await harness.startThread("thr_capability", {
+    dynamicTools: [{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }],
+  });
+  expect(started.error).toBeUndefined();
+  const ownersFile = join(dataDir, "opencode-session-owners.json");
+  await harness.waitFor(() => {
+    try {
+      return readFileSync(ownersFile, "utf8").includes("cap-secret");
+    } catch {
+      return false;
+    }
+  }, "capability write");
+  expect(statSync(ownersFile).mode & 0o777).toBe(0o600);
+  const parsed = JSON.parse(readFileSync(ownersFile, "utf8")) as Record<string, { capability?: string }>;
+  expect(Object.values(parsed).some((record) => record.capability === "cap-secret")).toBe(true);
+});
+
 it("keeps thread/start working when the owners file cannot be written", async () => {
   const parent = tempDir("bb-opencode-owners-");
   const blocked = join(parent, "not-a-dir");
@@ -1407,13 +1460,21 @@ it("serializes concurrent turn/start checks into one companion attach", async ()
             }
             if (method === "status") {
               return bound
-                ? { bound: true, generation, epoch: 1 }
+                ? { bound: true, generation, epoch: 1, catalogDigest: "a".repeat(64), leaseExpiresAt: 1 }
                 : { bound: false, generation };
             }
             if (method === "attach") {
+              const attached = {
+                bindingID: "b1",
+                capability: "cap-1",
+                generation,
+                epoch: 1,
+                catalogDigest: "a".repeat(64),
+                ownerLeaseMs: 30_000,
+              };
               if (!armed) {
                 bound = true;
-                return { bindingID: "b1", capability: "cap-1", generation, epoch: 1 };
+                return attached;
               }
               turnAttaches += 1;
               inFlight += 1;
@@ -1421,7 +1482,7 @@ it("serializes concurrent turn/start checks into one companion attach", async ()
               if (turnAttaches === 1) await firstAttach;
               bound = true;
               inFlight -= 1;
-              return { bindingID: "b1", capability: "cap-1", generation, epoch: 1 };
+              return attached;
             }
             if (method === "configure" || method === "detach" || method === "reject") return {};
             return handle.rpc(rpcID, method, payload);

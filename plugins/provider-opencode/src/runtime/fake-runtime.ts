@@ -483,6 +483,7 @@ export function createFakeOpenCodeRuntime(
         appId: options.appId ?? "opencode",
       };
     },
+    listPlugins: async () => [],
     health: async () => healthSnapshot,
     models: async () => options.models ?? [],
     agents: async (): Promise<OpenCodeAgentCatalog> => {
