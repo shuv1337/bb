@@ -358,6 +358,7 @@ export function createFakeOpenCodeRuntime(
         session.info = {
           ...session.info,
           title: patch.title ?? session.info.title,
+          metadata: patch.metadata === undefined ? session.info.metadata : patch.metadata,
         };
       },
       fork: async (checkpointMessageId) => {

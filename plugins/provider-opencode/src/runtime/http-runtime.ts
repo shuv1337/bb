@@ -8,6 +8,7 @@ import {
 } from "./agents.js";
 import { messageFrom, sessionInfoFrom } from "./context.js";
 import {
+  basicAuthHeader,
   discoveryDepsFrom,
   registrationStillLive,
   resolveAttachedRegistration,
@@ -447,6 +448,42 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     );
   }
 
+  private async patchSession(
+    sessionID: string,
+    patch: {
+      title?: string;
+      permissions?: Array<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }>;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    const registration = this.registration;
+    if (registration === null) {
+      throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
+    }
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (registration.password !== undefined) {
+      headers.authorization = basicAuthHeader(registration.password);
+    }
+    const response = await this.fetchImpl(
+      new URL(`/api/session/${encodeURIComponent(sessionID)}`, registration.url),
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          ...(patch.title !== undefined ? { title: patch.title } : {}),
+          ...(patch.permissions !== undefined ? { permissions: patch.permissions } : {}),
+          ...(patch.metadata !== undefined ? { metadata: patch.metadata } : {}),
+        }),
+      },
+    );
+    if (response.ok) {
+      await response.body?.cancel()?.catch(() => undefined);
+      return;
+    }
+    const text = await response.text();
+    throw new Error(`OpenCode session update failed: ${response.status} ${text}`);
+  }
+
   private handle(info: { id: string; location: OpenCodeLocation }): SessionHandle {
     const runtime = this;
     const id = info.id;
@@ -519,6 +556,10 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
         }),
       update: (patch) =>
         run(async (client) => {
+          if (patch.metadata !== undefined) {
+            await runtime.patchSession(id, patch);
+            return;
+          }
           await client.session.update({
             sessionID: id,
             title: patch.title,

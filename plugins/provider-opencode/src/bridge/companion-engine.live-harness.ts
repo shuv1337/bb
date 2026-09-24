@@ -25,9 +25,13 @@ const CLIENT_TURN_REQUEST_ALPHABET = "23456789abcdefghijkmnpqrstuvwxyz";
 const CLIENT_TURN_REQUEST_SUFFIX_LENGTH = 10;
 
 export type ModelRequest = {
-  tools?: Array<{ function?: { name?: string } }>;
+  tools?: Array<{
+    function?: { name?: string; description?: string; parameters?: Record<string, unknown> };
+  }>;
   messages: Array<{ role: string; content?: unknown; tool_call_id?: string }>;
 };
+
+export type ScriptResponder = (req: ModelRequest) => ScriptStep | undefined;
 
 export type ScriptStep =
   | { kind: "tool"; name: string; args: Record<string, unknown> }
@@ -39,6 +43,7 @@ export interface MockModel {
   allRequests: ModelRequest[];
   onRequest: Array<(req: ModelRequest) => void>;
   script: ScriptStep[];
+  respond?: ScriptResponder;
   close(): Promise<void>;
 }
 
@@ -60,6 +65,7 @@ export async function startMockModel(options: StartMockModelOptions = {}): Promi
   const onRequest: Array<(req: ModelRequest) => void> = [];
   if (options.onRequest !== undefined) onRequest.push(options.onRequest);
   const script: ScriptStep[] = [];
+  let respond: ScriptResponder | undefined;
   let callSerial = 0;
   const server: Server = createServer((req, res) => {
     let body = "";
@@ -88,7 +94,8 @@ export async function startMockModel(options: StartMockModelOptions = {}): Promi
         return;
       }
       requests.push(parsed);
-      const step = script.shift() ?? { kind: "text", text: "done" };
+      const stepped = respond?.(parsed);
+      const step = stepped ?? script.shift() ?? { kind: "text", text: "done" };
       if (step.kind === "text") {
         res.end(
           sse([
@@ -137,6 +144,12 @@ export async function startMockModel(options: StartMockModelOptions = {}): Promi
     allRequests,
     onRequest,
     script,
+    get respond() {
+      return respond;
+    },
+    set respond(value: ScriptResponder | undefined) {
+      respond = value;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -170,7 +183,11 @@ function engineEnv(root: string): NodeJS.ProcessEnv {
   };
 }
 
-export function prepareEngineRoot(model: MockModel, plugins: string[]): { root: string; workspace: string } {
+export function prepareEngineRoot(
+  model: MockModel,
+  plugins: string[],
+  modelInput: string[] = ["text"],
+): { root: string; workspace: string } {
   const root = mkdtempSync(join(tmpdir(), "bb-oc-live-"));
   const workspace = join(root, "work");
   mkdirSync(workspace, { recursive: true });
@@ -190,7 +207,7 @@ export function prepareEngineRoot(model: MockModel, plugins: string[]): { root: 
           models: {
             scripted: {
               name: "Scripted",
-              capabilities: { tools: true, input: ["text"], output: ["text"] },
+              capabilities: { tools: true, input: modelInput, output: ["text"] },
               cost: { input: 0, output: 0 },
               limit: { context: 100000, output: 10000 },
             },
@@ -478,12 +495,15 @@ export function subscribeEngineEvents(engine: Engine): EngineEventSubscription {
 export interface StartThreadOptions {
   dynamicTools?: readonly DynamicTool[];
   cwd?: string;
+  disallowedTools?: readonly string[];
+  options?: BridgeJsonRpcObject;
 }
 
 export interface LiveContextOptions {
   plugins?: (companionDir: string) => string[];
   env?: NodeJS.ProcessEnv;
   prepare?: (prepared: { root: string; workspace: string }) => void | Promise<void>;
+  modelInput?: string[];
 }
 
 export interface LiveContext {
@@ -491,7 +511,21 @@ export interface LiveContext {
   readonly engine: Engine;
   readonly live: LiveBridge;
   startThread(threadId: string, opts?: StartThreadOptions): Promise<string>;
-  startTurn(threadId: string, providerThreadId: string, text: string): Promise<void>;
+  startTurn(
+    threadId: string,
+    providerThreadId: string,
+    text: string,
+    options?: BridgeJsonRpcObject,
+    disallowedTools?: readonly string[],
+  ): Promise<void>;
+  steerTurn(
+    threadId: string,
+    providerThreadId: string,
+    expectedTurnId: string,
+    text: string,
+    disallowedTools?: readonly string[],
+  ): Promise<void>;
+  forkThread(threadId: string, sourceProviderThreadId: string, opts?: StartThreadOptions): Promise<string>;
   request(
     method: string,
     params: BridgeJsonRpcObject,
@@ -511,6 +545,7 @@ function clientRequestIdFor(value: number): string {
 
 export function createLiveContext(options: LiveContextOptions = {}): LiveContext {
   const resolvePlugins = options.plugins ?? ((dir: string) => [dir]);
+  const modelInput = options.modelInput ?? ["text"];
   let model: MockModel | undefined;
   let engine: Engine | undefined;
   let live: LiveBridge | undefined;
@@ -518,7 +553,7 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
 
   beforeEach(async () => {
     model = await startMockModel();
-    const prepared = prepareEngineRoot(model, resolvePlugins(companionDir));
+    const prepared = prepareEngineRoot(model, resolvePlugins(companionDir), modelInput);
     await options.prepare?.(prepared);
     engine = await startEngine(prepared.root, prepared.workspace, options.env);
     await waitForCompanion(engine);
@@ -562,15 +597,16 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
         threadId,
         cwd: opts?.cwd ?? started.engine.workspace,
         instructionMode: "append",
-        options: FULL_PERMISSION_OPTIONS,
+        options: opts?.options ?? FULL_PERMISSION_OPTIONS,
         dynamicTools: opts?.dynamicTools ?? [echoTool],
-      } as BridgeJsonRpcObject);
+        ...(opts?.disallowedTools !== undefined ? { disallowedTools: [...opts.disallowedTools] } : {}),
+      } as unknown as BridgeJsonRpcObject);
       const response = await started.live.rpc.waitForResponse(id);
       expect(response.error).toBeUndefined();
       const result = response.result as { providerThreadId: string };
       return result.providerThreadId;
     },
-    async startTurn(threadId, providerThreadId, text) {
+    async startTurn(threadId, providerThreadId, text, options, disallowedTools) {
       const started = requireStarted();
       requestId += 1;
       const id = requestId;
@@ -579,10 +615,45 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
         providerThreadId,
         input: [{ type: "text", text, mentions: [] }],
         clientRequestId: clientRequestIdFor(id),
-        options: FULL_PERMISSION_OPTIONS,
+        options: options ?? FULL_PERMISSION_OPTIONS,
+        ...(disallowedTools !== undefined ? { disallowedTools: [...disallowedTools] } : {}),
       });
       const response = await started.live.rpc.waitForResponse(id);
       expect(response.error).toBeUndefined();
+    },
+    async steerTurn(threadId, providerThreadId, expectedTurnId, text, disallowedTools) {
+      const started = requireStarted();
+      requestId += 1;
+      const id = requestId;
+      started.live.rpc.sendRequest(id, "turn/steer", {
+        threadId,
+        providerThreadId,
+        expectedTurnId,
+        input: [{ type: "text", text, mentions: [] }],
+        clientRequestId: clientRequestIdFor(id),
+        options: FULL_PERMISSION_OPTIONS,
+        ...(disallowedTools !== undefined ? { disallowedTools: [...disallowedTools] } : {}),
+      });
+      const response = await started.live.rpc.waitForResponse(id);
+      expect(response.error).toBeUndefined();
+    },
+    async forkThread(threadId, sourceProviderThreadId, opts) {
+      const started = requireStarted();
+      requestId += 1;
+      const id = requestId;
+      started.live.rpc.sendRequest(id, "thread/fork", {
+        threadId,
+        cwd: opts?.cwd ?? started.engine.workspace,
+        sourceProviderThreadId,
+        instructionMode: "append",
+        options: opts?.options ?? FULL_PERMISSION_OPTIONS,
+        dynamicTools: opts?.dynamicTools ?? [echoTool],
+        ...(opts?.disallowedTools !== undefined ? { disallowedTools: [...opts.disallowedTools] } : {}),
+      } as unknown as BridgeJsonRpcObject);
+      const response = await started.live.rpc.waitForResponse(id);
+      expect(response.error).toBeUndefined();
+      const result = response.result as { providerThreadId: string };
+      return result.providerThreadId;
     },
     async request(method, params) {
       const started = requireStarted();

@@ -1,0 +1,44 @@
+# 0b results — track B (ownership, catalogs, children, results)
+
+Passed on Shuvcode 2.0.15-shuv.1 and stock `@opencode/cli@2.0.15`. Live file: `plugins/provider-opencode/src/bridge/companion-ownership.live.test.ts`. Companion: `src/server.ts` on `spike-0b-track-b`.
+
+- **Two same-directory catalogs:** two roots in one workspace, both advertising canonical `bb_lookup`. Root A’s model request schema is `{ properties: { id: string }, required: ["id"] }`; root B’s is `{ properties: { query: string, limit: number }, required: ["query", "limit"] }`. Neither request lists `bbt_*`. Reverse `item/tool/call` for A is `{ threadId: "thread-catalog-a", tool: "bb_lookup", arguments: { id: "alpha" } }` on A’s `providerThreadId`; B is `{ threadId: "thread-catalog-b", arguments: { query: "beta", limit: 2 } }` on B’s id. Same on both engines.
+- **Unrelated session denial:** a session created with `POST /api/session` in the same directory advertises only native tools (`edit`, `glob`, `grep`, `question`, `read`, `shell`, `skill`, `subagent`, `webfetch`, `websearch`, `write`, `execute`). A scripted `bb_echo` fails with `No tool named "bb_echo" is currently available`. A scripted `bbt_b1_0` fails with `Tool is not available for this request: bbt_b1_0` (session.context already removed it from that request’s definitions, so the engine never enters the companion executor). No reverse `item/tool/call`. Same on both engines.
+- **Imported `parentID`:** `POST /api/experimental/session/import` with `parentID` set to the bound root persists that parent (`GET` info `parentID` equals the root). Its model request has the same native-only tool list. A scripted `bb_echo` does not reach bb. Same on both engines.
+- **Native child via `subagent`:** mechanism is a companion wrap of the built-in `subagent` tool’s `execute` (`editor.update("subagent")` in the companion transform, which runs after the internal subagent plugin). The wrapper replaces `context.progress`. `subagent.ts` calls `progress({ sessionID: child.id, status: "running" })` before `sessions.prompt`, so the child id is recorded in that progress call, before the original progress effect returns and before the child is prompted. The record is kept only when the call’s first `execute.before` name is `subagent` with count 1 (direct origin) and the parent session is already authorized. The child’s model request lists canonical `bb_echo` and no `bbt_*`. The reverse call (both engines) is exactly:
+
+  ```json
+  {
+    "providerThreadId": "<root native session>",
+    "threadId": "<bb thread id>",
+    "turnId": "exec:<root>:4",
+    "callId": "call_live_2",
+    "tool": "bb_echo",
+    "arguments": { "text": "child-hello" },
+    "providerNativeIds": true,
+    "nativeSessionID": "<child session>",
+    "nativeMessageID": "<child assistant message>"
+  }
+  ```
+
+  `providerThreadId` is the root, not the child. `turnId` is the root `turn.open` `providerTurnId` (`exec:<root>:4`), captured when the companion was told the turn opened, not at forward time. The reverse call does not carry `nativeSessionID` or `nativeMessageID`. Child session/message identity stays on the companion pending record the bridge already holds; nested-row `parentRef` correlation is milestone 3 work. Control wakeup uses the binding root `sessionID`. A resumed `subagent` call that passes `sessionID` (including an imported session whose `parentID` is the root) is not recorded: the imported session’s model request has no bb tools, and `bb_echo` fails with `No tool named "bb_echo" is currently available`. Nothing reaches bb.
+- **Owning turn:** the bridge calls companion `turn` with `state: "open"` and the root `turn.open` id when that delta is translated, and `closeCompanionTurn(session, turnId)` with `state: "closed"` before publishing a root `turn.boundary`. Every call, root or descendant, is stamped with the owning turn open for its chain (`inheritedOwningTurn`: a nested child keeps its ancestor’s turn, not a later open turn). The companion rejects before pending if that turn is closed. The bridge dispatches with the stamped id and, if it is not the live turn, settles the companion call locally and does not send `item/tool/call`. A background child call after the owning turn ends, and the same call after a new root turn has opened and closed, both return `bb turn ended; bb tools are unavailable to background subagents after their owning turn` and add no reverse call. `closeCompanionTurn` bounds the RPC at 2s and fail-closes: an unconfirmed close marks the binding stale, detaches it, and `turn/start` / `turn/steer` reattach from retained descriptors before the next prompt, so the old generation’s descendants lose authority. Grandchild inheritance is the same function; a live grandchild was not scripted because default `experimental.subagent_depth` is 1 and `general`/`explore` deny nested `subagent`. Unit evidence: `src/ownership.test.ts` (grandchild inherits `exec:root:1`, not a later open turn).
+- **Native fork and bb fork:** `POST /api/session/:id/fork` returns a session whose HTTP info omits `parentID` (DB `parent_id` is null) and copies `metadata.bbThreadId` from the source. Its model request has no `bb_echo` and no `bbt_*`, and the turn completes (`native fork done` is persisted). It is not blocked. Bridge `thread/fork` attaches a fresh catalog (`bb_forked`, not `bb_echo`) and merge-updates metadata to the new bb thread id. Observed `metadata` is `{ "bbThreadId": "thread-fork-bb" }`. The installed `@opencode/client@2.0.10` `session.update` drops `metadata`, so the runtime sends the merge as a raw `PATCH /api/session/:id`. Both 2.0.15 engines accept it.
+- **Canonical deny and plan:** `disallowedTools: ["bb_echo"]` becomes a native `{ action: "bb_echo", resource: "*", effect: "deny" }` rule. The model request does not list `bb_echo` or `bbt_*`, and a scripted call does not reach bb. The same list is stored on the companion binding at attach and pushed again on `turn/start` / `turn/steer` when those passthrough params include `disallowedTools` (the wire field lives on session construction; turn methods are passthrough, and the bridge reads it there). After a child exists, a steer that sets `disallowedTools: ["bb_echo"]` makes the child’s later `bb_echo` fail with `bb_echo is denied for this bb thread` and adds no reverse call. The native `plan` agent still advertises `bb_echo`. It also still advertises `edit`. That is pre-existing: `sessionRulesForPermissionMode("full")` in `plugins/provider-opencode/src/permissions.ts` is a wildcard allow, merged after the plan agent’s deny-edit rule. Out of scope.
+- **Successful image:** on the continuation request, the tool message whose content is `caption` is immediately followed by a user message `[{ "type": "image_url", "image_url": { "url": "<the same data:image/png URI>" } }]`. Identical on both engines. OpenAI Chat lowering splits file parts out of the tool result. The mock model’s input capabilities included `image`.
+- **>50 KiB:** a 120 KiB (`122880` byte) text success is the entire tool-message content. No `truncated` marker and no `saved to` path. Companion success results set `metadata.truncated: false`, which `toolOutput.truncate` treats as already decided. Same on both engines.
+- **Auxiliary hooks:** `POST /api/session/:id/generate` is the generate hook, not title. `POST /api/session/:id/compact` is waited through to a completed compaction (`context.compacted` or a session message `{ type: "compaction", status: "completed" }`; the mock must return a `## Objective` summary or the engine fails the template). Only that generate request and the requests that arrived during compact are inspected. They list no `bb_echo` and no `bbt_*`. Same on both engines.
+
+## Findings / deviations from plan
+
+- Nested-row `parentRef` correlation of child tool calls is not on the reverse `item/tool/call`. The bridge keeps `sessionID` / `messageID` on the pending record only. Milestone 3 work.
+- Plan mode plus `permissionMode: "full"` advertising `edit` is pre-existing (`permissions.ts` full-mode wildcard allow). Out of scope.
+- Native fork HTTP info omits `parentID` rather than sending `null`.
+- An unauthorized `bbt_*` call fails in the engine as “not available for this request” and never enters the companion executor, because `session.context` already deleted the internal name.
+
+## Spike shortcuts left
+
+- `closeCompanionTurn` is called from the root-session translator path already touched here. Other boundary sources (resync, stream failure, stop, replacement) should call the same helper when those paths are merged.
+- Companion executor does not re-check a live `disallowedTools` list; canonical deny is the native permission rule on `options.permission`.
+- Descendant authorization is in-memory for the Location lifetime.
+- `metadata` update bypasses `@opencode/client@2.0.10` with a raw PATCH.

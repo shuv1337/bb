@@ -1423,6 +1423,7 @@ it("serializes concurrent turn/start checks into one companion attach", async ()
               inFlight -= 1;
               return { bindingID: "b1", capability: "cap-1", generation };
             }
+            if (method === "turn" || method === "detach") return {};
             return handle.rpc(rpcID, method, payload);
           },
         };
