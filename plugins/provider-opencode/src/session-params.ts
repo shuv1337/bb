@@ -29,6 +29,7 @@ const providerOptionsSchema = z
     agent: z.string().min(1).nullable().optional(),
     persistApprovals: z.boolean().optional(),
     variant: z.string().min(1).nullable().optional(),
+    bbToolsRequired: z.boolean().optional(),
   })
   .passthrough();
 
@@ -36,6 +37,7 @@ export type OpenCodeProviderOptions = {
   agent: string | null;
   persistApprovals: boolean;
   variant: string | null;
+  bbToolsRequired: boolean;
 };
 
 export class OpenCodeUnknownVariantError extends Error {
@@ -50,7 +52,12 @@ export function parseOpenCodeProviderOptions(
 ): OpenCodeProviderOptions {
   const parsed = providerOptionsSchema.safeParse(value ?? {});
   if (!parsed.success) {
-    return { agent: null, persistApprovals: false, variant: null };
+    return {
+      agent: null,
+      persistApprovals: false,
+      variant: null,
+      bbToolsRequired: false,
+    };
   }
   return {
     agent: parsed.data.agent === undefined ? null : parsed.data.agent,
@@ -59,6 +66,7 @@ export function parseOpenCodeProviderOptions(
       parsed.data.variant === undefined || parsed.data.variant === null
         ? null
         : parsed.data.variant,
+    bbToolsRequired: parsed.data.bbToolsRequired === true,
   };
 }
 
@@ -176,6 +184,7 @@ export interface AppliedSessionKnobs {
   permissions: OpenCodePermissionRule[];
   env: Record<string, string>;
   persistApprovals: boolean;
+  bbToolsRequired: boolean;
   instructions: { mode: "append"; text: string } | null;
 }
 
@@ -208,6 +217,7 @@ export function knobsFromExecution(args: {
       envVars: args.options.envVars,
     }),
     persistApprovals: providerOptions.persistApprovals,
+    bbToolsRequired: providerOptions.bbToolsRequired,
     instructions:
       trimmed === undefined || trimmed.length === 0
         ? null

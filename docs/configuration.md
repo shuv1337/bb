@@ -570,6 +570,24 @@ These settings travel as `providerOptions.agent` and
 `providerOptions.variant`. Deleting a bb thread does not remove the OpenCode
 session.
 
+Native bb tools need the separate OpenCode plugin `opencode-bb-tools`
+(https://github.com/shuv1337/opencode-bb-tools). Install it on the engine host
+with `opencode plugin add opencode-bb-tools` or
+`shuvcode plugin add opencode-bb-tools`. The first writes stock OpenCode config
+(`~/.config/opencode`); the second writes Shuvcode config
+(`~/.config/shuvcode`). bb does not install it.
+`bb opencode tools status --machine <id> [--json]` reads companion status from
+`hello` and the engine plugin list, including `OPENCODE_SERVER_URL` mode.
+JSON `state` is `absent` (only an unavailable companion RPC), `unreachable`
+(transport, auth, or an engine that is not ready), `incompatible` (hello does
+not match, or the protocol range does not overlap), or `ready`. Only `absent`
+is shown as not installed, with an install command. The other states show
+their own message and do not use the install command.
+`bb plugin config provider-opencode set bbToolsRequired true` (default false)
+is a global plugin setting. bb settings are not per-machine. Absent companion
+and required fails the turn with the setup error. Off keeps native-only threads
+and a setup warning. An incompatible companion fails the turn either way.
+
 While a v2 service is up, the composer prefers that workspace's
 `GET /api/skill` and `GET /api/command` catalogs. Command entries have names,
 not paths, so bb writes them as markdown under the plugin's data directory
