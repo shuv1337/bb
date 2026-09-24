@@ -64,3 +64,76 @@ it("passes the canonical protocol suite against a scripted OpenCode runtime", as
     report.results.filter((result) => result.status !== "pass").map((result) => result.id),
   ).toEqual([]);
 }, 60_000);
+
+it("turn-tools recordings include a bb tool row with its presentation and failure", async () => {
+  const started = await harness.startThread("thr_bb_tools", {
+    dynamicTools: [
+      {
+        name: "bb_echo",
+        description: "Echo text back through bb.",
+        inputSchema: { type: "object" },
+        presentation: {
+          label: { pending: "Echoing", completed: "Echoed" },
+          icon: { glyph: "Workflow" },
+          suppress: true,
+        },
+      },
+    ],
+  });
+  const result = started.result;
+  if (result === null || typeof result !== "object" || !("providerThreadId" in result)) {
+    throw new Error("missing providerThreadId");
+  }
+  const sessionId = String(result.providerThreadId);
+  const events = [
+    { type: "session.execution.started", data: { sessionID: sessionId }, durable: { seq: 1 } },
+    {
+      type: "session.tool.input.started",
+      data: { sessionID: sessionId, id: "call_bb", name: "bb_echo" },
+      durable: { seq: 2 },
+    },
+    {
+      type: "session.tool.called",
+      data: { sessionID: sessionId, id: "call_bb", input: { text: "hi" }, executed: true },
+      durable: { seq: 3 },
+    },
+    {
+      type: "session.tool.failed",
+      data: {
+        sessionID: sessionId,
+        id: "call_bb",
+        error: { type: "tool.execution", message: "bb tool failed" },
+        executed: false,
+      },
+      durable: { seq: 4, version: 2 },
+    },
+  ];
+  for (const event of events) {
+    await harness.fake.play(event);
+    await harness.rpc.flushWork();
+  }
+  const rows = harness.deltasOf("thr_bb_tools").filter((delta) => {
+    const item = delta.item;
+    return (
+      (delta.kind === "item.open" || delta.kind === "item.close") &&
+      item !== null &&
+      typeof item === "object" &&
+      "tool" in item &&
+      item.tool === "bb_echo"
+    );
+  });
+  expect(rows.map((delta) => delta.kind)).toEqual(["item.open", "item.close"]);
+  expect(rows[0]).toMatchObject({
+    item: { type: "tool", server: "bb", tool: "bb_echo" },
+    presentation: {
+      label: { pending: "Echoing", completed: "Echoed" },
+      icon: { glyph: "Workflow" },
+      suppress: true,
+    },
+  });
+  expect(rows[1]).toMatchObject({
+    status: "failed",
+    resultText: "bb tool failed",
+    item: { server: "bb", tool: "bb_echo", error: "bb tool failed" },
+  });
+});

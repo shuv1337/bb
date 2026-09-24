@@ -1,0 +1,54 @@
+[
+  {
+    "id": "EVT_FAIL_1",
+    "created": 1790284135005,
+    "type": "session.tool.failed",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_1",
+      "id": "call_1",
+      "error": {
+        "type": "tool.execution",
+        "message": "first failure block"
+      },
+      "metadata": {
+        "bb": {
+          "failed": true,
+          "omittedImages": 0
+        }
+      },
+      "executed": false
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 12,
+      "version": 2
+    }
+  },
+  {
+    "id": "EVT_FAIL_2",
+    "created": 1790284171296,
+    "type": "session.tool.failed",
+    "location": {
+      "directory": "<WORKSPACE>"
+    },
+    "data": {
+      "sessionID": "SES_1",
+      "assistantMessageID": "MSG_2",
+      "id": "call_2",
+      "error": {
+        "type": "aborted",
+        "message": "Tool execution interrupted"
+      },
+      "executed": false
+    },
+    "durable": {
+      "aggregateID": "SES_1",
+      "seq": 12,
+      "version": 2
+    }
+  }
+]

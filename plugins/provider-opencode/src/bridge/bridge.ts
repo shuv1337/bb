@@ -42,7 +42,7 @@ import {
 import { toAvailableModels } from "../models.js";
 import { disallowedToolRules } from "../permissions.js";
 import { OPENCODE_SIGN_IN_HINT } from "../strings.js";
-import { createOpenCodeDeltaTranslator } from "../delta-translation.js";
+import { createOpenCodeDeltaTranslator, nativeTerminalsFromEvents } from "../delta-translation.js";
 import {
   openCodeFormPage,
   openCodeFormPageAnswer,
@@ -200,6 +200,9 @@ interface ThreadSession {
   }>;
   dispatches: Set<InFlightDispatch>;
   tools: BbToolSession;
+  bbTools: readonly DynamicTool[] | undefined;
+  activityRetryUsed: boolean;
+  activityRetryTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface InFlightDispatch {
@@ -1036,6 +1039,58 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sendDeltas(session.threadId, outgoing, true);
   }
 
+  const ACTIVITY_RETRY_MS = 250;
+
+  function scheduleActivityRetry(session: ThreadSession, sessionID: string): void {
+    if (session.activityRetryUsed || session.closed) return;
+    session.activityRetryUsed = true;
+    const timer = setTimeout(() => {
+      session.activityRetryTimer = undefined;
+      void enqueue(session, async () => {
+        if (session.closed) return;
+        const handle =
+          sessionID === session.handle.id ? session.handle : session.childHandles.get(sessionID);
+        const messages = await handle?.context().catch(() => []);
+        await session.tools.reconcileUnlessOpen(sessionID, messages ?? []);
+      });
+    }, ACTIVITY_RETRY_MS);
+    timer.unref?.();
+    session.activityRetryTimer = timer;
+  }
+
+  async function noteTerminals(session: ThreadSession, sessionID: string): Promise<void> {
+    const handle =
+      sessionID === session.handle.id ? session.handle : session.childHandles.get(sessionID);
+    if (handle === undefined) {
+      translator.noteNativeTerminals(sessionID, nativeTerminalsFromEvents([], false));
+      translator.noteSessionLiveness(sessionID, undefined);
+      return;
+    }
+    try {
+      const read = await handle.durableLog();
+      translator.noteNativeTerminals(
+        sessionID,
+        nativeTerminalsFromEvents(read.events, read.complete),
+      );
+    } catch (error) {
+      warn(
+        `could not read OpenCode session log for ${session.threadId}: ${failureMessage(error)}`,
+      );
+      translator.noteNativeTerminals(sessionID, nativeTerminalsFromEvents([], false));
+    }
+    try {
+      const live = await handle.activity();
+      translator.noteSessionLiveness(sessionID, live);
+      session.activityRetryUsed = false;
+    } catch (error) {
+      warn(
+        `could not read OpenCode session activity for ${session.threadId}: ${failureMessage(error)}`,
+      );
+      translator.noteSessionLiveness(sessionID, undefined);
+      scheduleActivityRetry(session, sessionID);
+    }
+  }
+
   function toolHost(session: ThreadSession): BbToolHost {
     return {
       get threadId() {
@@ -1075,6 +1130,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       emitTurnDeltas: (deltas) => emitTurnDeltas(session, deltas),
       settleTurn: (outcome) => translator.settleTurn(session.handle.id, outcome),
       reconcileAfterResync: (sessionID, messages) => translator.reconcileAfterResync(sessionID, messages),
+      noteBbCatalog(bindingID) {
+        const tools = session.bbTools;
+        if (tools === undefined) return;
+        translator.configureInjectedTools(session.handle.id, tools, bindingID);
+      },
+      prepareReconcile: (sessionID) => noteTerminals(session, sessionID),
       takeDeferredResync() {
         const messages = session.deferredResyncMessages;
         session.deferredResyncMessages = undefined;
@@ -1160,6 +1221,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       pendingAccepts: [],
       dispatches: new Set(),
       tools: undefined as unknown as BbToolSession,
+      bbTools: undefined,
+      activityRetryUsed: false,
+      activityRetryTimer: undefined,
     };
     session.tools = toolCalls.bind(toolHost(session));
     sessions.set(threadId, session);
@@ -1173,6 +1237,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     session.closed = true;
+    if (session.activityRetryTimer !== undefined) {
+      clearTimeout(session.activityRetryTimer);
+      session.activityRetryTimer = undefined;
+    }
     clearPendingAccept(session);
     prunePendingInteractions(session.threadId);
     await session.tools.abandon();
@@ -1356,6 +1424,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         await args.handle.update({
           metadata: { ...(info.metadata ?? {}), bbThreadId: args.threadId },
         });
+      }
+      session.bbTools = args.dynamicTools;
+      if (args.dynamicTools !== undefined) {
+        translator.configureInjectedTools(session.handle.id, args.dynamicTools);
       }
       await session.tools.attach(args.dynamicTools, args.toolAttachMode ?? "construct");
       if (args.durableOwner === true) {
@@ -1790,6 +1862,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           break;
         }
         await session.tools.abandon();
+        if (request.params.intent === "release") {
+          await enqueue(session, async () => {
+            await emitTurnDeltas(session, translator.settleUnobserved(session.handle.id));
+          });
+        }
         if (request.params.intent === "interrupt" && hasInterruptibleWork(session, request.params.activeTurnId)) {
           const deadline = Date.now() + interruptSettlementTimeoutMs;
           const remaining = (): number => Math.max(0, deadline - Date.now());

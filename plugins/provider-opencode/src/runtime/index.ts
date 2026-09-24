@@ -23,6 +23,7 @@ export type {
   OpenCodePromptSkill,
   OpenCodeRuntime,
   OpenCodeSessionInfo,
+  OpenCodeSessionLiveness,
   OpenCodeSessionMessage,
   OpenCodeTokenUsage,
   OpenCodeSkill,

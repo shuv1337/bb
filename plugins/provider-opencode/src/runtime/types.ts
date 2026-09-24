@@ -114,6 +114,12 @@ export type OpenCodeSessionInfo = {
   outcome?: "succeeded" | "failed" | "interrupted";
 };
 
+export type OpenCodeSessionLiveness = {
+  outcome: "succeeded" | "failed" | "interrupted" | undefined;
+  idleAt: number | undefined;
+  active: boolean;
+};
+
 export type OpenCodeSessionMessage = {
   id: string;
   type: string;
@@ -234,6 +240,7 @@ export interface SessionHandle {
   readonly id: string;
   readonly location: OpenCodeLocation;
   info(): Promise<OpenCodeSessionInfo>;
+  activity(): Promise<OpenCodeSessionLiveness>;
   prompt(input: OpenCodePromptInput): Promise<void>;
   command(input: OpenCodeCommandInput): Promise<void>;
   compact(): Promise<void>;
