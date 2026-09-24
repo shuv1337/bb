@@ -42,7 +42,7 @@ import {
 import { toAvailableModels } from "../models.js";
 import { disallowedToolRules } from "../permissions.js";
 import { OPENCODE_SIGN_IN_HINT } from "../strings.js";
-import { createOpenCodeDeltaTranslator } from "../delta-translation.js";
+import { createOpenCodeDeltaTranslator, nativeTerminalsFromEvents } from "../delta-translation.js";
 import {
   openCodeFormPage,
   openCodeFormPageAnswer,
@@ -194,6 +194,7 @@ interface ThreadSession {
   }>;
   dispatches: Set<InFlightDispatch>;
   tools: BbToolSession;
+  bbTools: readonly DynamicTool[] | undefined;
 }
 
 interface InFlightDispatch {
@@ -1003,6 +1004,27 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sendDeltas(session.threadId, outgoing, true);
   }
 
+  async function noteTerminals(session: ThreadSession, sessionID: string): Promise<void> {
+    const handle =
+      sessionID === session.handle.id ? session.handle : session.childHandles.get(sessionID);
+    if (handle === undefined) {
+      translator.noteNativeTerminals(sessionID, nativeTerminalsFromEvents([], false));
+      return;
+    }
+    try {
+      const read = await handle.durableLog();
+      translator.noteNativeTerminals(
+        sessionID,
+        nativeTerminalsFromEvents(read.events, read.complete),
+      );
+    } catch (error) {
+      warn(
+        `could not read OpenCode session log for ${session.threadId}: ${failureMessage(error)}`,
+      );
+      translator.noteNativeTerminals(sessionID, nativeTerminalsFromEvents([], false));
+    }
+  }
+
   function toolHost(session: ThreadSession): BbToolHost {
     return {
       get threadId() {
@@ -1035,6 +1057,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       emitTurnDeltas: (deltas) => emitTurnDeltas(session, deltas),
       settleTurn: (outcome) => translator.settleTurn(session.handle.id, outcome),
       reconcileAfterResync: (sessionID, messages) => translator.reconcileAfterResync(sessionID, messages),
+      noteBbCatalog(bindingID) {
+        const tools = session.bbTools;
+        if (tools === undefined) return;
+        translator.configureInjectedTools(session.handle.id, tools, bindingID);
+      },
+      prepareReconcile: (sessionID) => noteTerminals(session, sessionID),
       takeDeferredResync() {
         const messages = session.deferredResyncMessages;
         session.deferredResyncMessages = undefined;
@@ -1119,6 +1147,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       pendingAccepts: [],
       dispatches: new Set(),
       tools: undefined as unknown as BbToolSession,
+      bbTools: undefined,
     };
     session.tools = toolCalls.bind(toolHost(session));
     sessions.set(threadId, session);
@@ -1315,6 +1344,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         await args.handle.update({
           metadata: { ...(info.metadata ?? {}), bbThreadId: args.threadId },
         });
+      }
+      session.bbTools = args.dynamicTools;
+      if (args.dynamicTools !== undefined) {
+        translator.configureInjectedTools(session.handle.id, args.dynamicTools);
       }
       await session.tools.attach(args.dynamicTools, args.toolAttachMode ?? "construct");
       if (args.durableOwner === true) {

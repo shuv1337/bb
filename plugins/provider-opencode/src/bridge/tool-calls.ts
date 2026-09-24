@@ -72,6 +72,8 @@ export interface BbToolHost {
   ): readonly ThreadDelta[];
   takeDeferredResync(): readonly OpenCodeSessionMessage[] | undefined;
   setDeferredResync(messages: readonly OpenCodeSessionMessage[] | undefined): void;
+  noteBbCatalog?(bindingID: string): void;
+  prepareReconcile?(sessionID: string): Promise<void>;
 }
 
 interface BbToolBinding {
@@ -593,8 +595,9 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       await state.host.emitTurnDeltas(state.host.settleTurn("failed"));
       return;
     }
+    await state.host.prepareReconcile?.(state.host.handle.id);
     await state.host.emitTurnDeltas(
-      state.host.reconcileAfterResync(state.host.handle.id, messages ?? []),
+      await Promise.resolve(state.host.reconcileAfterResync(state.host.handle.id, messages ?? [])),
     );
   }
 
@@ -949,6 +952,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
         inputSchema: tool.inputSchema,
       })),
     });
+    state.host.noteBbCatalog?.(output.bindingID);
     return {
       capability: output.capability,
       generation: output.generation,
@@ -1067,7 +1071,8 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
         scheduleDrain(state);
         ensurePoll(state);
       },
-      reconcileUnlessOpen(sessionID, messages) {
+      async reconcileUnlessOpen(sessionID, messages) {
+        await host.prepareReconcile?.(sessionID);
         if (sessionID === host.handle.id && hasOpenCompanionCalls(state)) {
           host.setDeferredResync(messages);
           host.warn(`skipping OpenCode resync reconcile for ${host.threadId}: bb tool call still open`);
