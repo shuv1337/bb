@@ -1,0 +1,39 @@
+{
+  "method": "pending",
+  "case": "ok",
+  "produces": "success",
+  "input": {
+    "capability": "cap",
+    "acknowledged": [
+      "k1"
+    ],
+    "waitMs": 250
+  },
+  "output": {
+    "calls": [
+      {
+        "key": "b1:ses_1:msg_1:call_1",
+        "sessionID": "ses_1",
+        "messageID": "msg_1",
+        "callID": "call_1",
+        "tool": "bb_echo",
+        "arguments": {
+          "text": "hi"
+        },
+        "origin": {
+          "rootSessionID": "ses_1",
+          "rootMessageID": "msg_1"
+        },
+        "state": "pending"
+      }
+    ],
+    "settled": [
+      {
+        "key": "k1",
+        "outcome": "cancelled",
+        "disposition": "uncertain",
+        "reason": "interrupted"
+      }
+    ]
+  }
+}

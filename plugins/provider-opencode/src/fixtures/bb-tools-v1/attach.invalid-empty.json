@@ -1,0 +1,17 @@
+{
+  "case": "invalid-empty",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": []
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools must be a non-empty array",
+    "data": {
+      "reason": "empty",
+      "tools": []
+    }
+  }
+}

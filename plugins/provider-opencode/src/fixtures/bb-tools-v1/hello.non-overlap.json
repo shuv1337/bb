@@ -1,0 +1,44 @@
+{
+  "method": "hello",
+  "case": "non-overlap",
+  "produces": "success",
+  "input": {
+    "client": {
+      "name": "bb",
+      "version": "9"
+    },
+    "protocol": {
+      "min": 2,
+      "max": 2
+    }
+  },
+  "output": {
+    "protocol": "bb.tools.v1",
+    "version": 1,
+    "versions": {
+      "min": 1,
+      "max": 1
+    },
+    "package": {
+      "name": "opencode-bb-tools",
+      "version": "0.1.0"
+    },
+    "install": {
+      "path": "/opt/opencode-bb-tools",
+      "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "generation": "gen",
+    "instances": 2,
+    "features": {
+      "richFailures": false
+    },
+    "limits": {
+      "maxOutstandingCalls": 32,
+      "maxResultBytes": 1048576,
+      "maxToolsPerBinding": 128,
+      "maxBindings": 1024,
+      "ownerLeaseMs": 30000,
+      "maxPendingWaitMs": 5000
+    }
+  }
+}

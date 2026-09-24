@@ -1,0 +1,23 @@
+{
+  "method": "result",
+  "case": "too-large",
+  "produces": "handler-error",
+  "input": {
+    "capability": "cap",
+    "key": "b1:ses_1:msg_1:call_1",
+    "success": true,
+    "contentItems": [
+      {
+        "type": "inputText",
+        "text": "echo: ok"
+      }
+    ]
+  },
+  "error": {
+    "code": "too_large",
+    "message": "bb tool result exceeded the companion limit of 1048576 bytes",
+    "data": {
+      "limit": 1048576
+    }
+  }
+}

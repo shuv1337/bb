@@ -8,6 +8,7 @@ import {
 } from "./agents.js";
 import { messageFrom, sessionInfoFrom } from "./context.js";
 import {
+  basicAuthHeader,
   discoveryDepsFrom,
   registrationStillLive,
   resolveAttachedRegistration,
@@ -25,23 +26,131 @@ import { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
 import { BB_INSTRUCTION_ENTRY_KEY } from "./types.js";
 import type {
   CreateOpenCodeRuntimeOptions,
+  DurableLogRead,
   CreateSessionInput,
   OpenCodeAgent,
   OpenCodeAgentCatalog,
   OpenCodeCommand,
   OpenCodeCommandInput,
   OpenCodeDiscoveryHealth,
+  OpenCodeJsonValue,
   OpenCodeLocation,
   OpenCodeModel,
   OpenCodeModelRef,
   OpenCodeNativeEvent,
   OpenCodePromptInput,
   OpenCodeRuntime,
+  OpenCodeSessionLiveness,
   OpenCodeSessionMessage,
   OpenCodeSkill,
   RuntimeSessionEvent,
   SessionHandle,
 } from "./types.js";
+
+export const DURABLE_LOG_PAGE = 4096;
+export const DURABLE_LOG_MAX_PAGES = 8;
+export const DURABLE_LOG_MAX_EVENTS = DURABLE_LOG_PAGE * 4;
+
+export type DurableLogPage = {
+  events: OpenCodeNativeEvent[];
+  synced: boolean;
+  syncedSeq: number | undefined;
+  truncated: boolean;
+  lastSeq: number | undefined;
+};
+
+export function parseDurableLogPage(raw: string): DurableLogPage {
+  const events: OpenCodeNativeEvent[] = [];
+  let synced = false;
+  let syncedSeq: number | undefined;
+  let truncated = false;
+  for (const block of raw.split(/\r?\n\r?\n/)) {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("");
+    if (data.length === 0) continue;
+    const parsed = JSON.parse(data) as OpenCodeNativeEvent & { seq?: number };
+    if (parsed.type === "log.synced") {
+      synced = true;
+      syncedSeq = typeof parsed.seq === "number" ? parsed.seq : undefined;
+      break;
+    }
+    events.push(parsed);
+    if (events.length >= DURABLE_LOG_PAGE) {
+      truncated = true;
+      break;
+    }
+  }
+  const tail = events.at(-1)?.durable?.seq;
+  return {
+    events,
+    synced,
+    syncedSeq,
+    truncated,
+    lastSeq: typeof tail === "number" ? tail : undefined,
+  };
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+export function sessionLivenessFrom(
+  info: unknown,
+  active: unknown,
+  sessionID: string,
+): OpenCodeSessionLiveness {
+  const infoBody = recordOf(info);
+  const infoData = recordOf(infoBody?.data) ?? infoBody ?? {};
+  const outcome = infoData.outcome;
+  const time = recordOf(infoData.time);
+  const idleAt = time?.idle;
+  const activeBody = recordOf(active);
+  const activeData = recordOf(activeBody?.data) ?? activeBody ?? {};
+  return {
+    outcome:
+      outcome === "succeeded" || outcome === "failed" || outcome === "interrupted"
+        ? outcome
+        : undefined,
+    idleAt: typeof idleAt === "number" ? idleAt : undefined,
+    active: activeData[sessionID] !== undefined,
+  };
+}
+
+export async function collectDurableLog(
+  readPage: (after: number) => Promise<DurableLogPage>,
+): Promise<DurableLogRead> {
+  const events: OpenCodeNativeEvent[] = [];
+  let after = 0;
+  let pages = 0;
+  let jumpedToTail = false;
+  while (pages < DURABLE_LOG_MAX_PAGES && events.length < DURABLE_LOG_MAX_EVENTS) {
+    pages += 1;
+    const page = await readPage(after);
+    if (
+      !jumpedToTail &&
+      after === 0 &&
+      page.synced &&
+      page.events.length === 0 &&
+      page.syncedSeq !== undefined &&
+      page.syncedSeq > DURABLE_LOG_PAGE
+    ) {
+      jumpedToTail = true;
+      after = page.syncedSeq - DURABLE_LOG_PAGE;
+      pages -= 1;
+      continue;
+    }
+    events.push(...page.events);
+    if (page.synced) return { events, complete: events.length > 0 };
+    if (!page.truncated) return { events, complete: true };
+    if (page.lastSeq === undefined || page.lastSeq <= after) return { events, complete: false };
+    after = page.lastSeq;
+  }
+  return { events, complete: false };
+}
 
 type Client = ReturnType<typeof OpenCode.make>;
 
@@ -207,6 +316,16 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
         url: this.registration?.url ?? "",
         appId: this.healthSnapshot.appId,
       };
+    } catch (error) {
+      wrapClientError(error);
+    }
+  }
+
+  async listPlugins(location: OpenCodeLocation): Promise<unknown> {
+    this.assertOpen();
+    const client = this.requireClient();
+    try {
+      return await client.plugin.list({ location });
     } catch (error) {
       wrapClientError(error);
     }
@@ -446,6 +565,91 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     );
   }
 
+  private async readDurableLogPage(sessionID: string, after: number): Promise<DurableLogPage> {
+    const registration = this.registration;
+    if (registration === null) {
+      throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
+    }
+    const headers: Record<string, string> = { accept: "text/event-stream" };
+    if (registration.password !== undefined) {
+      headers.authorization = basicAuthHeader(registration.password);
+    }
+    const url = new URL(`/api/experimental/session/${encodeURIComponent(sessionID)}/log`, registration.url);
+    url.searchParams.set("after", String(after));
+    const response = await this.fetchImpl(url, { headers });
+    if (!response.ok) {
+      throw new Error(`OpenCode session log failed: ${response.status} ${await response.text()}`);
+    }
+    return parseDurableLogPage(await response.text());
+  }
+
+  private readDurableLog(sessionID: string): Promise<DurableLogRead> {
+    return collectDurableLog((after) => this.readDurableLogPage(sessionID, after));
+  }
+
+  private async readSessionLiveness(sessionID: string): Promise<OpenCodeSessionLiveness> {
+    const registration = this.registration;
+    if (registration === null) {
+      throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
+    }
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (registration.password !== undefined) {
+      headers.authorization = basicAuthHeader(registration.password);
+    }
+    const infoResponse = await this.fetchImpl(
+      new URL(`/api/session/${encodeURIComponent(sessionID)}`, registration.url),
+      { headers },
+    );
+    if (!infoResponse.ok) {
+      throw new Error(`OpenCode session info failed: ${infoResponse.status} ${await infoResponse.text()}`);
+    }
+    const activeResponse = await this.fetchImpl(new URL("/api/session/active", registration.url), {
+      headers,
+    });
+    if (!activeResponse.ok) {
+      throw new Error(
+        `OpenCode active sessions failed: ${activeResponse.status} ${await activeResponse.text()}`,
+      );
+    }
+    return sessionLivenessFrom(await infoResponse.json(), await activeResponse.json(), sessionID);
+  }
+
+  private async patchSession(
+    sessionID: string,
+    patch: {
+      title?: string;
+      permissions?: Array<{ action: string; resource: string; effect: "allow" | "deny" | "ask" }>;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    const registration = this.registration;
+    if (registration === null) {
+      throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
+    }
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (registration.password !== undefined) {
+      headers.authorization = basicAuthHeader(registration.password);
+    }
+    const response = await this.fetchImpl(
+      new URL(`/api/session/${encodeURIComponent(sessionID)}`, registration.url),
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          ...(patch.title !== undefined ? { title: patch.title } : {}),
+          ...(patch.permissions !== undefined ? { permissions: patch.permissions } : {}),
+          ...(patch.metadata !== undefined ? { metadata: patch.metadata } : {}),
+        }),
+      },
+    );
+    if (response.ok) {
+      await response.body?.cancel()?.catch(() => undefined);
+      return;
+    }
+    const text = await response.text();
+    throw new Error(`OpenCode session update failed: ${response.status} ${text}`);
+  }
+
   private handle(info: { id: string; location: OpenCodeLocation }): SessionHandle {
     const runtime = this;
     const id = info.id;
@@ -466,6 +670,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
         run(async (client) =>
           sessionInfoFrom(await client.session.get({ sessionID: id }), location),
         ),
+      activity: () => runtime.readSessionLiveness(id),
       prompt: (input: OpenCodePromptInput) =>
         run(async (client) => {
           await client.session.prompt({
@@ -518,12 +723,22 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
         }),
       update: (patch) =>
         run(async (client) => {
+          if (patch.metadata !== undefined) {
+            await runtime.patchSession(id, patch);
+            return;
+          }
           await client.session.update({
             sessionID: id,
             title: patch.title,
             permissions: patch.permissions,
           });
         }),
+      move: async (directory) => {
+        await run(async (client) => {
+          await client.session.move({ sessionID: id, directory });
+        });
+        return runtime.handle({ id, location: { directory } });
+      },
       fork: async (checkpointMessageId) => {
         runtime.assertReady();
         const client = runtime.requireClient();
@@ -556,6 +771,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
             .map(messageFrom)
             .filter((message): message is OpenCodeSessionMessage => message !== null),
         ),
+      durableLog: () => runtime.readDurableLog(id),
       replyPermission: (requestID, reply) =>
         run(async (client) => {
           await client.permission.reply({
@@ -607,6 +823,11 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
           wrapClientError(error);
         }
       },
+      rpc: (rpcID: string, method: string, input: OpenCodeJsonValue) =>
+        run(async (client) => {
+          const response = await client.rpc.call({ rpcID, method, input, location });
+          return response.output;
+        }),
     };
   }
 

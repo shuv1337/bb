@@ -1,0 +1,32 @@
+{
+  "case": "invalid-name",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bad name",
+        "description": "x",
+        "inputSchema": {
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools[0].name is not a valid tool name",
+    "data": {
+      "tool": "bad name",
+      "reason": "name",
+      "tools": [
+        {
+          "tool": "bad name",
+          "reason": "name",
+          "detail": "tools[0].name is not a valid tool name"
+        }
+      ]
+    }
+  }
+}

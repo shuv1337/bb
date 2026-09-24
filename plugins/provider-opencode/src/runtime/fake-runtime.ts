@@ -20,10 +20,12 @@ import type {
   OpenCodeDiscoveryHealth,
   OpenCodeLocation,
   OpenCodeModel,
+  OpenCodeNativeEvent,
   OpenCodePermissionRule,
   OpenCodePromptInput,
   OpenCodeRuntime,
   OpenCodeSessionInfo,
+  OpenCodeSessionLiveness,
   OpenCodeSessionMessage,
   OpenCodeSkill,
   RuntimeSessionEvent,
@@ -60,6 +62,8 @@ export interface FakeOpenCodeCallLog {
   interrupts: number;
   interruptedSessions: string[];
   forks: number;
+  moves: { sessionID: string; directory: string }[];
+  promptDirectories: { sessionID: string; directory: string }[];
   permissions: { sessionID: string; rules: readonly OpenCodePermissionRule[] }[];
   instructions: { sessionID: string; text: string }[];
 }
@@ -89,6 +93,7 @@ export interface FakeOpenCodeRuntime extends OpenCodeRuntime {
   emit(event: Record<string, unknown>): void;
   play(event: Record<string, unknown>): Promise<void>;
   failStream(error: unknown): void;
+  setActivity(sessionID: string, liveness: OpenCodeSessionLiveness | "fail"): void;
   readonly calls: FakeOpenCodeCallLog;
 }
 
@@ -99,6 +104,7 @@ export function createFakeOpenCodeRuntime(
   let closed = false;
   let streamFailure: Error | null = null;
   const sessions = new Map<string, FakeSession>();
+  const activity = new Map<string, OpenCodeSessionLiveness | "fail">();
   let seq = 0;
   const nextId = (prefix: string) => {
     seq += 1;
@@ -118,6 +124,8 @@ export function createFakeOpenCodeRuntime(
     interrupts: 0,
     interruptedSessions: [],
     forks: 0,
+    moves: [],
+    promptDirectories: [],
     permissions: [],
     instructions: [],
   };
@@ -187,7 +195,20 @@ export function createFakeOpenCodeRuntime(
     }
   });
 
+  const durable = new Map<string, OpenCodeNativeEvent[]>();
+  const rememberDurable = (event: Record<string, unknown>): void => {
+    const data = event.data;
+    const sessionID =
+      data !== null && typeof data === "object" && !Array.isArray(data) && typeof (data as { sessionID?: unknown }).sessionID === "string"
+        ? (data as { sessionID: string }).sessionID
+        : undefined;
+    if (sessionID === undefined) return;
+    const list = durable.get(sessionID) ?? [];
+    list.push(event as OpenCodeNativeEvent);
+    durable.set(sessionID, list);
+  };
   const emit = (event: Record<string, unknown>): void => {
+    rememberDurable(event);
     void queueEvent(event);
   };
 
@@ -241,6 +262,7 @@ export function createFakeOpenCodeRuntime(
 
   const handleOf = (session: FakeSession): SessionHandle => {
     const id = session.info.id;
+    const location = session.info.location;
     const assertOpen = () => {
       if (closed) {
         throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is closed");
@@ -248,14 +270,21 @@ export function createFakeOpenCodeRuntime(
     };
     return {
       id,
-      location: session.info.location,
+      location,
       info: async () => {
         assertOpen();
         return session.info;
       },
+      activity: async () => {
+        assertOpen();
+        const next = activity.get(id);
+        if (next === "fail") throw new Error("session activity failed");
+        return next ?? { outcome: undefined, idleAt: undefined, active: true };
+      },
       prompt: async (input: OpenCodePromptInput) => {
         assertOpen();
         calls.prompts.push(input);
+        calls.promptDirectories.push({ sessionID: id, directory: location.directory });
         const messageId = nextId("msg_");
         session.messages.push({
           id: messageId,
@@ -358,7 +387,14 @@ export function createFakeOpenCodeRuntime(
         session.info = {
           ...session.info,
           title: patch.title ?? session.info.title,
+          metadata: patch.metadata === undefined ? session.info.metadata : patch.metadata,
         };
+      },
+      move: async (directory) => {
+        assertOpen();
+        calls.moves.push({ sessionID: id, directory });
+        session.info = { ...session.info, location: { directory } };
+        return handleOf(session);
       },
       fork: async (checkpointMessageId) => {
         assertOpen();
@@ -401,6 +437,10 @@ export function createFakeOpenCodeRuntime(
         assertOpen();
         return session.messages;
       },
+      durableLog: async () => {
+        assertOpen();
+        return { events: durable.get(id) ?? [], complete: true };
+      },
       replyPermission: async (requestID, reply) => {
         assertOpen();
         calls.permissionReplies.push({ requestID, reply });
@@ -415,6 +455,11 @@ export function createFakeOpenCodeRuntime(
       setEnvironment: async (variables) => {
         assertOpen();
         session.environment = { ...variables };
+      },
+      rpc: async (rpcID) => {
+        assertOpen();
+        const message = `RPC is unavailable: ${rpcID}`;
+        throw new Error(message, { cause: { _tag: "RpcError", type: "rpc.unavailable", message } });
       },
       setInstructions: async (input) => {
         assertOpen();
@@ -447,6 +492,7 @@ export function createFakeOpenCodeRuntime(
         appId: options.appId ?? "opencode",
       };
     },
+    listPlugins: async () => [],
     health: async () => healthSnapshot,
     models: async () => options.models ?? [],
     agents: async (): Promise<OpenCodeAgentCatalog> => {
@@ -528,6 +574,9 @@ export function createFakeOpenCodeRuntime(
     },
     emit,
     play: (event) => queueEvent(event),
+    setActivity: (sessionID, liveness) => {
+      activity.set(sessionID, liveness);
+    },
     calls,
     failStream: (error: unknown) => {
       reportStreamFailure(error);

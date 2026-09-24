@@ -7,6 +7,8 @@ import {
 import {
   createOpenCodeDeltaTranslator,
   IGNORED_EVENT_TYPES,
+  nativeTerminalsFromEvents,
+  UNOBSERVED_TOOL_OUTCOME,
   type OpenCodeTranslateContext,
 } from "./delta-translation.js";
 import { opencodeProviderDeclaration } from "./declaration.js";
@@ -18,7 +20,6 @@ const UNRECORDED = [
   "session.reasoning.started",
   "session.reasoning.delta",
   "session.reasoning.ended",
-  "session.tool.failed",
   "session.tool.input.delta",
   "session.idle",
   "form.cancelled",
@@ -85,6 +86,10 @@ describe("delta translation pinned to M0 recordings", () => {
         type: "session.created",
         data: { sessionID: "SES_CHILD", parentID: "SES_1", title: "helper" },
       },
+      "session.tool.failed": recordedEvents(readJson("tool-failed.sanitized.json"))[0] ?? {
+        type: "session.tool.failed",
+        data: { sessionID: "SES_1", id: "call_1" },
+      },
       "session.usage.updated": {
         type: "session.usage.updated",
         data: {
@@ -147,6 +152,7 @@ describe("delta translation pinned to M0 recordings", () => {
         "session.execution.succeeded",
         "session.text.delta",
         "session.tool.called",
+        "session.tool.failed",
         "permission.asked",
         "form.created",
         ...SETTLE_UNTIL_IDLE,
@@ -431,6 +437,485 @@ describe("delta translation turn lifecycle", () => {
     expect(translator.executionTurnId("SES_1")).toEqual(expect.any(String));
     translator.forget("SES_1");
     expect(translator.executionTurnId("SES_1")).toBeUndefined();
+  });
+});
+
+describe("bb tool rows", () => {
+  const presentation = {
+    label: { pending: "Echoing", completed: "Echoed" },
+    icon: { glyph: "Workflow" },
+    tint: { light: "#abc", dark: "#123" },
+    suppress: true,
+  };
+
+  function bbTranslator() {
+    const translator = createOpenCodeDeltaTranslator();
+    translator.configureInjectedTools("SES_1", [{ name: "bb_echo", presentation }], "b1");
+    return translator;
+  }
+
+  function toolRows(deltas: ThreadDelta[]) {
+    return deltas.filter((delta) => delta.kind === "item.open" || delta.kind === "item.close");
+  }
+
+  it("stamps one bb row with the supplied presentation and maps a leaked internal name", () => {
+    const translator = bbTranslator();
+    const deltas = translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_1", name: "bbt_b1_0" },
+        },
+        {
+          type: "session.tool.called",
+          data: { sessionID: "SES_1", id: "call_1", input: { text: "hello" } },
+        },
+        {
+          type: "session.tool.success",
+          data: { sessionID: "SES_1", id: "call_1", content: [{ type: "text", text: "echo: hello" }] },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    const rows = toolRows(deltas);
+    expect(rows.map((delta) => delta.kind)).toEqual(["item.open", "item.close"]);
+    expect(rows[0]).toMatchObject({
+      item: { type: "tool", server: "bb", tool: "bb_echo" },
+      presentation,
+    });
+    expect(rows[1]).toMatchObject({
+      status: "completed",
+      item: { type: "tool", server: "bb", tool: "bb_echo", args: { text: "hello" } },
+      presentation,
+    });
+  });
+
+  it("nests a child bb tool under the child session", () => {
+    const translator = bbTranslator();
+    translator.translate(
+      { type: "session.created", data: { sessionID: "SES_CHILD", parentID: "SES_1", title: "helper" } },
+      CTX,
+    );
+    const deltas = translateAll(
+      [
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_CHILD", id: "call_child", name: "bb_echo" },
+        },
+      ],
+      { ...CTX, eventSessionID: "SES_CHILD" },
+      translator,
+    );
+    expect(deltas.find((delta) => delta.kind === "item.open")).toMatchObject({
+      key: { providerItemId: "call_child", parentRef: "SES_CHILD" },
+      item: { type: "tool", server: "bb", tool: "bb_echo" },
+    });
+  });
+
+  it("closes a failed bb call as failed and an aborted call as interrupted", () => {
+    const translator = bbTranslator();
+    const failed = translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_fail", name: "bb_echo" },
+        },
+        {
+          type: "session.tool.failed",
+          data: {
+            sessionID: "SES_1",
+            id: "call_fail",
+            error: { type: "tool.execution", message: "first failure block" },
+            executed: false,
+          },
+        },
+        {
+          type: "session.tool.failed",
+          data: {
+            sessionID: "SES_1",
+            id: "call_fail",
+            error: { type: "tool.execution", message: "first failure block" },
+          },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    const failedRows = toolRows(failed);
+    expect(failedRows).toHaveLength(2);
+    expect(failedRows[1]).toMatchObject({
+      status: "failed",
+      resultText: "first failure block",
+      item: { type: "tool", server: "bb", tool: "bb_echo", error: "first failure block" },
+    });
+    const interrupted = translateAll(
+      [
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_stop", name: "bb_echo" },
+        },
+        {
+          type: "session.tool.failed",
+          data: {
+            sessionID: "SES_1",
+            id: "call_stop",
+            error: { type: "aborted", message: "Tool execution interrupted" },
+            executed: false,
+          },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    expect(toolRows(interrupted).at(-1)).toMatchObject({
+      status: "interrupted",
+      resultText: "Tool execution interrupted",
+    });
+  });
+
+  it("translates the captured failed and aborted tool events", () => {
+    const translator = bbTranslator();
+    const [failed, aborted] = recordedEvents(readJson("tool-failed.sanitized.json"));
+    if (failed === undefined || aborted === undefined) throw new Error("tool-failed fixture");
+    const failedClose = translateAll(
+      [
+        { type: "session.tool.input.started", data: { sessionID: "SES_1", id: "call_1", name: "bb_echo" } },
+        failed,
+      ],
+      CTX,
+      translator,
+    ).find((delta) => delta.kind === "item.close");
+    const abortedClose = translateAll(
+      [
+        { type: "session.tool.input.started", data: { sessionID: "SES_1", id: "call_2", name: "bb_echo" } },
+        aborted,
+      ],
+      CTX,
+      translator,
+    ).find((delta) => delta.kind === "item.close");
+    expect(failedClose).toMatchObject({ status: "failed", resultText: "first failure block" });
+    expect(abortedClose).toMatchObject({ status: "interrupted", resultText: "Tool execution interrupted" });
+    expect(JSON.stringify([failedClose, abortedClose])).not.toContain("/tmp/");
+    expect(JSON.stringify([failedClose, abortedClose])).not.toContain("ses_");
+  });
+
+  it("does not mark an open tool succeeded on resync without a native terminal", () => {
+    const translator = bbTranslator();
+    translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_open", name: "bb_echo" },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    const reconciled = translator.reconcileAfterResync("SES_1", [
+      { id: "msg_1", type: "assistant", content: [{ type: "tool", state: { input: { token: "secret" } } }] },
+    ]);
+    expect(reconciled.some((delta) => delta.kind === "item.close")).toBe(false);
+    expect(reconciled.some((delta) => delta.kind === "turn.boundary")).toBe(false);
+    expect(JSON.stringify(reconciled)).not.toContain("secret");
+    expect(translator.executionTurnId("SES_1")).toEqual(expect.any(String));
+  });
+
+  it("reconciles a dropped failure from the native log without copying its arguments", () => {
+    const translator = bbTranslator();
+    translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_drop", name: "bb_echo" },
+        },
+        {
+          type: "session.tool.called",
+          data: { sessionID: "SES_1", id: "call_drop", input: { text: "known" } },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    translator.noteNativeTerminals(
+      "SES_1",
+      nativeTerminalsFromEvents(
+        [
+          { type: "session.execution.started", durable: { seq: 0 }, data: { sessionID: "SES_1" } },
+          {
+            type: "session.tool.failed",
+            data: {
+              id: "call_drop",
+              input: { token: "secret-arg" },
+              error: { type: "tool.execution", message: "bb tool failed" },
+            },
+          },
+          { type: "session.execution.failed", data: { sessionID: "SES_1" } },
+        ],
+        true,
+      ),
+    );
+    const reconciled = translator.reconcileAfterResync("SES_1", [{ id: "msg_9", type: "assistant" }]);
+    const close = reconciled.find((delta) => delta.kind === "item.close" && delta.key.providerItemId === "call_drop");
+    expect(close).toMatchObject({
+      status: "failed",
+      resultText: "bb tool failed",
+      item: { type: "tool", server: "bb", tool: "bb_echo", args: { text: "known" }, error: "bb tool failed" },
+    });
+    expect(JSON.stringify(reconciled)).not.toContain("secret-arg");
+    expect(reconciled).toContainEqual(expect.objectContaining({ kind: "turn.boundary", status: "failed" }));
+  });
+
+  it("closes a child's open text and compaction when the root execution is lost", () => {
+    function childSetup(translator: ReturnType<typeof bbTranslator>) {
+      translateAll(
+        [
+          { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 1 } },
+          {
+            type: "session.created",
+            data: { sessionID: "SES_CHILD", parentID: "SES_1", title: "helper" },
+          },
+          {
+            type: "session.text.started",
+            data: { sessionID: "SES_CHILD", assistantMessageID: "MSG_CHILD", ordinal: 0 },
+          },
+          { type: "session.compaction.started", data: { sessionID: "SES_CHILD" } },
+        ],
+        CTX,
+        translator,
+      );
+    }
+    function childCloses(deltas: ThreadDelta[]) {
+      return deltas.filter((delta) => {
+        const key = "key" in delta ? delta.key : undefined;
+        return key?.parentRef === "SES_CHILD" || ("key" in delta && delta.key.providerItemId === "SES_CHILD");
+      });
+    }
+    const replaced = bbTranslator();
+    childSetup(replaced);
+    const next = translateAll(
+      [{ type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 9 } }],
+      CTX,
+      replaced,
+    );
+    expect(childCloses(next).map((delta) => delta.kind).sort()).toEqual([
+      "item.close",
+      "item.close",
+      "item.textClose",
+    ]);
+    expect(next).toContainEqual(
+      expect.objectContaining({
+        kind: "item.textClose",
+        key: { providerItemId: "text:MSG_CHILD:0", parentRef: "SES_CHILD" },
+      }),
+    );
+    expect(next).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "compaction", parentRef: "SES_CHILD" },
+        status: "failed",
+      }),
+    );
+    expect(next).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "SES_CHILD" },
+        status: "failed",
+        item: expect.objectContaining({ type: "delegation" }),
+      }),
+    );
+    expect(childCloses(replaced.settleUnobserved("SES_1"))).toEqual([]);
+
+    const released = bbTranslator();
+    childSetup(released);
+    const settled = released.settleUnobserved("SES_1");
+    expect(settled).toContainEqual(
+      expect.objectContaining({
+        kind: "item.textClose",
+        key: { providerItemId: "text:MSG_CHILD:0", parentRef: "SES_CHILD" },
+      }),
+    );
+    expect(settled).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "compaction", parentRef: "SES_CHILD" },
+        status: "failed",
+      }),
+    );
+    expect(settled).toContainEqual(
+      expect.objectContaining({
+        kind: "item.close",
+        key: { providerItemId: "SES_CHILD" },
+        status: "failed",
+      }),
+    );
+    expect(childCloses(released.settleUnobserved("SES_1"))).toEqual([]);
+  });
+
+  it("keeps a new compaction open when an earlier execution already compacted", () => {
+    const translator = bbTranslator();
+    translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 1 } },
+        { type: "session.compaction.started", data: { sessionID: "SES_1" } },
+        { type: "session.compaction.ended", data: { sessionID: "SES_1" } },
+        { type: "session.execution.succeeded", data: { sessionID: "SES_1" } },
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 8 } },
+        { type: "session.compaction.started", data: { sessionID: "SES_1" } },
+      ],
+      CTX,
+      translator,
+    );
+    translator.noteNativeTerminals(
+      "SES_1",
+      nativeTerminalsFromEvents(
+        [
+          { type: "session.execution.started", durable: { seq: 1 } },
+          { type: "session.compaction.ended" },
+          { type: "session.execution.succeeded" },
+          { type: "session.execution.started", durable: { seq: 8 } },
+        ],
+        true,
+      ),
+    );
+    const reconciled = translator.reconcileAfterResync("SES_1", []);
+    expect(reconciled.some((delta) => delta.kind === "item.close")).toBe(false);
+    expect(reconciled.some((delta) => delta.kind === "turn.boundary")).toBe(false);
+  });
+
+  it("does not close a new turn with the previous execution's success", () => {
+    const translator = bbTranslator();
+    translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 1 } },
+        { type: "session.execution.succeeded", data: { sessionID: "SES_1" } },
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 5 } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_new", name: "bb_echo" },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    translator.noteNativeTerminals(
+      "SES_1",
+      nativeTerminalsFromEvents(
+        [
+          { type: "session.execution.started", durable: { seq: 1 } },
+          { type: "session.execution.succeeded" },
+        ],
+        true,
+      ),
+    );
+    expect(translator.reconcileAfterResync("SES_1", []).some((delta) => delta.kind === "turn.boundary")).toBe(
+      false,
+    );
+    translator.noteNativeTerminals(
+      "SES_1",
+      nativeTerminalsFromEvents(
+        [
+          { type: "session.execution.started", durable: { seq: 1 } },
+          { type: "session.execution.succeeded" },
+          { type: "session.execution.started", durable: { seq: 5 } },
+        ],
+        true,
+      ),
+    );
+    const reconciled = translator.reconcileAfterResync("SES_1", []);
+    expect(reconciled.some((delta) => delta.kind === "turn.boundary")).toBe(false);
+    expect(reconciled.some((delta) => delta.kind === "item.close")).toBe(false);
+    expect(translator.executionTurnId("SES_1")).toBe("exec:SES_1:5");
+  });
+
+  it("keeps one row when a settled call's start and terminal are replayed", () => {
+    const translator = bbTranslator();
+    const first = translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_once", name: "bb_echo" },
+        },
+        {
+          type: "session.tool.failed",
+          data: {
+            sessionID: "SES_1",
+            id: "call_once",
+            error: { type: "tool.execution", message: "once" },
+          },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    const replay = translateAll(
+      [
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_once", name: "bb_echo" },
+        },
+        {
+          type: "session.tool.failed",
+          data: {
+            sessionID: "SES_1",
+            id: "call_once",
+            error: { type: "tool.execution", message: "again" },
+          },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    const rows = [...first, ...replay].filter(
+      (delta) => delta.kind === "item.open" || delta.kind === "item.close",
+    );
+    expect(rows.map((delta) => delta.kind)).toEqual(["item.open", "item.close"]);
+  });
+
+  it("closes an idle session from activity when the log has no terminal, and leaves an active one open", () => {
+    const translator = bbTranslator();
+    translateAll(
+      [
+        { type: "session.execution.started", data: { sessionID: "SES_1" }, durable: { seq: 2 } },
+        {
+          type: "session.tool.input.started",
+          data: { sessionID: "SES_1", id: "call_gap", name: "bb_echo" },
+        },
+      ],
+      CTX,
+      translator,
+    );
+    translator.noteNativeTerminals("SES_1", nativeTerminalsFromEvents([], false));
+    translator.noteSessionLiveness("SES_1", { outcome: undefined, idleAt: undefined, active: true });
+    expect(translator.reconcileAfterResync("SES_1", []).some((delta) => delta.kind === "turn.boundary")).toBe(
+      false,
+    );
+    translator.noteNativeTerminals(
+      "SES_1",
+      nativeTerminalsFromEvents(
+        [{ type: "session.execution.started", durable: { seq: 2 } }, { type: "session.step.streamed" }],
+        false,
+      ),
+    );
+    expect(translator.reconcileAfterResync("SES_1", []).some((delta) => delta.kind === "item.close")).toBe(
+      false,
+    );
+    translator.noteSessionLiveness("SES_1", {
+      outcome: "succeeded",
+      idleAt: 10,
+      active: false,
+    });
+    const closed = translator.reconcileAfterResync("SES_1", []);
+    expect(closed.find((delta) => delta.kind === "item.close")).toMatchObject({
+      status: "failed",
+      resultText: UNOBSERVED_TOOL_OUTCOME,
+    });
+    expect(closed).toContainEqual(expect.objectContaining({ kind: "turn.boundary", status: "completed" }));
   });
 });
 

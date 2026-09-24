@@ -10,7 +10,7 @@ export default defineWorkspaceTestConfig({
     projects: sharedWorkerProjects({
       pkgDir: __dirname,
       name: "bb-plugin-provider-opencode",
-      include: ["*.test.ts", "src/**/*.test.ts"],
+      include: ["*.test.ts", "*.test.tsx", "src/**/*.test.ts"],
     }),
   },
 });

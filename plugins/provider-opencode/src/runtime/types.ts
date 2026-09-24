@@ -1,3 +1,11 @@
+export type OpenCodeJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OpenCodeJsonValue[]
+  | { [key: string]: OpenCodeJsonValue };
+
 export type OpenCodeLocation = {
   directory: string;
 };
@@ -106,6 +114,12 @@ export type OpenCodeSessionInfo = {
   outcome?: "succeeded" | "failed" | "interrupted";
 };
 
+export type OpenCodeSessionLiveness = {
+  outcome: "succeeded" | "failed" | "interrupted" | undefined;
+  idleAt: number | undefined;
+  active: boolean;
+};
+
 export type OpenCodeSessionMessage = {
   id: string;
   type: string;
@@ -175,6 +189,11 @@ export type OpenCodeNativeEvent = {
   };
 };
 
+export type DurableLogRead = {
+  events: readonly OpenCodeNativeEvent[];
+  complete: boolean;
+};
+
 export type RuntimeNativeEvent = {
   kind: "native";
   sessionID: string;
@@ -221,6 +240,7 @@ export interface SessionHandle {
   readonly id: string;
   readonly location: OpenCodeLocation;
   info(): Promise<OpenCodeSessionInfo>;
+  activity(): Promise<OpenCodeSessionLiveness>;
   prompt(input: OpenCodePromptInput): Promise<void>;
   command(input: OpenCodeCommandInput): Promise<void>;
   compact(): Promise<void>;
@@ -230,9 +250,12 @@ export interface SessionHandle {
   update(patch: {
     title?: string;
     permissions?: OpenCodePermissionRule[];
+    metadata?: Record<string, unknown>;
   }): Promise<void>;
   fork(checkpointMessageId?: string): Promise<SessionHandle>;
+  move(directory: string): Promise<SessionHandle>;
   context(): Promise<readonly OpenCodeSessionMessage[]>;
+  durableLog(): Promise<DurableLogRead>;
   replyPermission(
     requestID: string,
     reply: "once" | "always" | "reject",
@@ -247,10 +270,12 @@ export interface SessionHandle {
     mode: OpenCodeInstructionMode;
     text: string;
   }): Promise<void>;
+  rpc(rpcID: string, method: string, input: OpenCodeJsonValue): Promise<unknown>;
 }
 
 export interface OpenCodeRuntime {
   info(): Promise<{ version: string; url: string; appId: string | null }>;
+  listPlugins(location: OpenCodeLocation): Promise<unknown>;
   health(): Promise<OpenCodeDiscoveryHealth>;
   models(location: OpenCodeLocation): Promise<OpenCodeModel[]>;
   agents(location: OpenCodeLocation): Promise<OpenCodeAgentCatalog>;

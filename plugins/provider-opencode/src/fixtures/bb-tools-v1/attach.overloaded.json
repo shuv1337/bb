@@ -1,0 +1,38 @@
+{
+  "method": "attach",
+  "case": "overloaded",
+  "produces": "handler-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ],
+    "disallowedTools": [
+      "bb_hidden"
+    ],
+    "takeover": {
+      "capability": "cap_old"
+    }
+  },
+  "error": {
+    "code": "overloaded",
+    "message": "companion cannot accept another binding",
+    "data": {
+      "limit": 1024
+    }
+  }
+}

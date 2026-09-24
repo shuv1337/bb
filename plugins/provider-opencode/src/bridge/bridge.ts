@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -33,6 +33,7 @@ import {
   threadStopParamsSchema,
   turnStartParamsSchema,
   turnSteerParamsSchema,
+  type DynamicTool,
   type InitializeResult,
   type PendingInteractionPayload,
   type ProviderBridgeContext,
@@ -41,7 +42,7 @@ import {
 import { toAvailableModels } from "../models.js";
 import { disallowedToolRules } from "../permissions.js";
 import { OPENCODE_SIGN_IN_HINT } from "../strings.js";
-import { createOpenCodeDeltaTranslator } from "../delta-translation.js";
+import { createOpenCodeDeltaTranslator, nativeTerminalsFromEvents } from "../delta-translation.js";
 import {
   openCodeFormPage,
   openCodeFormPageAnswer,
@@ -60,7 +61,6 @@ import {
   assertSelectableAgentId,
   createOpenCodeRuntime,
   OpenCodeUnauthenticatedError,
-  resolvePlanExitAgentId,
   type OpenCodeModel,
   type OpenCodeNativeEvent,
   type OpenCodePermissionRule,
@@ -73,7 +73,17 @@ import {
   getOpenCodeProviderInstallationRun,
   getOpenCodeProviderInstallationStatus,
 } from "./provider-maintenance.js";
+import {
+  BB_TOOL_CALL_CANCELLED,
+  BB_TOOL_OUTCOME_UNKNOWN,
+  BbToolsSetupError,
+  createBbToolCalls,
+  type BbToolHost,
+  type BbToolSession,
+} from "./tool-calls.js";
+import { BB_TOOLS_CONTROL_EVENT, redactCompanionSecrets } from "../runtime/tool-bridge.js";
 
+export { BB_TOOL_CALL_CANCELLED, BB_TOOL_OUTCOME_UNKNOWN };
 export const UNOPENED_DISPATCH_GRACE_MS = 250;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const RESUBSCRIBE_BACKOFF_INITIAL_MS = 250;
@@ -129,14 +139,36 @@ type DecodedRequest =
   | { kind: "invalid-params"; id: string | number; method: string; issues: string }
   | { kind: "ignored" };
 
+export interface OpenCodeBridgeTesting {
+  injectResync(threadId: string): Promise<void>;
+  setIgnoreBbToolControl(enabled: boolean): void;
+  setIgnoredNativeEvents(types: readonly string[]): void;
+  forgetOriginMap(threadId: string): void;
+  injectTurnDeltas(threadId: string, deltas: ThreadDelta[]): Promise<void>;
+  bbToolCapability(threadId: string): string | undefined;
+}
+
 export interface OpenCodeBridgeDeps {
   createRuntime?: () => Promise<OpenCodeRuntime>;
   interruptSettlementTimeoutMs?: number;
   resubscribeBackoffMs?: { initial: number; max: number };
   warn?: (message: string) => void;
+  experimental_testing?: boolean;
 }
 
-type OwnerRecord = { threadId: string; cwd: string };
+interface OpenCodeBridge {
+  handleLine: (line: string) => void;
+  experimental_providerBridge: ReturnType<typeof experimental_defineProviderBridge>;
+  closeAll(): Promise<void>;
+  readonly closed: boolean;
+}
+
+type OwnerRecord = {
+  threadId: string;
+  cwd: string;
+  pendingDirectory?: string;
+  capability?: string;
+};
 
 interface PendingForm {
   fields: OpenCodeFormField[];
@@ -167,23 +199,27 @@ interface ThreadSession {
   abort: AbortController;
   closed: boolean;
   persistApprovals: boolean;
-  planActive: boolean;
   busy: boolean;
-  warnedTools: boolean;
   work: Promise<void>;
   childHandles: Map<string, SessionHandle>;
   catalog: OpenCodeModel[];
   disallowedTools: readonly string[];
+  bbToolsRequired: boolean;
   busyChildren: Set<string>;
   unopenableChildren: Set<string>;
   settleWaiters: Set<(settled: boolean) => void>;
   turnOpen: boolean;
   liveProviderTurnId: string | undefined;
+  deferredResyncMessages: Parameters<ReturnType<typeof createOpenCodeDeltaTranslator>["reconcileAfterResync"]>[1] | undefined;
   pendingAccepts: Array<{
     clientRequestId: string;
     timer: ReturnType<typeof setTimeout> | null;
   }>;
   dispatches: Set<InFlightDispatch>;
+  tools: BbToolSession;
+  bbTools: readonly DynamicTool[] | undefined;
+  activityRetryUsed: boolean;
+  activityRetryTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface InFlightDispatch {
@@ -217,17 +253,52 @@ function decodeRequest(raw: unknown): DecodedRequest {
   };
 }
 
+function stringListParam(params: object, key: string): string[] | undefined {
+  const value = (params as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return undefined;
+  if (!value.every((item) => typeof item === "string" && item.length > 0)) return undefined;
+  return value;
+}
+
 function bbThreadIdFromMetadata(metadata: Record<string, unknown> | undefined): string | undefined {
   const value = metadata?.bbThreadId;
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
-  const { send, sendResult, sendError } = createBridgeIo();
+export function createOpenCodeBridge(deps: OpenCodeBridgeDeps & { experimental_testing: true }): OpenCodeBridge & {
+  experimental_testing: OpenCodeBridgeTesting;
+};
+export function createOpenCodeBridge(deps?: OpenCodeBridgeDeps): OpenCodeBridge;
+export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}): OpenCodeBridge & {
+  experimental_testing?: OpenCodeBridgeTesting;
+} {
+  const bridgeIo = createBridgeIo();
+  const knownCapabilities = new Set<string>();
+  function scrub<T>(value: T): T {
+    return redactCompanionSecrets(value, [...knownCapabilities]);
+  }
+  function noteCapability(value: string | undefined): void {
+    if (value !== undefined && value.length > 0) knownCapabilities.add(value);
+  }
+  const send: typeof bridgeIo.send = (message) => {
+    bridgeIo.send(scrub(message));
+  };
+  const sendResult: typeof bridgeIo.sendResult = (id, result) => {
+    bridgeIo.sendResult(id, scrub(result));
+  };
+  const sendError: typeof bridgeIo.sendError = (id, code, message, data) => {
+    bridgeIo.sendError(
+      id,
+      code,
+      scrub(message),
+      data === undefined ? undefined : scrub(data),
+    );
+  };
   const translator = createOpenCodeDeltaTranslator();
   const sessions = new Map<string, ThreadSession>();
   const sessionsByProviderId = new Map<string, ThreadSession>();
   const pendingInteractions = new Map<string, PendingInteraction>();
+  let ignoredNativeTypes = new Set<string>();
   const replyingInteractions = new Set<string>();
   const owners = new Map<string, OwnerRecord>();
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
@@ -243,11 +314,15 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     initial: RESUBSCRIBE_BACKOFF_INITIAL_MS,
     max: RESUBSCRIBE_BACKOFF_MAX_MS,
   };
-  const warn =
+  const report =
     deps.warn ??
     ((message: string) => {
       process.stderr.write(`[provider-opencode] ${message}\n`);
     });
+  const warn = (message: string): void => {
+    report(scrub(message));
+  };
+  const toolCalls = createBbToolCalls();
 
   function clearPendingAccept(session: ThreadSession): void {
     for (const pending of session.pendingAccepts) {
@@ -294,7 +369,19 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
   }
 
-  function sendDeltas(threadId: string, deltas: readonly ThreadDelta[]): void {
+  function isRootTurnMarker(delta: ThreadDelta): boolean {
+    if (delta.kind !== "turn.open" && delta.kind !== "turn.boundary") return false;
+    return !("parentRef" in delta) || delta.parentRef === undefined;
+  }
+
+  function sendDeltas(
+    threadId: string,
+    deltas: readonly ThreadDelta[],
+    publishedBoundary = false,
+  ): void {
+    if (!publishedBoundary && deltas.some(isRootTurnMarker)) {
+      throw new Error("root turn boundaries must be published through emitTurnDeltas");
+    }
     const session = sessions.get(threadId);
     const outbound: ThreadDelta[] = [];
     if (session === undefined) {
@@ -305,6 +392,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         if (delta.kind === "turn.open" && delta.parentRef === undefined) {
           session.turnOpen = true;
           session.liveProviderTurnId = delta.providerTurnId;
+          session.tools.ensurePoll();
           for (const dispatch of session.dispatches) {
             dispatch.openedTurnId ??= delta.providerTurnId;
           }
@@ -390,17 +478,21 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       }
       zeroWorkSerial += 1;
       const settledId = `zero-work-${zeroWorkSerial}`;
-      sendDeltas(session.threadId, [
-        { kind: "turn.open", providerTurnId: settledId },
-        { kind: "input.accepted", clientRequestId, providerTurnId: settledId },
-        { kind: "turn.boundary", providerTurnId: settledId, status: "completed" },
-      ]);
+      void enqueue(session, () =>
+        emitTurnDeltas(session, [
+          { kind: "turn.open", providerTurnId: settledId },
+          { kind: "input.accepted", clientRequestId, providerTurnId: settledId },
+          { kind: "turn.boundary", providerTurnId: settledId, status: "completed" },
+        ]),
+      ).catch((error: unknown) => {
+        warn(`could not publish zero-work turn for ${session.threadId}: ${failureMessage(error)}`);
+      });
     }, UNOPENED_DISPATCH_GRACE_MS);
     timer.unref?.();
     pending.timer = timer;
   }
 
-  function surfaceStreamFailure(session: ThreadSession, error: unknown): void {
+  async function surfaceStreamFailure(session: ThreadSession, error: unknown): Promise<void> {
     const message = failureMessage(error);
     const liveTurnId = liveTurnIdOf(session);
     const deltas: ThreadDelta[] = [];
@@ -446,7 +538,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         threadScoped: true,
       });
     }
-    sendDeltas(session.threadId, deltas);
+    await emitTurnDeltas(session, deltas);
     if (error instanceof OpenCodeUnauthenticatedError) {
       sendAuthRecovery(session.threadId);
     }
@@ -503,9 +595,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           typeof (record as OwnerRecord).threadId === "string" &&
           typeof (record as OwnerRecord).cwd === "string"
         ) {
+          const pending = (record as OwnerRecord).pendingDirectory;
+          const capability = (record as OwnerRecord).capability;
+          noteCapability(typeof capability === "string" ? capability : undefined);
           owners.set(sessionID, {
             threadId: (record as OwnerRecord).threadId,
             cwd: (record as OwnerRecord).cwd,
+            ...(typeof pending === "string" && pending.length > 0 ? { pendingDirectory: pending } : {}),
+            ...(typeof capability === "string" && capability.length > 0 ? { capability } : {}),
           });
         }
       }
@@ -514,31 +611,51 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
   }
 
-  function persistOwners(): void {
+  function enqueueOwnerWrite(): Promise<void> {
     const path = ownersPath;
-    if (path === null) {
-      return;
-    }
+    if (path === null) return Promise.resolve();
     const snapshot = JSON.stringify(Object.fromEntries(owners.entries()));
-    ownersWrite = ownersWrite.then(async () => {
-      const temporary = `${path}.${process.pid}.tmp`;
-      try {
-        await mkdir(dirname(path), { recursive: true });
-        await writeFile(temporary, snapshot, "utf8");
-        await rename(temporary, path);
-      } catch (error) {
-        warn(
-          `could not persist OpenCode session owners to ${path}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    const write = ownersWrite.then(async () => {
+      const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(temporary, snapshot, { encoding: "utf8", mode: 0o600 });
+      await chmod(temporary, 0o600);
+      await rename(temporary, path);
+    });
+    ownersWrite = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
+  }
+
+  function persistOwners(): void {
+    void enqueueOwnerWrite().catch((error: unknown) => {
+      const path = ownersPath;
+      warn(
+        `could not persist OpenCode session owners to ${path}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     });
   }
 
   function rememberOwner(sessionID: string, threadId: string, cwd: string): void {
-    owners.set(sessionID, { threadId, cwd });
+    const previous = owners.get(sessionID);
+    owners.set(sessionID, {
+      threadId,
+      cwd,
+      ...(previous?.capability === undefined ? {} : { capability: previous.capability }),
+    });
     persistOwners();
+  }
+
+  function rememberCapability(sessionID: string, capability: string): Promise<void> {
+    const current = owners.get(sessionID);
+    if (current === undefined) return Promise.resolve();
+    noteCapability(capability);
+    owners.set(sessionID, { ...current, capability });
+    return enqueueOwnerWrite();
   }
 
   function forgetOwners(threadId: string, providerThreadId: string): void {
@@ -559,6 +676,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         : createOpenCodeRuntime();
     }
     return runtimePromise;
+  }
+
+  let cachedAppId: string | null | undefined;
+  async function engineAppId(): Promise<string | null> {
+    if (cachedAppId !== undefined) return cachedAppId;
+    try {
+      cachedAppId = (await (await runtime()).info()).appId;
+    } catch {
+      cachedAppId = null;
+    }
+    return cachedAppId;
   }
 
   async function refreshRuntime(): Promise<void> {
@@ -597,18 +725,45 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     for (const waiter of [...session.settleWaiters]) waiter(true);
   }
 
-  function waitForSettlement(session: ThreadSession): Promise<boolean> {
+  function waitForSettlement(session: ThreadSession, timeoutMs = interruptSettlementTimeoutMs): Promise<boolean> {
     if (isSettled(session)) return Promise.resolve(true);
+    if (timeoutMs <= 0) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
       const finish = (settled: boolean): void => {
         clearTimeout(timer);
         session.settleWaiters.delete(finish);
         resolve(settled);
       };
-      const timer = setTimeout(() => finish(false), interruptSettlementTimeoutMs);
+      const timer = setTimeout(() => finish(false), timeoutMs);
       timer.unref?.();
       session.settleWaiters.add(finish);
     });
+  }
+
+  function boundInterrupt(handle: SessionHandle, timeoutMs: number): Promise<void> {
+    const work = handle.interrupt();
+    work.catch(() => undefined);
+    if (timeoutMs <= 0) {
+      return Promise.reject(new Error("OpenCode interrupt timed out"));
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("OpenCode interrupt timed out")), timeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([work, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  }
+
+  async function interruptWithin(handle: SessionHandle, timeoutMs: number): Promise<boolean> {
+    try {
+      await boundInterrupt(handle, timeoutMs);
+      return true;
+    } catch (error) {
+      warn(`could not interrupt OpenCode session ${handle.id}: ${failureMessage(error)}`);
+      return false;
+    }
   }
 
   function trackChildActivity(
@@ -710,14 +865,18 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     if (wrapped.kind === "resync") {
+      await session.tools.beginResync();
       const messages = await session.handle.context();
-      sendDeltas(
-        session.threadId,
-        translator.reconcileAfterResync(session.handle.id, messages),
-      );
+      await session.tools.reconcileUnlessOpen(session.handle.id, messages);
       return;
     }
     const native: OpenCodeNativeEvent = wrapped.event;
+    if (native.type !== BB_TOOLS_CONTROL_EVENT && ignoredNativeTypes.has(native.type)) return;
+    if (native.type === BB_TOOLS_CONTROL_EVENT) {
+      session.tools.onControl(native.data);
+      return;
+    }
+    session.tools.noteNative(native.type);
     if (
       wrapped.sessionID === session.handle.id &&
       PROVIDER_ACTIVITY.has(native.type)
@@ -738,17 +897,24 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       modelContextWindow: null,
       persistApprovals: session.persistApprovals,
     });
+    if (wrapped.sessionID === session.handle.id && native.type === "session.execution.started") {
+      session.tools.noteExecutionStarted(native.durable?.seq);
+    }
+    if (wrapped.sessionID === session.handle.id) {
+      const messageID = native.data?.assistantMessageID;
+      const turnId = translator.executionTurnId(session.handle.id);
+      if (typeof messageID === "string" && messageID.length > 0 && turnId !== undefined) {
+        session.tools.noteAssistantMessage(messageID, turnId);
+      }
+    }
     if (translated.gap) {
       const gapHandle = handleForEvent(session, wrapped.sessionID);
       if (gapHandle !== undefined) {
         const messages = await gapHandle.context();
-        sendDeltas(
-          session.threadId,
-          translator.reconcileAfterResync(wrapped.sessionID, messages),
-        );
+        await session.tools.reconcileUnlessOpen(wrapped.sessionID, messages);
       }
     }
-    sendDeltas(session.threadId, translated.deltas);
+    await emitTurnDeltas(session, translated.deltas);
     if (translated.deltas.some(isUnauthorizedFailure)) {
       sendAuthRecovery(session.threadId);
     }
@@ -868,7 +1034,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           }
         } catch (error) {
           if (session.closed || session.abort.signal.aborted) return;
-          surfaceStreamFailure(session, error);
+          await surfaceStreamFailure(session, error);
           void detachSession(session);
           return;
         }
@@ -897,6 +1063,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     instructions: "construct" | "frozen",
   ): Promise<void> {
     session.persistApprovals = knobs.persistApprovals;
+    session.bbToolsRequired = knobs.bbToolsRequired;
     if (instructions === "construct") {
       await session.handle.setInstructions({
         mode: "append",
@@ -910,44 +1077,144 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     if (knobs.model !== undefined) {
       await session.handle.switchModel(knobs.model);
     }
-    if (knobs.agent === "plan") {
-      await session.handle.switchAgent("plan");
-      session.planActive = true;
-      return;
-    }
-    if (session.planActive) {
-      const catalog = await (await runtime()).agents(session.handle.location);
-      const restored = resolvePlanExitAgentId({
-        settingDefaultAgent: knobs.agent,
-        agents: catalog.agents,
-        configDefaultAgent: catalog.defaultAgentId,
-      });
-      if (restored !== null) {
-        await session.handle.switchAgent(restored);
-      }
-      session.planActive = false;
-      return;
-    }
     if (knobs.agent !== null) {
       await session.handle.switchAgent(knobs.agent);
     }
   }
 
-  function warnDroppedTools(
-    session: ThreadSession,
-    tools: readonly { name: string }[] | undefined,
-  ): void {
-    if (session.warnedTools || tools === undefined || tools.length === 0) {
+  async function emitTurnDeltas(session: ThreadSession, deltas: readonly ThreadDelta[]): Promise<void> {
+    const outgoing = await session.tools.consumeBoundary(deltas);
+    if (outgoing.length === 0) return;
+    sendDeltas(session.threadId, outgoing, true);
+  }
+
+  const ACTIVITY_RETRY_MS = 250;
+
+  function scheduleActivityRetry(session: ThreadSession, sessionID: string): void {
+    if (session.activityRetryUsed || session.closed) return;
+    session.activityRetryUsed = true;
+    const timer = setTimeout(() => {
+      session.activityRetryTimer = undefined;
+      void enqueue(session, async () => {
+        if (session.closed) return;
+        const handle =
+          sessionID === session.handle.id ? session.handle : session.childHandles.get(sessionID);
+        const messages = await handle?.context().catch(() => []);
+        await session.tools.reconcileUnlessOpen(sessionID, messages ?? []);
+      });
+    }, ACTIVITY_RETRY_MS);
+    timer.unref?.();
+    session.activityRetryTimer = timer;
+  }
+
+  async function noteTerminals(session: ThreadSession, sessionID: string): Promise<void> {
+    const handle =
+      sessionID === session.handle.id ? session.handle : session.childHandles.get(sessionID);
+    if (handle === undefined) {
+      translator.noteNativeTerminals(sessionID, nativeTerminalsFromEvents([], false));
+      translator.noteSessionLiveness(sessionID, undefined);
       return;
     }
-    session.warnedTools = true;
-    sendDeltas(session.threadId, [
-      {
-        kind: "provider.warning",
-        summary: "OpenCode does not run bb plugin tools",
-        details: `Dropped dynamicTools: ${tools.map((tool) => tool.name).join(", ")}`,
+    try {
+      const read = await handle.durableLog();
+      translator.noteNativeTerminals(
+        sessionID,
+        nativeTerminalsFromEvents(read.events, read.complete),
+      );
+    } catch (error) {
+      warn(
+        `could not read OpenCode session log for ${session.threadId}: ${failureMessage(error)}`,
+      );
+      translator.noteNativeTerminals(sessionID, nativeTerminalsFromEvents([], false));
+    }
+    try {
+      const live = await handle.activity();
+      translator.noteSessionLiveness(sessionID, live);
+      session.activityRetryUsed = false;
+    } catch (error) {
+      warn(
+        `could not read OpenCode session activity for ${session.threadId}: ${failureMessage(error)}`,
+      );
+      translator.noteSessionLiveness(sessionID, undefined);
+      scheduleActivityRetry(session, sessionID);
+    }
+  }
+
+  function toolHost(session: ThreadSession): BbToolHost {
+    return {
+      get threadId() {
+        return session.threadId;
       },
-    ]);
+      get closed() {
+        return session.closed;
+      },
+      get turnOpen() {
+        return session.turnOpen;
+      },
+      get busy() {
+        return session.busy;
+      },
+      get handle() {
+        return session.handle;
+      },
+      get disallowedTools() {
+        return session.disallowedTools;
+      },
+      get bbToolsRequired() {
+        return session.bbToolsRequired;
+      },
+      appId: () => engineAppId(),
+      takeoverCapability: () => {
+        const capability = owners.get(session.handle.id)?.capability;
+        noteCapability(capability);
+        return capability;
+      },
+      rememberCapability: (capability) => rememberCapability(session.handle.id, capability),
+      secrets: () => {
+        noteCapability(session.tools?.capability());
+        noteCapability(owners.get(session.handle.id)?.capability);
+        return [...knownCapabilities];
+      },
+      listPlugins: async () => (await runtime()).listPlugins(session.handle.location),
+      get hasDeferredResync() {
+        return session.deferredResyncMessages !== undefined;
+      },
+      liveTurnId: () => liveTurnIdOf(session),
+      executionTurnId: () => translator.executionTurnId(session.handle.id),
+      warn,
+      send,
+      enqueue: (work) => enqueue(session, work),
+      durableLog: () => session.handle.durableLog(),
+      emitTurnDeltas: (deltas) => emitTurnDeltas(session, deltas),
+      settleTurn: (outcome) => translator.settleTurn(session.handle.id, outcome),
+      reconcileAfterResync: (sessionID, messages) => translator.reconcileAfterResync(sessionID, messages),
+      noteBbCatalog(bindingID) {
+        const tools = session.bbTools;
+        if (tools === undefined) return;
+        translator.configureInjectedTools(session.handle.id, tools, bindingID);
+      },
+      prepareReconcile: (sessionID) => noteTerminals(session, sessionID),
+      takeDeferredResync() {
+        const messages = session.deferredResyncMessages;
+        session.deferredResyncMessages = undefined;
+        return messages;
+      },
+      setDeferredResync(messages) {
+        session.deferredResyncMessages = messages;
+      },
+    };
+  }
+
+  async function confirmIdleBeforeMove(session: ThreadSession): Promise<boolean> {
+    if (isSettled(session)) return true;
+    const deadline = Date.now() + interruptSettlementTimeoutMs;
+    const remaining = (): number => Math.max(0, deadline - Date.now());
+    const interrupted = await interruptWithin(session.handle, remaining());
+    if (!interrupted) return false;
+    const settled = await waitForSettlement(session, remaining());
+    if (!settled) return false;
+    await session.tools.abandon();
+    return true;
   }
 
   async function retireSession(
@@ -957,14 +1224,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     const existing = sessions.get(threadId);
     if (existing === undefined) return undefined;
     if (existing.handle.id !== nextHandleId && !isSettled(existing)) {
-      await existing.handle.interrupt().catch((error: unknown) => {
-        warn(
-          `could not interrupt replaced OpenCode session ${existing.handle.id}: ${failureMessage(error)}`,
-        );
-      });
+      await interruptWithin(existing.handle, interruptSettlementTimeoutMs);
     }
     await enqueue(existing, async () => {
-      sendDeltas(threadId, translator.settleTurn(existing.handle.id, "interrupted"));
+      await emitTurnDeltas(existing, translator.settleTurn(existing.handle.id, "interrupted"));
     }).catch(() => undefined);
     await detachSession(existing);
     return existing;
@@ -992,6 +1255,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     handle: SessionHandle,
     cwd: string,
     disallowedTools: readonly string[],
+    remember = true,
   ): ThreadSession {
     const session: ThreadSession = {
       threadId,
@@ -1000,24 +1264,29 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       abort: new AbortController(),
       closed: false,
       persistApprovals: false,
-      planActive: false,
       busy: false,
-      warnedTools: false,
       work: Promise.resolve(),
       childHandles: new Map(),
       catalog: [],
       disallowedTools,
+      bbToolsRequired: false,
       busyChildren: new Set(),
       unopenableChildren: new Set(),
       settleWaiters: new Set(),
       turnOpen: false,
       liveProviderTurnId: undefined,
+      deferredResyncMessages: undefined,
       pendingAccepts: [],
       dispatches: new Set(),
+      tools: undefined as unknown as BbToolSession,
+      bbTools: undefined,
+      activityRetryUsed: false,
+      activityRetryTimer: undefined,
     };
+    session.tools = toolCalls.bind(toolHost(session));
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
-    rememberOwner(handle.id, threadId, cwd);
+    if (remember) rememberOwner(handle.id, threadId, cwd);
     return session;
   }
 
@@ -1026,8 +1295,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     session.closed = true;
+    if (session.activityRetryTimer !== undefined) {
+      clearTimeout(session.activityRetryTimer);
+      session.activityRetryTimer = undefined;
+    }
     clearPendingAccept(session);
     prunePendingInteractions(session.threadId);
+    await session.tools.abandon();
+    session.tools.close();
     session.abort.abort();
     if (sessions.get(session.threadId) === session) {
       sessions.delete(session.threadId);
@@ -1043,13 +1318,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     });
     session.busyChildren.clear();
     await Promise.all(
-      busyChildren.map((child) =>
-        child.interrupt().catch((error: unknown) => {
-          warn(
-            `could not interrupt OpenCode child session ${child.id}: ${failureMessage(error)}`,
-          );
-        }),
-      ),
+      busyChildren.map((child) => interruptWithin(child, interruptSettlementTimeoutMs)),
     );
     translator.forget(session.handle.id);
     for (const childId of session.childHandles.keys()) {
@@ -1064,12 +1333,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     sendResult(id, { providerThreadId, sessionRestorable: true });
   }
 
+  function nativeDirectory(info: { location: { directory: string } }): string {
+    return info.location.directory;
+  }
+
   async function assertOwned(
     handle: SessionHandle,
     threadId: string,
     cwd: string,
-  ): Promise<void> {
+  ): Promise<"ok" | "migrate"> {
     const info = await handle.info();
+    const native = nativeDirectory(info);
     const mapped = owners.get(handle.id);
     const metadataId = bbThreadIdFromMetadata(info.metadata);
     if (mapped !== undefined) {
@@ -1078,12 +1352,22 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           `OpenCode session ${handle.id} belongs to thread ${mapped.threadId}, not ${threadId}`,
         );
       }
-      if (mapped.cwd !== cwd) {
+      if (mapped.pendingDirectory !== undefined) {
+        if (cwd !== mapped.pendingDirectory) {
+          throw new Error(
+            `OpenCode session ${handle.id} is moving to ${mapped.pendingDirectory}, not ${cwd}`,
+          );
+        }
+        if (native.length > 0 && native !== cwd) return "migrate";
+        return "ok";
+      }
+      if (mapped.cwd !== cwd) return "migrate";
+      if (native.length > 0 && native !== cwd) {
         throw new Error(
-          `OpenCode session ${handle.id} is bound to ${mapped.cwd}, not ${cwd}`,
+          `OpenCode session ${handle.id} is bound to ${native}, not ${cwd}`,
         );
       }
-      return;
+      return "ok";
     }
     if (metadataId === undefined) {
       throw new Error(
@@ -1095,11 +1379,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         `OpenCode session ${handle.id} belongs to thread ${metadataId}, not ${threadId}`,
       );
     }
-    if (info.location.directory !== cwd && info.location.directory.length > 0) {
+    if (native.length > 0 && native !== cwd) {
       throw new Error(
-        `OpenCode session ${handle.id} is bound to ${info.location.directory}, not ${cwd}`,
+        `OpenCode session ${handle.id} is bound to ${native}, not ${cwd}`,
       );
     }
+    return "ok";
   }
 
   async function assertForkSource(handle: SessionHandle, cwd: string): Promise<void> {
@@ -1168,24 +1453,65 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     knobs: AppliedSessionKnobs;
     disallowedTools: readonly string[];
     instructions: "construct" | "frozen";
-    dynamicTools: readonly { name: string }[] | undefined;
+    dynamicTools: readonly DynamicTool[] | undefined;
+    previous?: ThreadSession;
+    skipRetire?: boolean;
+    durableOwner?: boolean;
+    toolAttachMode?: "construct" | "turn";
   }): Promise<void> {
-    const previous = await retireSession(args.threadId, args.handle.id);
+    const previous = args.skipRetire
+      ? args.previous
+      : await retireSession(args.threadId, args.handle.id);
     const oc = await runtime();
     const session = registerSession(
       args.threadId,
       args.handle,
       args.cwd,
       args.disallowedTools,
+      args.durableOwner !== true,
     );
     session.catalog = args.catalog;
     if (previous !== undefined) {
       sendReplaced(previous, args.handle, args.method);
     }
     startPump(session, oc);
-    await applyKnobs(session, args.knobs, args.instructions);
-    warnDroppedTools(session, args.dynamicTools);
-    announce(args.id, args.threadId, args.handle.id);
+    try {
+      await applyKnobs(session, args.knobs, args.instructions);
+      if (args.method === "thread/fork") {
+        const info = await args.handle.info();
+        await args.handle.update({
+          metadata: { ...(info.metadata ?? {}), bbThreadId: args.threadId },
+        });
+      }
+      session.bbTools = args.dynamicTools;
+      if (args.dynamicTools !== undefined) {
+        translator.configureInjectedTools(session.handle.id, args.dynamicTools);
+      }
+      await session.tools.attach(args.dynamicTools, args.toolAttachMode ?? "construct");
+      if (args.durableOwner === true) {
+        const mapped = owners.get(args.handle.id);
+        owners.set(args.handle.id, {
+          threadId: args.threadId,
+          cwd: args.cwd,
+          ...(mapped?.capability === undefined ? {} : { capability: mapped.capability }),
+        });
+        try {
+          await enqueueOwnerWrite();
+        } catch (error) {
+          if (mapped !== undefined) owners.set(args.handle.id, mapped);
+          await detachSession(session);
+          throw new Error(
+            `OpenCode session ${args.handle.id} moved to ${args.cwd} but the new owner could not be saved: ${failureMessage(error)}. Resume this thread in ${args.cwd} to finish the move.`,
+          );
+        }
+      }
+      announce(args.id, args.threadId, args.handle.id);
+    } catch (error) {
+      if (sessions.get(args.threadId) === session && !session.closed) {
+        await detachSession(session);
+      }
+      throw error;
+    }
   }
 
   function hasInterruptibleWork(
@@ -1358,8 +1684,75 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           );
           break;
         }
-        await assertOwned(handle, request.params.threadId, request.params.cwd);
-        await constructSession({
+        let ownership: "ok" | "migrate";
+        try {
+          ownership = await assertOwned(handle, request.params.threadId, request.params.cwd);
+        } catch (error) {
+          if (error instanceof OpenCodeUnauthenticatedError) throw error;
+          sendError(
+            request.id,
+            BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+            error instanceof Error ? error.message : String(error),
+          );
+          break;
+        }
+        const completingMigration =
+          ownership === "migrate" || owners.get(handle.id)?.pendingDirectory === request.params.cwd;
+        const live = sessions.get(request.params.threadId);
+        if (
+          completingMigration &&
+          live !== undefined &&
+          live.handle.id === handle.id &&
+          !isSettled(live)
+        ) {
+          const settled = await confirmIdleBeforeMove(live);
+          if (!settled) {
+            sendError(
+              request.id,
+              BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+              `OpenCode session ${handle.id} still has an active turn and could not be interrupted before moving to ${request.params.cwd}. Resume this thread in ${request.params.cwd} to finish the move.`,
+            );
+            break;
+          }
+        }
+        let previous: ThreadSession | undefined;
+        if (completingMigration) {
+          previous = await retireSession(request.params.threadId, handle.id);
+        }
+        if (ownership === "migrate") {
+          const before = await handle.info();
+          try {
+            if (before.location.directory !== request.params.cwd) {
+              handle = await handle.move(request.params.cwd);
+            }
+          } catch (error) {
+            if (error instanceof OpenCodeUnauthenticatedError) throw error;
+            sendError(
+              request.id,
+              BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+              `OpenCode session ${handle.id} could not be moved to ${request.params.cwd}: ${failureMessage(error)}. Resume this thread in ${request.params.cwd} to finish the move.`,
+            );
+            break;
+          }
+          const mapped = owners.get(handle.id);
+          owners.set(handle.id, {
+            threadId: request.params.threadId,
+            cwd: mapped?.cwd ?? before.location.directory,
+            pendingDirectory: request.params.cwd,
+            ...(mapped?.capability === undefined ? {} : { capability: mapped.capability }),
+          });
+          try {
+            await enqueueOwnerWrite();
+          } catch (error) {
+            sendError(
+              request.id,
+              BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+              `OpenCode session ${handle.id} moved to ${request.params.cwd} but the new owner could not be saved: ${failureMessage(error)}. Resume this thread in ${request.params.cwd} to finish the move.`,
+            );
+            break;
+          }
+        }
+        const construction = {
           id: request.id,
           method: request.method,
           threadId: request.params.threadId,
@@ -1368,9 +1761,32 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           catalog,
           knobs,
           disallowedTools: request.params.disallowedTools ?? [],
-          instructions: "construct",
+          instructions: "construct" as const,
           dynamicTools: request.params.dynamicTools,
-        });
+          previous,
+          skipRetire: completingMigration,
+          durableOwner: completingMigration,
+          toolAttachMode: completingMigration ? ("turn" as const) : ("construct" as const),
+        };
+        if (!completingMigration) {
+          await constructSession(construction);
+          break;
+        }
+        try {
+          await constructSession(construction);
+        } catch (error) {
+          if (error instanceof OpenCodeUnauthenticatedError) throw error;
+          const live = sessions.get(request.params.threadId);
+          if (live !== undefined && !live.closed) await detachSession(live);
+          const message = failureMessage(error);
+          sendError(
+            request.id,
+            BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE,
+            message.includes("Resume this thread")
+              ? message
+              : `OpenCode session ${handle.id} moved to ${request.params.cwd} but could not be restored: ${message}. Resume this thread in ${request.params.cwd} to finish the move.`,
+          );
+        }
         break;
       }
       case "thread/fork": {
@@ -1417,6 +1833,24 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           );
           break;
         }
+        const incomingDisallowed = stringListParam(request.params, "disallowedTools");
+        if (incomingDisallowed !== undefined) session.disallowedTools = incomingDisallowed;
+        const knobs = knobsFromExecution({
+          threadId: request.params.threadId,
+          options: request.params.options,
+          instructionMode: "append",
+          catalog: session.catalog,
+        });
+        session.bbToolsRequired = knobs.bbToolsRequired;
+        try {
+          await session.tools.ensure();
+        } catch (error) {
+          if (error instanceof BbToolsSetupError) {
+            sendError(request.id, BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR, error.message);
+            break;
+          }
+          throw error;
+        }
         if (request.method === "turn/steer") {
           const liveTurn = liveTurnIdOf(session);
           if (
@@ -1434,14 +1868,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
             });
           }
         }
-        const knobs = knobsFromExecution({
-          threadId: request.params.threadId,
-          options: request.params.options,
-          instructionMode: "append",
-          catalog: session.catalog,
-        });
         await assertRequestedAgent(session.cwd, knobs.agent);
         await applyKnobs(session, knobs, "frozen");
+        await session.tools.pushDisallowed();
         const delivery =
           request.method === "turn/steer" ? "steer" : session.busy ? "queue" : "steer";
         const turn = classifyOpenCodeTurn({
@@ -1490,13 +1919,21 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           sendResult(request.id, { ok: true, providerCheckpointId: null });
           break;
         }
+        await session.tools.abandon();
+        if (request.params.intent === "release") {
+          await enqueue(session, async () => {
+            await emitTurnDeltas(session, translator.settleUnobserved(session.handle.id));
+          });
+        }
         if (request.params.intent === "interrupt" && hasInterruptibleWork(session, request.params.activeTurnId)) {
-          await session.handle.interrupt();
-          const settled = await waitForSettlement(session);
+          const deadline = Date.now() + interruptSettlementTimeoutMs;
+          const remaining = (): number => Math.max(0, deadline - Date.now());
+          await interruptWithin(session.handle, remaining());
+          const settled = await waitForSettlement(session, remaining());
           if (!settled && !session.closed) {
             await enqueue(session, async () => {
-              sendDeltas(
-                session.threadId,
+              await emitTurnDeltas(
+                session,
                 translator.settleTurn(session.handle.id, "interrupted"),
               );
             });
@@ -1653,6 +2090,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   function handleParsedMessage(parsed: unknown): void {
     const response = decodeBridgeJsonRpcResponse(parsed);
     if (response !== null) {
+      if (toolCalls.handleResponse(response)) return;
       if (pendingInteractions.has(String(response.id))) {
         handleInteractionResponse(response);
       }
@@ -1723,12 +2161,52 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     },
   });
 
-  return {
+  function setIgnoreBbToolControl(enabled: boolean): void {
+    toolCalls.setIgnoreControl(enabled);
+  }
+
+  function setIgnoredNativeEvents(types: readonly string[]): void {
+    ignoredNativeTypes = new Set(types);
+  }
+
+  function forgetOriginMap(threadId: string): void {
+    sessions.get(threadId)?.tools.forgetOrigins();
+  }
+
+  function injectTurnDeltas(threadId: string, deltas: ThreadDelta[]): Promise<void> {
+    const session = sessions.get(threadId);
+    if (session === undefined || session.closed) return Promise.resolve();
+    return enqueue(session, () => emitTurnDeltas(session, deltas));
+  }
+
+  async function injectResync(threadId: string): Promise<void> {
+    const session = sessions.get(threadId);
+    if (session === undefined || session.closed) return;
+    await applyGuarded(session, resyncEvent(session));
+  }
+
+  function bbToolCapability(threadId: string): string | undefined {
+    return sessions.get(threadId)?.tools.capability();
+  }
+
+  const bridge: OpenCodeBridge = {
     handleLine,
     experimental_providerBridge,
     closeAll,
     get closed() {
       return closed;
+    },
+  };
+  if (deps.experimental_testing !== true) return bridge;
+  return {
+    ...bridge,
+    experimental_testing: {
+      injectResync,
+      setIgnoreBbToolControl,
+      setIgnoredNativeEvents,
+      forgetOriginMap,
+      injectTurnDeltas,
+      bbToolCapability,
     },
   };
 }

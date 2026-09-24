@@ -1,0 +1,46 @@
+{
+  "method": "attach",
+  "case": "invalid-engine",
+  "produces": "handler-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ],
+    "disallowedTools": [
+      "bb_hidden"
+    ],
+    "takeover": {
+      "capability": "cap_old"
+    }
+  },
+  "error": {
+    "code": "invalid",
+    "message": "engine rejected tools: bb_echo",
+    "data": {
+      "tool": "bb_echo",
+      "reason": "engine",
+      "tools": [
+        {
+          "tool": "bb_echo",
+          "reason": "engine",
+          "detail": "engine rejected bb_echo"
+        }
+      ]
+    }
+  }
+}

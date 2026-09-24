@@ -45,21 +45,6 @@ export function assertSelectableAgentId(
   throw new OpenCodeUnknownAgentError(agent);
 }
 
-export function resolvePlanExitAgentId(input: {
-  settingDefaultAgent: string | null;
-  agents: readonly OpenCodeAgent[];
-  configDefaultAgent: string | null;
-}): string | null {
-  if (input.settingDefaultAgent !== null) {
-    assertSelectableAgentId(input.settingDefaultAgent, input.agents);
-    return input.settingDefaultAgent;
-  }
-  return resolveDefaultAgentId({
-    agents: input.agents,
-    configDefaultAgent: input.configDefaultAgent,
-  });
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }

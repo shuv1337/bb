@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import type {
   BridgeJsonRpcOutputMessage,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { toOpenCodeModel } from "../models.js";
+import { capturedRequestIssue, type BbToolsFixture } from "../tool-bridge-contract.js";
 import {
   createFakeOpenCodeRuntime,
   type OpenCodeRuntime,
@@ -661,7 +662,7 @@ it("thread/fork warns about dropped tools and persists the fork's owner", async 
     expect.arrayContaining([
       expect.objectContaining({
         kind: "provider.warning",
-        details: "Dropped dynamicTools: bb_lookup",
+        details: expect.stringContaining("Dropped dynamicTools: bb_lookup"),
       }),
     ]),
   );
@@ -794,6 +795,189 @@ it("persists owners atomically and forgets them on thread/discard", async () => 
   expect(discarded.error).toBeUndefined();
   await harness.waitFor(() => !(sessionId in readOwners()), "owner removal");
   expect(readdirSync(dataDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+});
+
+it("persists the companion capability at mode 0600 for takeover", async () => {
+  const dataDir = tempDir("bb-opencode-owners-");
+  const fake = createFakeOpenCodeRuntime();
+  const digest = "e".repeat(64);
+  await useHarness({
+    fake,
+    dataDir,
+    wrapRuntime: (runtime) => ({
+      ...runtime,
+      createSession: async (input) => {
+        const handle = await runtime.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+            if (method === "status") {
+              return { bound: true, generation: "g", epoch: 1, catalogDigest: digest, leaseExpiresAt: 1 };
+            }
+            if (method === "attach") {
+              return {
+                bindingID: "b1",
+                capability: "cap-secret",
+                generation: "g",
+                epoch: 1,
+                catalogDigest: digest,
+                ownerLeaseMs: 30_000,
+              };
+            }
+            if (method === "pending") return { calls: [], settled: [] };
+            if (method === "configure" || method === "detach") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const started = await harness.startThread("thr_capability", {
+    dynamicTools: [{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }],
+  });
+  expect(started.error).toBeUndefined();
+  const ownersFile = join(dataDir, "opencode-session-owners.json");
+  await harness.waitFor(() => {
+    try {
+      return readFileSync(ownersFile, "utf8").includes("cap-secret");
+    } catch {
+      return false;
+    }
+  }, "capability write");
+  expect(statSync(ownersFile).mode & 0o777).toBe(0o600);
+  const parsed = JSON.parse(readFileSync(ownersFile, "utf8")) as Record<string, { capability?: string }>;
+  expect(Object.values(parsed).some((record) => record.capability === "cap-secret")).toBe(true);
+});
+
+it("processes native events while an attach waits on owner_active", async () => {
+  const fake = createFakeOpenCodeRuntime();
+  const digest = "f".repeat(64);
+  let attaches = 0;
+  let ownerActive = false;
+  await useHarness({
+    fake,
+    wrapRuntime: (runtime) => ({
+      ...runtime,
+      createSession: async (input) => {
+        const handle = await runtime.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+            if (method === "status") {
+              return ownerActive
+                ? { bound: false, generation: "g" }
+                : { bound: true, generation: "g", epoch: 1, catalogDigest: digest, leaseExpiresAt: 1 };
+            }
+            if (method === "attach") {
+              attaches += 1;
+              if (ownerActive && attaches === 2) {
+                throw new Error("owner lease is active", {
+                  cause: { type: "owner_active", message: "owner lease is active", data: { retryAfterMs: 400 } },
+                });
+              }
+              if (ownerActive) {
+                throw new Error("owner lease is active", {
+                  cause: { type: "owner_active", message: "owner lease is active", data: { retryAfterMs: 40_000 } },
+                });
+              }
+              return {
+                bindingID: "b1",
+                capability: "cap-live",
+                generation: "g",
+                epoch: 1,
+                catalogDigest: digest,
+                ownerLeaseMs: 30_000,
+              };
+            }
+            if (method === "pending") return { calls: [], settled: [] };
+            if (method === "configure" || method === "detach") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const threadId = "thr_owner_wait";
+  const started = await harness.startThread(threadId, {
+    dynamicTools: [{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }],
+  });
+  expect(started.error).toBeUndefined();
+  ownerActive = true;
+  const sessionId = providerThreadId(started);
+  const turn = harness.request(93, "turn/start", {
+    threadId,
+    providerThreadId: sessionId,
+    clientRequestId: "creq_23456789ag",
+    input: [{ type: "text", text: "go", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  await harness.waitFor(() => attaches >= 2, "owner_active attach");
+  const playedAt = Date.now();
+  await harness.fake.play({
+    type: "session.step.started",
+    data: { sessionID: sessionId, agent: "reviewer", assistantMessageID: "msg_wait" },
+  });
+  await harness.waitFor(
+    () => JSON.stringify(harness.deltasOf(threadId)).includes("reviewer"),
+    "native event during owner wait",
+  );
+  expect(Date.now() - playedAt).toBeLessThan(250);
+  const response = await turn;
+  expect(JSON.stringify(response.error)).toContain("owner lease is active");
+});
+
+it("sends companion requests that match the vendored fixture shapes", async () => {
+  const fake = createFakeOpenCodeRuntime();
+  const digest = "a".repeat(64);
+  const captured: Array<{ method: string; input: unknown }> = [];
+  await useHarness({
+    fake,
+    wrapRuntime: (runtime) => ({
+      ...runtime,
+      createSession: async (input) => {
+        const handle = await runtime.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (rpcID === "bb.tools.v1") captured.push({ method, input: payload });
+            if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+            if (method === "status") {
+              return { bound: true, generation: "g", epoch: 1, catalogDigest: digest, leaseExpiresAt: 1 };
+            }
+            if (method === "attach") {
+              return {
+                bindingID: "b1",
+                capability: "cap-shape",
+                generation: "g",
+                epoch: 1,
+                catalogDigest: digest,
+                ownerLeaseMs: 30_000,
+              };
+            }
+            if (method === "pending") return { calls: [], settled: [] };
+            if (method === "configure" || method === "detach") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const started = await harness.startThread("thr_shapes", {
+    dynamicTools: [{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }],
+  });
+  expect(started.error).toBeUndefined();
+  const root = join(import.meta.dirname, "../fixtures/bb-tools-v1");
+  const fixtures = readdirSync(root)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(readFileSync(join(root, name), "utf8")) as BbToolsFixture);
+  const methods = new Set(captured.map((call) => call.method));
+  expect(methods.has("hello")).toBe(true);
+  expect(methods.has("attach")).toBe(true);
+  for (const call of captured) {
+    expect(capturedRequestIssue(call.method, call.input, fixtures), call.method).toBeUndefined();
+  }
 });
 
 it("keeps thread/start working when the owners file cannot be written", async () => {
@@ -1368,4 +1552,152 @@ it("turn/start rejects a native command naming an unknown skill before dispatch"
   expect(response.error?.message).toBe('Unknown OpenCode skill "missing"');
   expect(harness.fake.calls.commands).toEqual([]);
   expect(deltaKinds(threadId)).not.toContain("input.accepted");
+});
+
+const bbEchoTool = {
+  name: "bb_echo",
+  description: "echo",
+  inputSchema: { type: "object" },
+};
+
+function unavailableRpc(rpcID: string): Error {
+  const message = `RPC is unavailable: ${rpcID}`;
+  return new Error(message, { cause: { _tag: "RpcError", type: "rpc.unavailable", message } });
+}
+
+it("serializes concurrent turn/start checks into one companion attach", async () => {
+  let armed = false;
+  let bound = false;
+  let turnAttaches = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let releaseFirst: () => void = () => undefined;
+  const firstAttach = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const generation = "gen-1";
+  await useHarness({
+    scriptTurns: true,
+    wrapRuntime: (fake) => ({
+      ...fake,
+      createSession: async (input) => {
+        const handle = await fake.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (rpcID !== "bb.tools.v1") return handle.rpc(rpcID, method, payload);
+            if (method === "hello") {
+              return { protocol: "bb.tools.v1", version: 1, generation };
+            }
+            if (method === "status") {
+              return bound
+                ? { bound: true, generation, epoch: 1, catalogDigest: "a".repeat(64), leaseExpiresAt: 1 }
+                : { bound: false, generation };
+            }
+            if (method === "attach") {
+              const attached = {
+                bindingID: "b1",
+                capability: "cap-1",
+                generation,
+                epoch: 1,
+                catalogDigest: "a".repeat(64),
+                ownerLeaseMs: 30_000,
+              };
+              if (!armed) {
+                bound = true;
+                return attached;
+              }
+              turnAttaches += 1;
+              inFlight += 1;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              if (turnAttaches === 1) await firstAttach;
+              bound = true;
+              inFlight -= 1;
+              return attached;
+            }
+            if (method === "configure" || method === "detach" || method === "reject") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const threadId = "thr_attach_race";
+  const started = await harness.startThread(threadId, { dynamicTools: [bbEchoTool] });
+  expect(started.error).toBeUndefined();
+  armed = true;
+  bound = false;
+  const sessionId = providerThreadId(started);
+  const turn = (id: number, clientRequestId: string) => {
+    harness.rpc.sendRequest(id, "turn/start", {
+      threadId,
+      providerThreadId: sessionId,
+      clientRequestId,
+      input: [{ type: "text", text: "go", mentions: [] }],
+      options: FULL_PERMISSION_OPTIONS,
+    });
+    return harness.rpc.waitForResponse(id);
+  };
+  const first = turn(801, "creq_23456789ab");
+  const second = turn(802, "creq_3456789abd");
+  await harness.waitFor(() => turnAttaches === 1, "first turn attach");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(turnAttaches).toBe(1);
+  expect(maxInFlight).toBe(1);
+  releaseFirst();
+  const responses = await Promise.all([first, second]);
+  expect(responses.every((response) => response.error === undefined)).toBe(true);
+  expect(turnAttaches).toBe(1);
+  expect(maxInFlight).toBe(1);
+});
+
+it("treats an unregistered companion as native-only and a transport failure as a turn error", async () => {
+  const threadId = "thr_companion_absent";
+  const started = await harness.startThread(threadId, { dynamicTools: [bbEchoTool] });
+  expect(started.error).toBeUndefined();
+  expect(
+    harness.deltasOf(threadId).some(
+      (delta) => delta.kind === "provider.warning" && String(delta.details).includes("bb_echo"),
+    ),
+  ).toBe(true);
+  const native = await harness.request("creq_456789abde", "turn/start", {
+    threadId,
+    providerThreadId: providerThreadId(started),
+    clientRequestId: "creq_456789abde",
+    input: [{ type: "text", text: "native", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(native.error).toBeUndefined();
+
+  await useHarness({
+    scriptTurns: true,
+    wrapRuntime: (fake) => ({
+      ...fake,
+      createSession: async (input) => {
+        const handle = await fake.createSession(input);
+        return {
+          ...handle,
+          rpc: async () => {
+            throw new Error("socket hang up");
+          },
+        };
+      },
+    }),
+  });
+  const brokenId = "thr_companion_transport";
+  const broken = await harness.startThread(brokenId, { dynamicTools: [bbEchoTool] });
+  expect(broken.error).toBeUndefined();
+  expect(harness.deltasOf(brokenId).some((delta) => delta.kind === "provider.warning")).toBe(false);
+  const failed = await harness.request("creq_56789abdef", "turn/start", {
+    threadId: brokenId,
+    providerThreadId: providerThreadId(broken),
+    clientRequestId: "creq_56789abdef",
+    input: [{ type: "text", text: "retry", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(failed.error?.message).toContain("could not be reached");
+  expect(failed.error?.message).toContain("socket hang up");
+  expect(failed.error?.message).toContain("were not dropped");
+  expect(harness.deltasOf(brokenId).some((delta) => delta.kind === "provider.warning")).toBe(false);
+  expect(unavailableRpc("bb.tools.v1").message).toBe("RPC is unavailable: bb.tools.v1");
 });

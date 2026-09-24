@@ -52,6 +52,7 @@
     "session.step.streamed",
     "permission.replied",
     "session.tool.success",
+    "session.tool.failed",
     "session.step.ended",
     "session.usage.updated",
     "session.text.started",

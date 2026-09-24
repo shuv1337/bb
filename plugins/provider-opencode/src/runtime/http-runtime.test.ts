@@ -339,6 +339,13 @@ async function startFixture(input?: {
           empty(res, 204);
           return;
         }
+        if (method === "POST" && rest === "/move") {
+          const directory =
+            typeof body === "object" && body !== null ? Reflect.get(body, "directory") : undefined;
+          if (session && typeof directory === "string") session.location = { directory };
+          empty(res, 204);
+          return;
+        }
         if (method === "POST" && (rest === "/agent" || rest === "/model")) {
           empty(res, 204);
           return;
@@ -853,6 +860,31 @@ describe("http runtime adapter", () => {
         { method: "DELETE", url: "/api/session/ses_test1/form/frm_2", body: undefined },
       ]);
       expect(fixture.sessions.get("ses_test1")?.title).toBe("renamed");
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("moves a session with the client and keeps metadata on a raw PATCH", async () => {
+    const fixture = await startFixture();
+    const runtime = await createOpenCodeRuntime({ env: explicitEnv(fixture) });
+    try {
+      await runtime.createSession({ location: { directory: "/workspace" }, title: "t" });
+      const session = await runtime.openSession("ses_test1");
+      const moved = await session.move("/elsewhere");
+      expect(moved.location).toEqual({ directory: "/elsewhere" });
+      expect(moved.id).toBe("ses_test1");
+      await moved.update({ metadata: { bbThreadId: "thr_1", kept: true } });
+      expect(fixture.calls).toEqual(
+        expect.arrayContaining([
+          { method: "POST", url: "/api/session/ses_test1/move", body: { directory: "/elsewhere" } },
+          {
+            method: "PATCH",
+            url: "/api/session/ses_test1",
+            body: { metadata: { bbThreadId: "thr_1", kept: true } },
+          },
+        ]),
+      );
     } finally {
       await runtime.close();
     }

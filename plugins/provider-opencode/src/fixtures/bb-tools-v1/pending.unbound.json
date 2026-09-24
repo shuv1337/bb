@@ -1,0 +1,11 @@
+{
+  "case": "unbound",
+  "method": "pending",
+  "produces": "parse-error",
+  "input": {},
+  "error": {
+    "code": "unbound",
+    "message": "unknown capability",
+    "data": {}
+  }
+}

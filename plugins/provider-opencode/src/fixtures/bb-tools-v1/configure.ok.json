@@ -1,0 +1,12 @@
+{
+  "method": "configure",
+  "case": "ok",
+  "produces": "success",
+  "input": {
+    "capability": "cap",
+    "disallowedTools": [
+      "bb_echo"
+    ]
+  },
+  "output": {}
+}

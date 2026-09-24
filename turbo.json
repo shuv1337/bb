@@ -581,6 +581,7 @@
         "$TURBO_ROOT$/plugins/provider-pi/src/**",
         "$TURBO_ROOT$/plugins/provider-pi/tsconfig.json",
         "$TURBO_ROOT$/plugins/provider-opencode/package.json",
+        "$TURBO_ROOT$/plugins/provider-opencode/app.tsx",
         "$TURBO_ROOT$/plugins/provider-opencode/src/**",
         "$TURBO_ROOT$/plugins/provider-opencode/tsconfig.json",
         "$TURBO_ROOT$/vitest.shared.ts"
@@ -684,6 +685,7 @@
         "$TURBO_ROOT$/plugins/*/icons/**",
         "$TURBO_ROOT$/examples/plugins/*/icons/**",
         "$TURBO_ROOT$/plugins/provider-opencode/package.json",
+        "$TURBO_ROOT$/plugins/provider-opencode/app.tsx",
         "$TURBO_ROOT$/plugins/provider-opencode/server.ts",
         "$TURBO_ROOT$/plugins/provider-opencode/src/**"
       ]

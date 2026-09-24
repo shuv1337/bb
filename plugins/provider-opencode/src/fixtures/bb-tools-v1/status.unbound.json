@@ -1,0 +1,12 @@
+{
+  "method": "status",
+  "case": "unbound",
+  "produces": "success",
+  "input": {
+    "capability": "missing"
+  },
+  "output": {
+    "bound": false,
+    "generation": "gen"
+  }
+}

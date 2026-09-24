@@ -1,0 +1,12 @@
+{
+  "method": "control",
+  "case": "cancelled-interrupted",
+  "produces": "event",
+  "event": {
+    "type": "cancelled",
+    "sessionID": "ses_1",
+    "key": "b1:ses_1:msg_1:call_1",
+    "state": "claimed",
+    "reason": "interrupted"
+  }
+}

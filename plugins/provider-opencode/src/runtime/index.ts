@@ -5,9 +5,11 @@ export type {
   OpenCodeAgentCatalog,
   OpenCodeCommand,
   OpenCodeCommandInput,
+  DurableLogRead,
   OpenCodeDiscoveryHealth,
   OpenCodeHealthStatus,
   OpenCodeInstructionMode,
+  OpenCodeJsonValue,
   OpenCodeLocation,
   OpenCodeModel,
   OpenCodeModelLimit,
@@ -21,6 +23,7 @@ export type {
   OpenCodePromptSkill,
   OpenCodeRuntime,
   OpenCodeSessionInfo,
+  OpenCodeSessionLiveness,
   OpenCodeSessionMessage,
   OpenCodeTokenUsage,
   OpenCodeSkill,
@@ -50,7 +53,6 @@ export {
   extractConfigDefaultAgent,
   isSelectableAgent,
   resolveDefaultAgentId,
-  resolvePlanExitAgentId,
 } from "./agents.js";
 export { openCodeBeforeForInclusiveCheckpoint } from "./fork.js";
 export {

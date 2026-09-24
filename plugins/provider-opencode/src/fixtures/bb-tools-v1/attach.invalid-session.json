@@ -1,0 +1,14 @@
+{
+  "case": "invalid-session",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {},
+  "error": {
+    "code": "invalid",
+    "message": "sessionID is required",
+    "data": {
+      "reason": "session",
+      "tools": []
+    }
+  }
+}

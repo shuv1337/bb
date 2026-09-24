@@ -1,0 +1,40 @@
+{
+  "case": "invalid-reserved",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "execute",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ]
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools[0].name \"execute\" is reserved",
+    "data": {
+      "tool": "execute",
+      "reason": "reserved",
+      "tools": [
+        {
+          "tool": "execute",
+          "reason": "reserved",
+          "detail": "tools[0].name \"execute\" is reserved"
+        }
+      ]
+    }
+  }
+}

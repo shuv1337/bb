@@ -1,0 +1,15 @@
+{
+  "case": "unavailable",
+  "method": "result",
+  "produces": "parse-error",
+  "input": {
+    "capability": "cap",
+    "success": true,
+    "contentItems": []
+  },
+  "error": {
+    "code": "unavailable",
+    "message": "call is not claimed",
+    "data": {}
+  }
+}

@@ -118,8 +118,9 @@ compact(): Promise<void>
 interrupt(): Promise<void>
 switchAgent(agent: string): Promise<void>
 switchModel(model: OpenCodeModelRef): Promise<void>
-update(patch: { title?: string; permissions?: OpenCodePermissionRule[] }): Promise<void>
+update(patch: { title?: string; permissions?: OpenCodePermissionRule[]; metadata?: Record<string, unknown> }): Promise<void>
 fork(checkpointMessageId?: string): Promise<SessionHandle>
+move(directory: string): Promise<SessionHandle>
 context(): Promise<readonly OpenCodeSessionMessage[]>
 // id, type, text?, agent?, model?, skill?, finish?, tokens?, cost?, content?
 // content is sanitized on every call: a key is stripped when its last word
@@ -133,6 +134,14 @@ replyForm(formID: string, answer: Record<string, string | number | boolean | str
 setEnvironment(variables: Record<string, string>): Promise<void>
 setInstructions(input: { mode: "append" | "replace"; text: string }): Promise<void>
 ```
+
+### Session update metadata
+
+`@opencode/client@2.0.15` and `@opencode/client@2.0.16` include `metadata` on `session.update`. This plugin stays on `@opencode/client@2.0.10`: that client's `session.update` drops `metadata`, and a client bump was not verified against both 2.0.15 engines or the pinned install contract (`./promise` and `./service` only, effect `4.0.0-rc.112`). A metadata patch is a typed runtime wrapper around raw `PATCH /api/session/:id`. Title and permission updates still use `client.session.update`.
+
+### Move
+
+`move(directory)` calls `client.session.move({ sessionID, directory })` (`POST /api/session/:id/move`, body `{ directory }`) and returns a new handle whose `location.directory` is the destination. The previous handle keeps its old Location. Plugin RPC is Location-scoped, so callers must use the returned handle before the next companion call.
 
 ### Fork (bb inclusive checkpoint)
 
@@ -158,9 +167,9 @@ Catalog ids from `skills()` / `commands()` only. `prompt.skills` is `{ id: strin
 
 `createSession` applies `sessionRulesForPermissionMode(permissionMode)` from `../permissions.ts`. Non-`full` **appends** `{ action:"*", resource:"*", effect:"ask" }` so agent wildcard allow cannot leak to webfetch/subagent/etc., then mode allows, then `external_directory` ask and **read+edit** `*.env` / `*.env.*` ask. No `.env.example` exemption in the overlay. Last-match-wins. Never writes `opencode.json`. Location scoping uses OpenCode's `external_directory` action, not path rewriting.
 
-### Default agent (leave plan)
+### Default agent
 
-`agents(location).defaultAgentId`:
+The OpenCode provider does not offer plan mode. `promptMode: "plan"` does not select the `plan` agent. `agents(location).defaultAgentId`:
 
 1. Last `default_agent` string on `config.get({ location })` document entries, if that id is selectable.
 2. Else `build` if selectable.
@@ -217,7 +226,7 @@ How a subscription ends:
 ### Bridge handling
 
 - `stream.error` → `provider.warning` "OpenCode event stream disconnected; reconnecting". The session stays attached.
-- `resync` (either reason) → `session.context()`, then `translator.reconcileAfterResync`: open tool items close as `completed`, open text and compaction items close, the last context message becomes the checkpoint id, and an open turn closes as `completed`. Events dropped by the outage or the overflow are not replayed. A turn still running in OpenCode reopens on its next event.
+- `resync` (either reason) → `session.context()`, then `translator.reconcileAfterResync` after the durable log's terminal events for the current execution are noted. A later `session.execution.started` clears the previous execution's success, so a resync mid-new-turn cannot close that turn with the previous success. A `log.synced`-only page is not complete evidence that no terminal exists. When the log has no terminal for the open turn, the bridge reads session activity (`outcome`, `time.idle`, and `GET /api/session/active`). An idle session with an outcome closes the turn as that outcome; open tool rows without their own terminal close as failed, or interrupted if the session was interrupted, with `tool outcome was not observed after the event stream reconnected`. A still-active session stays open. A failed activity read stays open and retries once. A new execution start with a different identity, or `thread/stop` release, closes that stale turn as failed with the same unobserved text and never as success. The last context message id becomes the checkpoint. Message content is not copied into tool arguments. Events dropped by the outage or the overflow are not replayed. The whole reconcile is deferred while that turn has a pending or claimed companion call.
 - A `durable.seq` gap on one aggregate runs the same reconcile for that session before the event's own deltas.
 - A handler that throws while applying a native event → `provider.error` scoped to the thread or turn, then one extra `resync`. If that extra resync fails, it is only logged and not retried.
 - A `resync` from the pump (reconnect or overflow) or from a resubscribe whose `context()` read fails → `provider.error` scoped to the thread or turn, not retried.
@@ -244,14 +253,14 @@ No session delete/import, no revert, no usage windows, no auto-start, no install
 
 ## Recorded wire facts
 
-From live captures against `@opencode/client@2.0.10` (shuvcode 2.0.8) and upstream `@opencode/cli@2.0.11`. The sanitized captures are `../fixtures/events-owned.sanitized.json`, `../fixtures/child-events.sanitized.json` and `../fixtures/event-types.json`.
+From live captures against `@opencode/client@2.0.10` (shuvcode 2.0.8) and upstream `@opencode/cli@2.0.11`. The sanitized captures are `../fixtures/events-owned.sanitized.json`, `../fixtures/child-events.sanitized.json`, `../fixtures/event-types.json`, and `../fixtures/tool-failed.sanitized.json` (a current `session.tool.failed` capture).
 
 - **Registrations.** Latest-channel binaries write unkeyed `$XDG_STATE_HOME/<app>/service.json`. Keyed `service-<sha1(channel)>.json` files are legacy channel names, so the scan globs `service*.json`. `Service.discover()` without `file` reads only `opencode/service.json` and cannot see shuvcode. `Service.ensure` SIGTERMs, SIGKILLs and deletes a registration on a version mismatch or timeout, which is why it is never called.
 - **Auth.** Unauthenticated `GET /api/info` is 401 with an empty body. Basic auth username is always `opencode`, also on shuvcode. The password is re-read from the registration and never persisted.
 - **Client shapes.** `session.create` returns `SessionInfo`, not `{ data }`. `event.subscribe({ signal })` yields decoded events. Permission replies go through `client.permission.reply({ sessionID, requestID, decision })`, while the `permission.replied` event carries `reply`. `session.form.reply` takes `answer`, not `answers`. `model.list`, `model.default` and `agent.list` are location-scoped (`{ location: { directory } }`); a directory outside a configured project can return zero models.
 - **SSE.** One process-wide stream, live only, no replay and no client reconnect. A late subscriber gets only `server.connected`. Child sessions carry `data.parentID` on `session.created` and inherit the parent's `metadata` and `permissions`.
 - **Envelopes.** Most session events carry `durable: { aggregateID, seq, version }`. `permission.asked`, `permission.replied`, `form.created`, `form.replied`, `session.usage.updated` and `session.text.delta` do not. `session.tool.called.data.state.thoughtSignature` is sensitive; `context()` and `unhandled` raw payloads strip it. Token usage lives on `Session.Info.tokens` as `{ input, output, reasoning, cache: { read, write } }`; the key `tokens` is not a secret.
-- **Recorded event names** are in `event-types.json`. The translator maps or ignores every recorded name, and also maps `session.execution.failed` and `session.execution.interrupted`, which settle turns. Never recorded: `session.idle`, `session.reasoning.*`, `session.tool.failed`, `session.tool.progress`, `session.tool.input.delta`, `session.compaction.failed`, `form.cancelled`, `session.forked`. Those stay `unhandled` until a capture shows their shape.
+- **Recorded event names** are in `event-types.json`. The translator maps or ignores every recorded name, and also maps `session.execution.failed` and `session.execution.interrupted`, which settle turns. `session.tool.failed` is translated: `error.type: "aborted"` closes the row `interrupted`, every other type closes it `failed`, and `error.message` is the row's error text. Still unrecorded, and still `unhandled` until a capture shows their shape: `session.idle`, `session.reasoning.*`, `session.tool.progress`, `session.tool.input.delta`, `session.compaction.failed`, `form.cancelled`, `session.forked`.
 - **Instructions.** No `instructions` field on session create or update. `session.instructions.entry.put` keys must match `^[a-z0-9][a-z0-9._-]*$` (a `/` is a 400). Entries are combined with `AGENTS.md`; putting `core.instructions` adds a second entry and does not replace the ambient one.
 - **Skills.** No session API registers a skill root. `prompt.skills[].id` and `session.skill` accept only catalog ids; unknown ids and filesystem paths are rejected.
 - **Commands.** `CommandInfo` is `{ name, description? }` with no path. An unknown name is `CommandNotFoundError`.
@@ -261,3 +270,25 @@ From live captures against `@opencode/client@2.0.10` (shuvcode 2.0.8) and upstre
 ## Fake runtime
 
 `createFakeOpenCodeRuntime` is the in-memory double. Bridge unit tests use it; they do not mock `fetch`. HTTP tests use a local `http.Server`, never a global `fetch` mock.
+
+## Companion status
+
+`src/companion-status.ts` reads companion status for a machine. It does not use `SessionHandle.rpc` (that call is bound to a session Location). `src/companion-location-rpc.ts` opens its own `@opencode/client` from `resolveAttachedRegistration` and calls `client.rpc.call` plus `client.plugin.list` with no session and no directory, so the engine uses its default Location. Explicit `OPENCODE_SERVER_URL` mode uses the same calls and does not scan the filesystem for the companion.
+
+`hello` is sent as `{ client, protocol: { min: 1, max: 1 } }`. A companion that rejects that input is retried with `{}`. A milestone-1 hello fills package, protocol range, install path/digest, instances, richFailures, and limits. A 0b hello (`protocol`, `version`, `generation`, `features` only) leaves versions, package, install, and instances unknown; overlap is still computed from the legacy `version` number when that is the only version field. `rpc.unavailable` / `RPC is unavailable: bb.tools.v1` is "not installed". Any other hello failure is not treated as absence.
+
+When `instances > 1`, or the plugin list has more than one active companion-shaped spec, status sets `duplicates` and includes those specs. The bridge uses the same `companionPluginSpecsFrom` list. `instances > 1` fails attachment before the turn with those specs. A single instance does not.
+
+The host entry method is `readCompanionStatus`. The server RPC is `companionStatus({ machineId })`. CLI: `bb opencode tools status --machine <id> [--json]`.
+
+`bbToolsRequired` (default false) is a provider setting. `deriveOpenCodeProviderOptions` copies it onto provider options, and `parseOpenCodeProviderOptions` copies it onto `AppliedSessionKnobs.bbToolsRequired`. The bridge stores it on the session from construct, resume, fork, and before every `turn/start` / `turn/steer`. If the flag is true and hello is absent, the turn fails with `bbToolsRequiredSetupMessage(appId)` and does not emit the dropped-tools warning. If the flag is false, the thread stays native-only and warns with `ABSENT_COMPANION_WARNING_SUMMARY` plus `absentCompanionWarningDetails` (the details still start with `Dropped dynamicTools:`). An out-of-range companion fails the turn either way.
+
+## bb.tools.v1 bridge
+
+Plugin-local schemas live in `src/tool-bridge-contract.ts`. Golden fixtures are vendored at `src/fixtures/bb-tools-v1/` with `COMPANION_VERSION` pinning package `opencode-bb-tools` `0.1.0` at commit `d9770b5`. The conformance test checks every fixture and the requests the client sends.
+
+`hello` sends `{ client: { name: "bb", version: "0.1.0" }, protocol: { min: 1, max: 1 } }`. Non-overlapping `versions` (or a legacy `version` used as a point range) fail the turn on the existing incompatible path. The bridge records `limits` and `features`.
+
+`attach` sends `disallowedTools` and does not send `bbThreadId`. The returned capability is stored on the owners record. That file is written mode `0600` because the capability is execution authority; it was not mode-restricted before. Resume and a restarted bridge present `takeover: { capability }`. `owner_active` waits `retryAfterMs` outside the session event queue, bounded by `ownerLeaseMs`, then fails with an actionable error. The queue is re-entered only to recheck and attach. A foreign bridge with no proof does not attach while the lease is live. `overloaded` fails immediately. `invalid` with `tools` drops those names, emits one `provider.warning` naming each tool and reason, and retries attach once. A failed retry uses the absent/incompatible fallback: a turn setup error, or a construct warning without a partial catalog.
+
+While a binding is held, including between turns, the bridge calls `status` every `ownerLeaseMs / 3`, with a bounded timeout and at most one renewal in flight. `bound: false` stops the timer and marks the binding stale so the next turn reattaches. Detach clears that timer. Capability values and `capability` / `takeover` fields are redacted from warnings, deltas, and errors. The pre-turn check compares `catalogDigest` as well as generation, epoch, and `bound`. A mismatch reattaches. `pending` sends `acknowledged` and `waitMs: 0`. The 500ms timer stays; a long poll inside the drain would hold cancellation past the teardown budget. Settlement reads `disposition`, not legacy `outcome`. `uncertain` does not redispatch and does not deliver a second result. `too_large` stops delivery; the companion already fails the native tool with `bb tool result exceeded the companion limit of N bytes`. `conflict` is not retried.

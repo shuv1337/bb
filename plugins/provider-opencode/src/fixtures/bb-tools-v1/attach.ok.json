@@ -1,0 +1,39 @@
+{
+  "method": "attach",
+  "case": "ok",
+  "produces": "success",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ],
+    "disallowedTools": [
+      "bb_hidden"
+    ],
+    "takeover": {
+      "capability": "cap_old"
+    }
+  },
+  "output": {
+    "bindingID": "b1",
+    "epoch": 1,
+    "capability": "cap_new",
+    "generation": "gen",
+    "catalogDigest": "5640d2f559f39ac734aef78e9d5fbdd00b171ac66c022a2f0a59e97883731104",
+    "ownerLeaseMs": 30000
+  }
+}

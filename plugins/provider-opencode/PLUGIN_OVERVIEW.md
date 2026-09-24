@@ -3,7 +3,7 @@ Start a thread, pick OpenCode v2, and talk to the OpenCode v2 service already ru
 ## What you get
 
 - Native OpenCode sessions, checkpoint forks, resume, rename, and compact.
-- Plan mode maps to the OpenCode `plan` agent. `defaultAgent` covers new threads. `defaultVariant` selects a catalog variant the picker cannot name.
+- The OpenCode provider does not offer plan mode. `defaultAgent` covers new threads. `defaultVariant` selects a catalog variant the picker cannot name.
 - Skills from OpenCode's catalog and `.opencode` / `.agents` / `.claude` directories.
 - Slash commands from OpenCode's catalog, plus project `.opencode/commands` and `.opencode/command`.
 - Listed on every host. Install runs only when no v2-capable app is present, and installs `shuvcode` (`npm install -g shuvcode`) unless `OPENCODE_APP=opencode` selects upstream OpenCode v2. An existing install of either app is used as is.

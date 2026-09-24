@@ -1,0 +1,21 @@
+{
+  "method": "result",
+  "case": "conflict",
+  "produces": "handler-error",
+  "input": {
+    "capability": "cap",
+    "key": "b1:ses_1:msg_1:call_1",
+    "success": true,
+    "contentItems": [
+      {
+        "type": "inputText",
+        "text": "echo: ok"
+      }
+    ]
+  },
+  "error": {
+    "code": "conflict",
+    "message": "result conflicts with the settled receipt",
+    "data": {}
+  }
+}
