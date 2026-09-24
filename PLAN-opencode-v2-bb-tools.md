@@ -1,12 +1,12 @@
 # First-class bb tools for OpenCode v2
 
-Investigation: 2026-09-23 PDT. Revised 2026-09-24 PDT after source-verified multi-lens review (see `REVIEW-opencode-v2-bb-tools.md`) and milestone 0b. Status: recommended design; milestone 0 passed 2026-09-24 PDT; not deployed.
+Investigation: 2026-09-23 PDT. Revised 2026-09-24 PDT after source-verified multi-lens review (see `REVIEW-opencode-v2-bb-tools.md`), milestone 0b, and the milestones 1–4 closeout. Status: implemented on `opencode-bb-tools` (see Milestones 1–4 results); not merged, not published, not rolled out.
 
 ## Recommendation
 
 Add a small OpenCode-native companion plugin, published and released as a **standalone repository and package** like any other OpenCode v2 plugin, installed with the engine's own `plugin add` command. Connect the bb provider to it through OpenCode's existing authenticated plugin RPC. The companion registers actual native tools and waits for bb to execute them through the existing `item/tool/call` contract.
 
-This is a credible path to full **bb tool parity** without restoring the historical session-tools engine API. Public extension primitives cover the main callback path. For full result fidelity, also implement a bounded native **rich-error result feature**: typed failures currently discard content, and AI protocol encoders stringify error objects instead of preserving their images. A companion metadata workaround would bypass normal output handling and depend on hooks for every replay. Prefer an explicit engine contract. Milestone 0 proved the composition (see 0a and 0b results). The product integration is not yet implemented.
+This is a credible path to full **bb tool parity** without restoring the historical session-tools engine API. Public extension primitives cover the main callback path. For full result fidelity, also implement a bounded native **rich-error result feature**: typed failures currently discard content, and AI protocol encoders stringify error objects instead of preserving their images. A companion metadata workaround would bypass normal output handling and depend on hooks for every replay. Prefer an explicit engine contract. Milestone 0 proved the composition (see 0a and 0b results). Milestones 1–4 implemented the companion contract, the provider adapter, presentation, and status on `opencode-bb-tools`. That branch is not merged or deployed.
 
 Recommended delivery has three parts: **the standalone companion package**, **provider integration in `plugins/provider-opencode`** (no bb core changes), and **rich-error support in Shuvcode's existing tool/result pipeline**. Rich errors raise fidelity; they are not a prerequisite for parity of ordinary calls. Stock OpenCode can support ordinary calls, successful media and text failures through the companion; it cannot be called fully faithful for rich failures until it includes the corresponding capability. On engines without it, a failed result degrades to its ordered text blocks plus an explicit `[N image(s) omitted: engine lacks rich tool errors]` marker, advertised through `hello`; never silently dropped. Keep that distinction visible in compatibility status and documentation. The rich-error work lives only in our Shuvcode fork and is carried as a fork patch across upstream syncs. Nothing in this plan is upstreamed.
 
@@ -277,23 +277,81 @@ Final run: 35 live tests, three consecutive runs on each engine, including overl
 
 #### Carried into milestone 1
 
-Spike shortcuts still true in the current code. Milestone 1 replaces them; they are not 0b failures.
+These were spike shortcuts, not 0b failures. Disposition is in Milestones 1–4 results.
 
-- Attach takeover has no live-owner fence. A second `attach` for an already-bound session always replaces the owner. Fencing is the new capability plus a numeric epoch. There is no owner heartbeat.
-- Durable-log recovery reads each page fully into memory (`response.text()`, then the parser caps at 4096 events) before the cap applies.
-- A late boundary for turn N leaving an in-flight N+1 call to deliver is unit-tested only (`src/bridge/companion-turn-closure.test.ts`). No live interleaving case.
-- Grandchild origin inheritance is unit-tested only (`src/ownership.test.ts` in the companion). Default `experimental.subagent_depth` is 1, and `general` / `explore` deny nested `subagent`, so a live grandchild was not scripted.
-- The binding check does not compare catalog digest.
-- Supported protocol is exactly version 1, not a range. The version override is `BB_TOOLS_PROTOCOL_VERSION`.
-- No duplicate `bb.tools.v1` detection.
-- Descendant authorization is in-memory for the Location lifetime and is not rebuilt after reload.
-- Fork metadata merge bypasses `@opencode/client@2.0.10` with a raw `PATCH`, because that client's `session.update` drops `metadata`.
-- Unclaimed settlement texts are implemented (`bb tool call cancelled`, `bb tool call failed: owner replaced`, `bb tool outcome unknown: the binding was revoked while the call was claimed`). The live cases covered the claimed paths.
+- Done: attach takeover is fenced by the persisted capability, a 0600 owners file, and the owner lease.
+- Still open: durable-log recovery still reads each page with `response.text()` before the 4096-event cap (`DURABLE_LOG_PAGE`).
+- Still open: a late boundary for turn N leaving an in-flight N+1 call is unit-tested only (`src/bridge/companion-turn-closure.test.ts`).
+- Still open: grandchild origin inheritance is unit-tested only. Default `experimental.subagent_depth` is 1, so a live grandchild was not scripted.
+- Done: the pre-turn check compares `catalogDigest`.
+- Done: `hello` advertises `versions: { min: 1, max: 1 }`. `BB_TOOLS_PROTOCOL_VERSION` remains a test override.
+- Done: `instances > 1` fails attachment.
+- Still the design: descendant authorization is in-memory for the Location lifetime and is not rebuilt after reload.
+- Kept: fork metadata merge is a raw `PATCH` because `@opencode/client` stays at 2.0.10.
+- Done: unclaimed settlement texts are implemented. Live cases covered the claimed paths.
 - Harness seams, not protocol: `injectResync`, `bbToolCapability`, `setIgnoreBbToolControl`.
+
+#### Milestones 1–4 results (2026-09-24 PDT)
+
+Implemented. Not merged to bb main, not published, not rolled out. No bb core change and no `HOST_DAEMON_PROTOCOL_VERSION` bump. Nothing was upstreamed.
+
+**bb** branch `opencode-bb-tools`, implementation HEAD `d03446fd7982f9c2cbf2073c928d4fa2595c301c` (this closeout commit is on top).
+
+- Milestone 1: `576fb7b29` schemas and vendored fixtures, `8e7cfb3f7` bridge protocol, `9f94e9093` fencing live tests, `6c25a43ec` lease waits off the session event queue, `d03446fd7` wave 2 protocol review fixes.
+- Milestone 2: `7effcd604` RPC client and session move, `58d484bbc` tool-call lifecycle and environment migration, `c3d73a718` plan mode removed, `29dd994b3` quiesce then persist the new owner, `9d4955d42` interrupt before move, `057e6c71f` bounded interrupt, `52f8af513` absent versus unreachable versus incompatible.
+- Milestone 3: `69acdb72c` one row and resync from native terminals, `380444cc0` recorded and live presentation, `112ef8f4c` resync scoped to the current execution, `2c814bfd6` stale turn close, `9df05ef96` child text and compaction close when the root turn is lost, `fa869fca8` merge.
+- Milestone 4: `cc33b5f27` status probe, `ca2a64313` RPC, CLI, and settings, `18c06f1f4` companion docs, `ed292704e` merge.
+
+**Companion** `~/repos/opencode-bb-tools` branch `m1`, HEAD `fb0a952b66c5c94125a28ed599d26a97786afed3`. Local git; not published. Commits: `585e752` protocol/registry/broker/failure split, `428d204` fixtures and unit tests, `be4baa8` package docs and real-engine suite, `7f8eb66` a failed attach does not revoke the previous owner, `fb0a952` rich failures.
+
+**Shuvcode** branch `bb-tools-engine`, HEAD `1e15c5e1c3eecbea1f3f74035736331082968789`, binary `/home/shuv/repos/shuvcode-bbtools/packages/cli/dist/shuvcode-linux-x64/bin/shuvcode` (`shuvcode v0.0.0-bb-tools-engine-202609242104`). Not released.
+
+- `tool-activity` `5341c3d97ed314796b06f254c72eb677438de0bd`: `fdc5cdba86` in-flight tool leases, `5341c3d97e` hosted calls, hooks, and sweep races.
+- `rich-tool-errors` `a799356cf1f2a9dfe2575ff30c7dcaa114bf33a4`: `6b67532d7f` content on `Tool.Error`, `6f0620413b` AI lowering, `75558b0f79` preserve failure content, `a799356cf1` truncation and remote-image parity with success.
+- Merge commits on `bb-tools-engine`: `3af964b240` location leases, `1e15c5e1c3` rich failure content.
+
+**Protocol.** The companion's `PROTOCOL.md` is the contract. Methods: `hello`, `attach`, `status`, `configure`, `pending`, `claim`, `result`, `reject`, `detach`.
+
+**Decisions made during 1–4.**
+
+- Takeover uses the persisted capability. The owners file is mode 0600. Lease is 30s. Heartbeat is `status` every `ownerLeaseMs / 3`.
+- Invalid tools are dropped with one per-tool warning and one attach retry. Duplicate companion instances (`instances > 1`) fail thread construction; they are not dropped.
+- Budgets: `maxBindings` 1024, `maxOutstandingCalls` 32, `maxResultBytes` 1 MiB. Over the result budget the native tool fails with `bb tool result exceeded the companion limit of N bytes` and the bridge does not retry.
+- Rich failures follow `context.features.richFailures`. The engine adopts a structural `_tag: "Tool.Error"`. `hello.features.richFailures` is that live probe, not an engine version. Stock and released Shuvcode 2.0.15-shuv.2 stay on the degraded omitted-image marker.
+- Human waits stay leased: the owner heartbeat continues while a binding is held, including between turns, and an in-flight tool keeps the Location lease.
+- Plan mode is removed from the OpenCode provider. The plan agent is still selectable by name.
+- Environment migration interrupts an active turn, with a bounded confirmation, then moves, persists the new owner, and reattaches.
+- Resync uses native session state. A missing terminal on an idle session closes open tool rows as failed, or interrupted if the session was interrupted, with `tool outcome was not observed after the event stream reconnected`. A still-active session stays open. Reconcile waits while a companion call is pending or claimed.
+- `pending` sends `waitMs: 0`. The 500ms timer stays.
+- `@opencode/client` stays pinned at 2.0.10. Metadata merge is a raw `PATCH /api/session/:id`.
+
+**Final test matrix (2026-09-24 PDT).** Logs: `/tmp/shuvcode/final-matrix-*.log`. Zero failures.
+
+| Engine | run1 | run2 | concurrent |
+| --- | --- | --- | --- |
+| stock OpenCode 2.0.15 | 46 passed | 46 passed | 46 passed |
+| installed Shuvcode 2.0.15-shuv.2 | 46 passed | 46 passed | 46 passed |
+| local `bb-tools-engine` | 46 passed | 46 passed | 46 passed |
+
+One vitest invocation of every `companion-*.live.test.ts` file per cell. The local binary reports `richFailures: true` and delivers the failure image as media. Stock and installed Shuvcode report false and keep the degraded marker. A result over `limits.maxResultBytes` fails once with the companion limit message. A 120 KiB success is delivered untouched (122880 bytes).
+
+Companion: typecheck clean; unit 24 passed; engine suite 6 passed on each of the three binaries. bb `pnpm exec turbo run typecheck test --filter=bb-plugin-provider-opencode`: typecheck and test succeeded, 331 passed, 46 live tests skipped because that command does not set `BB_OPENCODE_LIVE_ENGINE`.
+
+**Remaining before release.**
+
+- Companion npm publish. Needs the user. Do not publish from this branch.
+- Shuvcode release containing the `bb-tools-engine` patches. Needs the user's release workflow. Installed 2.0.15-shuv.2 does not include them.
+- bb branch review and merge to main. No PR has been opened.
+- Per-host rollout is milestone 5 and is not authorized.
+- Live TTL proof exists only in the injected-TTL core tests. Released binaries still have no TTL knob.
+- Anthropic and Bedrock rich-error live acceptance is unverified. Request-body tests cover the lowering. See `docs/rich-tool-errors.md` on `rich-tool-errors`.
+- Remote image bytes are unbounded on both the success and failure paths. Normalization skips non-`data:` URIs.
+- MCP `isError` content is out of scope. Native session UI does not render failure media.
+- Durable-log pages are still read fully into memory before the 4096 cap. Late turn-boundary interleaving and grandchild origin inheritance remain unit-only. Descendant authorization is still in-memory for the Location lifetime.
 
 ### 1. Implement the companion contract and lifecycle
 
-Replace the shortcuts in Carried into milestone 1 before treating the contract as done.
+The shortcuts in Carried into milestone 1 are closed or explicitly kept. See Milestones 1–4 results. Do not treat the remaining open items there as release blockers unless a later milestone takes them.
 
 **Companion:** create `src/index.ts`, `src/tool-registry.ts`, `src/tool-broker.ts`, `src/protocol.ts`, their tests, `PROTOCOL.md`, golden fixtures under `fixtures/bb.tools.v1/`, the real-engine suite with its fake bridge client, a README, and release CI (pack, test against pinned engines, publish on tag). Use runtime-provided Effect plugin APIs, schemas, generation/claim state and scoped disposal. Keep native auth material out of session metadata, logs and events. Test binding, schema rejection, internal aliases, catalog revisions, children/forks, attach takeover, cancellation, idempotent terminal-result delivery and settled-record retention. Register finite negotiated budgets and test explicit overload errors.
 
@@ -407,7 +465,7 @@ The plan changes no bb core package, so core package checks are not expected; if
 
 ## Risks, rollback and readiness
 
-The largest technical risk was composition. Milestone 0 passed that gate (see 0a and 0b results). Engine lifecycle (Location eviction, reload, prefix-based plugin restarts) remains: bindings are ephemeral and must be revalidated before every turn. Plugin disposal mid-turn ends the execution with `provider.no-route`; that is accepted engine behavior. Rich failed results are a confirmed engine gap, addressed by milestone 1b; stock compatibility must be described accurately until that feature exists there. The largest distribution risk is a separately installed npm package loading correctly against the narrower runtime module surface of released engine builds (peer `@opencode/plugin`, bundled `effect`, `Tool.Error` identity). Version skew between the bb provider and the companion is the cost of separate releases; the `hello` protocol range, vendored golden fixtures and actionable out-of-range errors contain it. These are early gates in milestone 0a, not late deployment surprises.
+The largest technical risk was composition. Milestone 0 passed that gate (see 0a and 0b results). Milestones 1–4 implemented the contract on the integration branch (see Milestones 1–4 results). Engine lifecycle remains: bindings are ephemeral and must be revalidated before every turn. Plugin disposal mid-turn ends the execution with `provider.no-route`; that is accepted engine behavior. Rich failed results exist on Shuvcode `bb-tools-engine` and are probed at runtime. Stock OpenCode 2.0.15 and released Shuvcode 2.0.15-shuv.2 still use the degraded omitted-image marker. The largest distribution risk is a separately installed npm package loading correctly against the narrower runtime module surface of released engine builds (peer `@opencode/plugin`, bundled `effect`, `Tool.Error` identity). Version skew between the bb provider and the companion is the cost of separate releases; the `hello` protocol range, vendored golden fixtures and actionable out-of-range errors contain it.
 
 Other concrete risks: schema/alias incompatibility between engine releases; multiple bridge owners on one shared service; plugin hot reload during a side-effecting call; unbounded image buffering; false success during event reconciliation; and confusing bb tool availability with global engine restart guarantees. The protocol, matrix and boundaries above address these directly.
 
@@ -417,7 +475,7 @@ Rollback, in order: drain/stop affected bb work and detach bindings; remove the 
 
 None remain. Decided 2026-09-24: repository `shuv1337/opencode-bb-tools` and npm package `opencode-bb-tools`; milestone 1b fixes the 60-minute ceiling; nothing is upstreamed. Creating and publishing the companion repository still needs explicit approval at that step.
 
-Milestone 0b passed on 2026-09-24 (see 0b results). Next is **milestone 1**, plus **1b** in Shuvcode. Nothing in this plan is upstreamed. Creating and publishing the companion repository still needs explicit approval at that step. The rest has concrete ownership and acceptance criteria, but full first-class capability must remain unclaimed until the combined and host tests pass. No product-policy decision is required to begin milestone 1. If strict prevention of all native automatic continuation is required, that is a separate engine policy decision, not something to conceal in this adapter.
+Milestones 0–4 passed on 2026-09-24 (see 0b results and Milestones 1–4 results). Next is review, companion publish, a Shuvcode release that contains `bb-tools-engine`, merge to bb main, then milestone 5 per host. None of those release steps is authorized by the implementation closeout. Nothing in this plan is upstreamed. Creating and publishing the companion repository still needs explicit approval at that step. Full first-class capability stays unclaimed until the host matrix passes. If strict prevention of all native automatic continuation is required, that is a separate engine policy decision, not something to conceal in this adapter.
 
 Independent review found and corrected: Code Mode inner-call identity collisions, auxiliary catalog leakage, canonical permission aliasing, cancellation followed by another turn, and rich failed-result loss through both Core and AI encoding. A second source-verified review (2026-09-24, `REVIEW-opencode-v2-bb-tools.md`) added: the absent-companion compatibility policy, environment-directory migration, local settlement of calls bb never answers, Location eviction/reload and plugin-prefix reload handling, duplicate-companion detection, the released engine runtime-module surface, the complete 1b target list, import-based ancestry spoofing, background subagents, native output truncation, and reuse of the existing `bbThreadId` marker. Follow-up decision (2026-09-24): the companion ships as a standalone OpenCode plugin repository/package installed with the engine's `plugin add`, and the plan makes no bb core changes; this replaced bb-side companion packaging and installation. The engine change is an explicit result of review, not an assumed capability. Tracked recurring gap: papercut `pc_0351eb1485f8`.
 

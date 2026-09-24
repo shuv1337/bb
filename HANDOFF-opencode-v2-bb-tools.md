@@ -1,63 +1,102 @@
 # Handoff: bb tools for OpenCode v2
 
-Written 2026-09-24 PDT. Read `PLAN-opencode-v2-bb-tools.md` first; it is the design of record. Milestone 0b passed. Next is milestone 1.
+Written 2026-09-24 PDT. Read `PLAN-opencode-v2-bb-tools.md` first, including "Milestones 1–4 results". Milestones 0–4 are implemented on the branches below. They are not merged, published, or rolled out.
 
 ## State
 
 | Item | Where | State |
 | --- | --- | --- |
-| Plan | bb branch `spike/opencode-bb-tools-0b`, HEAD `9331f42df67bf64648d75ac031e91f829948263d` | 0b results and design changes recorded; not pushed |
-| Companion spike | `~/repos/opencode-bb-tools` branch `spike-0b`, HEAD `3926d0dce6a472a2f8163c0063c85cc31459c427` | Local git repo, no remote |
-| Stock engine | `/tmp/oc-stock` (`npm i @opencode/cli@2.0.15`) | Temporary; reinstall if `/tmp` was cleared |
-| Shuvcode binary | `~/.npm-global/lib/node_modules/shuvcode/node_modules/shuvcode-linux-x64/bin/shuvcode` | 2.0.15-shuv.1 |
+| Plan | bb `/home/shuv/repos/bb` branch `opencode-bb-tools` | Implementation HEAD `d03446fd7982f9c2cbf2073c928d4fa2595c301c`; closeout docs are the commit after that. Not pushed |
+| Companion | `~/repos/opencode-bb-tools` branch `m1`, HEAD `fb0a952b66c5c94125a28ed599d26a97786afed3` | Local git. Includes rich failures. Not published |
+| Stock engine | `/tmp/oc-stock/node_modules/@opencode/cli-linux-x64/bin/opencode` | `@opencode/cli@2.0.15`. Reinstall if `/tmp` was cleared |
+| Installed Shuvcode | `~/.npm-global/lib/node_modules/shuvcode/node_modules/shuvcode-linux-x64/bin/shuvcode` | `2.0.15-shuv.2`. No `bb-tools-engine` patches. `richFailures` is false |
+| Local engine | `/home/shuv/repos/shuvcode-bbtools/packages/cli/dist/shuvcode-linux-x64/bin/shuvcode` | Branch `bb-tools-engine`, HEAD `1e15c5e1c3eecbea1f3f74035736331082968789`. `shuvcode v0.0.0-bb-tools-engine-202609242104`. `richFailures` is true |
+| `tool-activity` | `/home/shuv/repos/shuvcode-activity`, HEAD `5341c3d97ed314796b06f254c72eb677438de0bd` | In-flight Location leases. Merged into `bb-tools-engine` |
+| `rich-tool-errors` | `/home/shuv/repos/shuvcode-richerr`, HEAD `a799356cf1f2a9dfe2575ff30c7dcaa114bf33a4` | Rich failure content and lowering. Merged into `bb-tools-engine` |
 
 ## Decisions already made (do not reopen)
 
-- The companion is a standalone OpenCode plugin: repository `shuv1337/opencode-bb-tools`, npm package `opencode-bb-tools`, installed with the engine's `plugin add`. bb never ships or installs it. Creating the GitHub repo or publishing to npm needs explicit user approval at that step.
-- No bb core changes and no `HOST_DAEMON_PROTOCOL_VERSION` bump. All bb work stays in `plugins/provider-opencode`. If a core change seems necessary, stop and raise it.
-- Nothing is upstreamed. Shuvcode engine changes (milestone 1b) are fork patches.
-- Missing companion keeps today's native-only behavior with a warning; only an incompatible companion or an opted-in host hard-fails.
+- The companion is a standalone OpenCode plugin: repository `shuv1337/opencode-bb-tools`, npm package `opencode-bb-tools`, installed with the engine's `plugin add`. bb never ships or installs it. Creating the GitHub repo or publishing to npm needs explicit user approval.
+- No bb core changes and no `HOST_DAEMON_PROTOCOL_VERSION` bump. All bb work stays in `plugins/provider-opencode`.
+- Nothing is upstreamed. Shuvcode engine changes are fork patches on `bb-tools-engine`.
+- Missing companion keeps today's native-only behavior with a warning. An incompatible companion, a duplicate install, or an opted-in host hard-fails.
+- Takeover is the persisted capability in the 0600 owners file, plus a 30s lease and a heartbeat at `ownerLeaseMs / 3`.
+- `@opencode/client` stays at 2.0.10. Metadata merge is a raw `PATCH`.
+- Plan mode is not offered. The plan agent is still selectable by name.
+- Rich failures are a live probe (`hello.features.richFailures`), not an engine version string.
 
-## How to run
+## How to run the matrix
+
+From `~/repos/bb/plugins/provider-opencode`. One vitest invocation covers every `companion-*.live.test.ts` file. Each engine loads a private companion copy. Do not export `BB_OPENCODE_LIVE_ENGINE` into the unit turbo command; that command skips the live files.
 
 ```sh
-cd ~/repos/bb/plugins/provider-opencode
-pnpm exec turbo run typecheck test --filter=bb-plugin-provider-opencode
-# unit: 263 passed, 35 live tests skipped
+COMPANION=$HOME/repos/opencode-bb-tools
+PLUGIN=$HOME/repos/bb/plugins/provider-opencode
+STOCK=/tmp/oc-stock/node_modules/@opencode/cli-linux-x64/bin/opencode
+INSTALLED=$HOME/.npm-global/lib/node_modules/shuvcode/node_modules/shuvcode-linux-x64/bin/shuvcode
+LOCAL=/home/shuv/repos/shuvcode-bbtools/packages/cli/dist/shuvcode-linux-x64/bin/shuvcode
 
-BB_OPENCODE_LIVE_ENGINE=~/.npm-global/lib/node_modules/shuvcode/node_modules/shuvcode-linux-x64/bin/shuvcode \
-  pnpm exec vitest run --config vitest.config.ts \
-  src/bridge/companion-engine.live.test.ts \
-  src/bridge/companion-lifecycle.live.test.ts \
-  src/bridge/companion-ownership.live.test.ts \
-  src/bridge/companion-reload.live.test.ts > /tmp/oc-live.log 2>&1
+cd "$PLUGIN"
+BB_OPENCODE_LIVE_COMPANION=$COMPANION \
+BB_OPENCODE_LIVE_ENGINE=$LOCAL \
+  pnpm exec vitest run --config vitest.config.ts src/bridge/companion-*.live.test.ts \
+  > /tmp/shuvcode/final-matrix-live-local-run1.log 2>&1
 
-BB_OPENCODE_LIVE_ENGINE=/tmp/oc-stock/node_modules/@opencode/cli-linux-x64/bin/opencode \
-  BB_OPENCODE_LIVE_APP=opencode \
-  pnpm exec vitest run --config vitest.config.ts \
-  src/bridge/companion-engine.live.test.ts \
-  src/bridge/companion-lifecycle.live.test.ts \
-  src/bridge/companion-ownership.live.test.ts \
-  src/bridge/companion-reload.live.test.ts > /tmp/oc-live-stock.log 2>&1
+BB_OPENCODE_LIVE_COMPANION=$COMPANION \
+BB_OPENCODE_LIVE_ENGINE=$INSTALLED \
+  pnpm exec vitest run --config vitest.config.ts src/bridge/companion-*.live.test.ts \
+  > /tmp/shuvcode/final-matrix-live-installed-run1.log 2>&1
+
+BB_OPENCODE_LIVE_COMPANION=$COMPANION \
+BB_OPENCODE_LIVE_ENGINE=$STOCK BB_OPENCODE_LIVE_APP=opencode \
+  pnpm exec vitest run --config vitest.config.ts src/bridge/companion-*.live.test.ts \
+  > /tmp/shuvcode/final-matrix-live-stock-run1.log 2>&1
 ```
 
-`BB_OPENCODE_LIVE_KEEP=1` copies the engine root to `/tmp/shuvcode/kept-roots/` and then removes the original. Engine logs are under `<root>/data/<appId>/log/` (and under the kept copy). Live diagnostics are stderr `LIVE` lines. The bridge harness captures stdout as JSON-RPC; never write diagnostics to stdout. Companion typecheck: `cd ~/repos/opencode-bb-tools && npx tsc -p .`.
+Run each engine twice, back to back. Then run all three at once. Closeout result: 46 passed in every cell. Logs are `/tmp/shuvcode/final-matrix-live-<engine>-<run1|run2|concurrent>.log`.
+
+Companion, from `~/repos/opencode-bb-tools`:
+
+```sh
+npx tsc -p .
+node --experimental-strip-types --test test/unit/*.test.ts
+BB_OPENCODE_LIVE_ENGINE=$LOCAL BB_OPENCODE_LIVE_APP=shuvcode \
+  node --experimental-strip-types --test test/engine/*.test.ts
+```
+
+Repeat the engine suite with `$INSTALLED` and with `$STOCK` plus `BB_OPENCODE_LIVE_APP=opencode`. Closeout: typecheck clean, unit 24 passed, engine suite 6 passed on each binary.
+
+bb unit, from `~/repos/bb`, without `BB_OPENCODE_LIVE_ENGINE`:
+
+```sh
+pnpm exec turbo run typecheck test --filter=bb-plugin-provider-opencode
+git diff --check
+```
+
+Closeout: 331 passed, 46 live tests skipped. `git diff --check` was clean in both repos before the closeout docs commit.
+
+`BB_OPENCODE_LIVE_KEEP=1` copies the engine root to `/tmp/shuvcode/kept-roots/` and then removes the original. Live diagnostics are stderr `LIVE` lines. The bridge harness captures stdout as JSON-RPC; never write diagnostics to stdout.
 
 Do not touch the user's running `shuvcode serve --service`. Always use isolated roots. Do not point two live engines at one plugin checkout.
 
 ## Gotchas
 
-- Shipped engines are Bun-compiled and provide no plugin modules; the companion resolves `@opencode/*` and `effect` from its own `node_modules`. Keep `effect` pinned to the engine's exact version.
-- A companion-built `Tool.Error` fails the engine's `instanceof` and loses metadata; the `execute.after` re-wrap with `event.error.constructor` is what preserves it.
-- Local-directory plugins need a root `server.ts`/`index.ts`; if missing at engine start, adding it later is not picked up. `plugin add` accepts `git+file:///path#<sha>` and installs dependencies without running scripts.
-- A content change in a shared plugin checkout restarts every engine watching it. The harness copies the companion (and auxiliary plugin dirs) per engine, symlinks `node_modules`, and excludes `.git`.
-- Plugin state and RPC registrations are per Location. `session.move` changes a session's Location and drops the binding; the bridge handle's `location` then goes stale.
-- `GET /api/session/:id` returns `{data}`. `waitForSessionIdle` unwraps `data`, requires `outcome` of `succeeded`, `failed`, or `interrupted`, a numeric `time.idle`, and absence from `GET /api/session/active`.
-- `GET /api/experimental/session/:id/log` on these binaries returns only `log.synced` on the first page. Recovery pages with `after` and still reads one tail window when that first page is a watermark. Persisted assistant messages have no execution id; an unlinked origin is rejected, not treated as the live turn.
-- Shuvcode puts direct (`codemode:false`) tools inside Code Mode's `tools` object; stock 2.0.15 does not.
-- The first model request per session is a title request with no `tools`. Start engines with `--port 0` or consecutive stock engines reuse a keep-alive socket and fail with `fetch failed`.
-- `execute.before` for a direct call carries the name the model called (canonical); for Code Mode the first event is `execute`, then inner events use internal names with the same call ID.
+- Shipped engines are Bun-compiled and provide no plugin modules. The companion resolves `@opencode/*` and `effect` from its own `node_modules`. Keep `effect` pinned to the engine's exact version.
+- `hello.features.richFailures` is `context.features.richFailures === true`. The local `bb-tools-engine` binary is true. Stock 2.0.15 and installed 2.0.15-shuv.2 are false. Failure image tests must advertise model input `["text", "image"]` or the engine substitutes "Cannot read image" instead of delivering media.
+- A content change in a shared plugin checkout restarts every engine watching it. The harness copies the companion per engine, symlinks `node_modules`, and excludes `.git`.
+- Plugin state and RPC registrations are per Location. `session.move` drops the binding. Environment migration interrupts the active turn first, then moves and reattaches.
+- `GET /api/session/:id` returns `{data}`. `waitForSessionIdle` unwraps `data`.
+- The first model request per session is a title request with no `tools`. Start engines with `--port 0`.
+- `pending` uses `waitMs: 0`. A long poll inside the drain holds cancellation past the teardown budget.
+- Oversized results are `JSON.stringify(contentItems)` over `hello.limits.maxResultBytes` (1048576). The companion fails the tool; the bridge must not retry.
 
-## Next: milestone 1
+## Next
 
-Implement the companion contract and lifecycle. Pick up the spike shortcuts in the plan's "Carried into milestone 1" list before treating the contract as done. Milestone 1b (Shuvcode rich failures and in-flight Location activity, including the injected-TTL proof) is the fork patch. Nothing is upstreamed. Publishing the companion still needs explicit approval.
+Do not publish, push, or open a PR unless the user asks and confirms the exact target.
+
+1. User publishes `opencode-bb-tools` (or creates the GitHub repo first).
+2. User runs the Shuvcode release workflow so a released binary contains `bb-tools-engine`.
+3. Review and merge `opencode-bb-tools` to bb main.
+4. Milestone 5 is per-host rollout. It is not authorized.
+
+Still open, and not release blockers by themselves: live TTL proof only via injected core tests; Anthropic/Bedrock rich-error live acceptance unverified; remote image bytes unbounded on both paths; MCP `isError` content out of scope; durable-log pages still buffered before the 4096 cap; late turn-boundary interleaving and grandchild origin inheritance unit-only.
