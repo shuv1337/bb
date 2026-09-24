@@ -37,9 +37,6 @@ export function deriveOpenCodeProviderOptions(
   context: PluginProviderOptionsContext,
 ): OpenCodeProviderOptions {
   const variant = stringSetting(context.settings, "defaultVariant");
-  if (context.promptMode === "plan") {
-    return { agent: "plan", variant };
-  }
   return {
     agent: stringSetting(context.settings, "defaultAgent"),
     variant,
@@ -55,7 +52,6 @@ export function opencodeProviderDeclaration(): PluginProviderDeclaration {
       signInHint: OPENCODE_SIGN_IN_HINT,
       expiredHint: OPENCODE_EXPIRED_HINT,
       installUrl: OPENCODE_INSTALL_URL,
-      planModeCopy: "OpenCode will switch to the plan agent.",
       iconTint: { light: "#2563EB", dark: "#2563EB" },
     },
     models: { scope: "workspace" },
@@ -80,7 +76,7 @@ export function opencodeProviderDeclaration(): PluginProviderDeclaration {
       { id: "max", label: "Max" },
     ],
     ...OPENCODE_NATIVE_ROOTS_DECLARATION,
-    composerActions: ["plan"],
+    composerActions: [],
     deriveProviderOptions: deriveOpenCodeProviderOptions,
     extensionKinds: opencodeExtensionKinds,
   };

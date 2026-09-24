@@ -560,8 +560,8 @@ bb plugin config provider-opencode set defaultVariant thinking
 bb plugin config provider-opencode unset defaultVariant
 ```
 
-Empty `defaultAgent` uses OpenCode's `default_agent` (usually `build`). Plan
-mode always uses the OpenCode `plan` agent. Empty `defaultVariant` uses the
+Empty `defaultAgent` uses OpenCode's `default_agent` (usually `build`). The
+OpenCode provider does not offer plan mode. Empty `defaultVariant` uses the
 model's native default. A picker reasoning level is sent as the variant only
 when it is not `none` and the model lists it; otherwise `defaultVariant`
 applies, and it must be one of the model's variants or thread start fails.

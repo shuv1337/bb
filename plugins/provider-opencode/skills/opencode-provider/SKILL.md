@@ -18,8 +18,8 @@ bb plugin config provider-opencode unset defaultVariant
 ```
 
 `defaultAgent` is the OpenCode agent for new threads. Empty uses OpenCode's
-`default_agent` (usually `build`). Plan mode always uses `plan`. Unknown
-names fail at thread start.
+`default_agent` (usually `build`). The OpenCode provider does not offer plan
+mode. Unknown names fail at thread start.
 
 `defaultVariant` is an OpenCode catalog variant id (`thinking`, `minimal`,
 `high`, …). Empty uses the model's native default. A picker reasoning level

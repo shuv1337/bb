@@ -137,6 +137,23 @@ describe("OpenCode defaultAgent at thread start", () => {
     });
   });
 
+  it("treats a leftover plan prompt as the default agent instead of switching to plan", async () => {
+    await withAgents(async ({ request, created, agentOf }) => {
+      const started = await request("thread/start", {
+        threadId: "thr_plan_ignored",
+        cwd: CWD,
+        instructionMode: "append",
+        options: {
+          ...executionOptions("plan"),
+          promptMode: "plan",
+        },
+      });
+      expect(started.error).toBeUndefined();
+      expect(created.map((input) => input.agent)).toEqual([undefined]);
+      expect(await agentOf(providerThreadId(started))).toBeUndefined();
+    });
+  });
+
   it("does not switch a plan session to build when leaving plan onto an unknown agent", async () => {
     await withAgents(async ({ request, created, agentOf }) => {
       const started = await request("thread/start", {

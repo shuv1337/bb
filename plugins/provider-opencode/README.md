@@ -126,8 +126,8 @@ a latest version.
 ## Agents and variants
 
 `bb plugin config provider-opencode set defaultAgent reviewer` sets the
-plugin default. Plan composer action sends `{ agent: "plan" }`. Leaving plan
-sends `null` or that setting; the bridge resolves OpenCode's `default_agent`.
+plugin default. The OpenCode provider does not offer plan mode. Empty uses
+OpenCode's `default_agent`.
 
 `bb plugin config provider-opencode set defaultVariant thinking` sets
 `providerOptions.variant`. Empty means the model's native default (`null`).

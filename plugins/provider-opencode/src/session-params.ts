@@ -191,7 +191,10 @@ export function knobsFromExecution(args: {
   );
   const trimmed = args.options.instructions?.trim();
   return {
-    agent: providerOptions.agent,
+    agent:
+      args.options.promptMode === "plan" && providerOptions.agent === "plan"
+        ? null
+        : providerOptions.agent,
     model: resolveOpenCodeModelRef({
       wireId: args.options.model,
       reasoningLevel: args.options.reasoningLevel,

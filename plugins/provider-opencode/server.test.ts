@@ -43,7 +43,7 @@ describe("the OpenCode plugin", () => {
       usage: false,
       installation: true,
     });
-    expect(declaration.composerActions).toEqual(["plan"]);
+    expect(declaration.composerActions).toEqual([]);
     expect(declaration.capabilities.fork).toBe("checkpoint");
     expect(declaration.capabilities.supportsNativeUserQuestion).toBe(true);
     expect(declaration.capabilities.supportsThreadArchive).toBe(false);
@@ -93,7 +93,7 @@ describe("the OpenCode plugin", () => {
 });
 
 describe("deriveOpenCodeProviderOptions", () => {
-  it("sends plan while the composer is in plan mode and still forwards variant", () => {
+  it("treats a leftover plan prompt as the default agent and still forwards variant", () => {
     expect(
       deriveOpenCodeProviderOptions({
         threadId: "thr_1",
@@ -103,7 +103,17 @@ describe("deriveOpenCodeProviderOptions", () => {
         promptMode: "plan",
         settings: { defaultAgent: "reviewer", defaultVariant: "thinking" },
       }),
-    ).toEqual({ agent: "plan", variant: "thinking" });
+    ).toEqual({ agent: "reviewer", variant: "thinking" });
+    expect(
+      deriveOpenCodeProviderOptions({
+        threadId: "thr_1",
+        projectId: "prj_1",
+        model: "google/gemini-3.7-flash-high",
+        permissionMode: "accept-edits",
+        promptMode: "plan",
+        settings: {},
+      }),
+    ).toEqual({ agent: null, variant: null });
   });
 
   it("leaves blank defaultAgent and defaultVariant as null so the bridge resolves them", () => {

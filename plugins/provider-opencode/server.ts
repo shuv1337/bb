@@ -7,7 +7,7 @@ export default function plugin(bb: BbPluginApi): void {
       type: "string",
       label: "Default agent",
       description:
-        "OpenCode agent for new threads. Leave empty to use OpenCode's default_agent. Plan mode always uses plan.",
+        "OpenCode agent for new threads. Leave empty to use OpenCode's default_agent.",
       default: "",
     },
     defaultVariant: {
