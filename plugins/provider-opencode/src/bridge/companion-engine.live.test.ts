@@ -9,6 +9,7 @@ import {
   engineBinary,
   engineFetch,
   subscribeEngineEvents,
+  waitForSessionIdle,
   toolMessages,
   waitUntil,
 } from "./companion-engine.live-harness.js";
@@ -104,12 +105,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion live engine", ()
     await waitUntil(() => model.requests.length >= 1, "first turn");
     const target = join(engine.root, "moved");
     mkdirSync(target, { recursive: true });
-    await waitUntil(async () => {
-      const info = (await engineFetch(engine, `/api/session/${providerThreadId}`)) as {
-        status?: { type?: string };
-      };
-      return info.status?.type !== "busy";
-    }, "first turn to settle");
+    await waitForSessionIdle(engine, providerThreadId);
     await engineFetch(engine, `/api/session/${providerThreadId}/move`, {
       method: "POST",
       body: JSON.stringify({ directory: target }),

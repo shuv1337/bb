@@ -5,7 +5,6 @@ import { FULL_PERMISSION_OPTIONS } from "./test-support.js";
 import {
   answerToolCall,
   collectToolCalls,
-  companionDir,
   createLiveContext,
   deltaKinds,
   engineAppId,
@@ -13,14 +12,12 @@ import {
   engineFetch,
   subscribeEngineEvents,
   toolMessages,
+  waitForSessionIdle,
   waitUntil,
   type Engine,
   type EngineEvent,
   type LiveBridge,
 } from "./companion-engine.live-harness.js";
-
-const laterPluginDir = join("/tmp/shuvcode", "0b-c-later");
-const laterPluginFile = join(laterPluginDir, "server.ts");
 
 function markerSource(pluginId: string, rpcId: string): string {
   return [
@@ -41,9 +38,6 @@ function markerSource(pluginId: string, rpcId: string): string {
     "",
   ].join("\n");
 }
-
-mkdirSync(laterPluginDir, { recursive: true });
-writeFileSync(laterPluginFile, markerSource("bb-spike-later", "bb.spike.later"));
 
 function note(message: string): void {
   process.stderr.write(`LIVE ${engineAppId} ${message}\n`);
@@ -190,14 +184,13 @@ function configPath(engine: Engine): string {
 }
 
 async function waitIdle(engine: Engine, sessionId: string): Promise<void> {
-  let last = "";
-  await waitUntil(async () => {
-    const info = (await engineFetch(engine, `/api/session/${sessionId}`)) as { status?: { type?: string } };
-    last = info.status?.type ?? JSON.stringify(info).slice(0, 200);
-    return info.status?.type !== "busy";
-  }, `session idle (last status ${last})`).catch(async (error: unknown) => {
-    throw new Error(`${String(error)}; last status ${last}`);
-  });
+  await waitForSessionIdle(engine, sessionId);
+}
+
+function laterPluginFile(engine: Engine): string {
+  const later = engine.plugins.find((plugin) => plugin.endsWith("/plugins/later"));
+  if (later === undefined) throw new Error("missing isolated later plugin");
+  return join(later, "server.ts");
 }
 
 async function rawTurn(
@@ -218,7 +211,12 @@ async function rawTurn(
 }
 
 const ctx = createLiveContext({
-  plugins: (dir) => [dir, laterPluginDir],
+  plugins: ({ companionDir: dir, root }) => {
+    const later = join(root, "plugins", "later");
+    mkdirSync(later, { recursive: true });
+    writeFileSync(join(later, "server.ts"), markerSource("bb-spike-later", "bb.spike.later"));
+    return [dir, later];
+  },
   prepare: ({ root }) => {
     const dir = join(root, "config", engineAppId, "plugin", "aaa-early");
     mkdirSync(dir, { recursive: true });
@@ -268,7 +266,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
     const providerThreadId = await startThread("thread-companion-reload");
     await startTurn("thread-companion-reload", providerThreadId, "call echo and hold");
     await waitUntil(() => collectToolCalls(live).length === 1, "claimed call");
-    const restore = bump(join(companionDir, "server.ts"));
+    const restore = bump(join(engine.companionDir, "server.ts"));
     try {
       const started = Date.now();
       await waitUntil(async () => {
@@ -416,7 +414,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
     const providerThreadId = await startThread("thread-later-reload");
     await startTurn("thread-later-reload", providerThreadId, "call echo and hold");
     await waitUntil(() => collectToolCalls(live).length === 1, "claimed call");
-    const restore = bump(laterPluginFile);
+    const restore = bump(laterPluginFile(engine));
     try {
       const started = Date.now();
       await waitUntil(async () => (await markerHello(engine, "bb.spike.later")) !== beforeLater, "later plugin generation change", 45_000);
@@ -516,7 +514,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
     const path = configPath(engine);
     const original = readFileSync(path, "utf8");
     const parsed = JSON.parse(original) as { plugins?: string[] };
-    parsed.plugins = (parsed.plugins ?? []).filter((plugin) => plugin !== companionDir);
+    parsed.plugins = (parsed.plugins ?? []).filter((plugin) => plugin !== engine.companionDir);
     writeFileSync(path, `${JSON.stringify(parsed, null, 2)}\n`);
     try {
       const started = Date.now();

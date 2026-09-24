@@ -16,6 +16,7 @@ import {
   password,
   startLiveBridge,
   subscribeEngineEvents,
+  waitForSessionIdle,
   waitUntil,
   type Engine,
   type LiveBridge,
@@ -469,10 +470,7 @@ function toolNames(request: { tools?: Array<{ function?: { name?: string } }> } 
 }
 
 async function waitIdle(engine: Engine, sessionID: string): Promise<void> {
-  await waitUntil(async () => {
-    const info = (await engineFetch(engine, `/api/session/${sessionID}`)) as { status?: { type?: string } };
-    return info.status?.type !== "busy";
-  }, "session idle");
+  await waitForSessionIdle(engine, sessionID);
 }
 
 async function nativeInterrupt(engine: Engine, sessionID: string): Promise<unknown> {

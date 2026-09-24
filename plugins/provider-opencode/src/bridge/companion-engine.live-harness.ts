@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
   experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness,
@@ -161,6 +161,8 @@ export interface Engine {
   url: string;
   root: string;
   workspace: string;
+  companionDir: string;
+  plugins: readonly string[];
   env: NodeJS.ProcessEnv;
   process: ChildProcessWithoutNullStreams;
   stderr: string[];
@@ -187,8 +189,8 @@ export function prepareEngineRoot(
   model: MockModel,
   plugins: string[],
   modelInput: string[] = ["text"],
+  root = mkdtempSync(join(tmpdir(), "bb-oc-live-")),
 ): { root: string; workspace: string } {
-  const root = mkdtempSync(join(tmpdir(), "bb-oc-live-"));
   const workspace = join(root, "work");
   mkdirSync(workspace, { recursive: true });
   mkdirSync(join(root, "config", engineAppId), { recursive: true });
@@ -223,6 +225,7 @@ export async function startEngine(
   root: string,
   workspace: string,
   extraEnv?: NodeJS.ProcessEnv,
+  isolated: { companionDir: string; plugins: readonly string[] } = { companionDir, plugins: [] },
 ): Promise<Engine> {
   if (engineBinary === undefined) throw new Error("BB_OPENCODE_LIVE_ENGINE is not set");
   const env = { ...engineEnv(root), ...extraEnv };
@@ -254,6 +257,8 @@ export async function startEngine(
     url,
     root,
     workspace,
+    companionDir: isolated.companionDir,
+    plugins: isolated.plugins,
     env,
     process: child,
     stderr,
@@ -307,6 +312,38 @@ export async function engineFetch(engine: Engine, path: string, init?: RequestIn
   const text = await response.text();
   if (!response.ok) throw new Error(`${path} -> ${response.status}: ${text}`);
   return text.length === 0 ? null : JSON.parse(text);
+}
+
+const IDLE_OUTCOMES = new Set(["succeeded", "failed", "interrupted"]);
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function sessionPayload(raw: unknown): Record<string, unknown> {
+  const body = recordOf(raw);
+  if (body === undefined) return {};
+  return recordOf(body.data) ?? body;
+}
+
+export async function waitForSessionIdle(engine: Engine, sessionID: string): Promise<void> {
+  let last = "";
+  await waitUntil(async () => {
+    const info = sessionPayload(await engineFetch(engine, `/api/session/${sessionID}`));
+    const active = sessionPayload(await engineFetch(engine, "/api/session/active"));
+    const outcome = info.outcome;
+    const time = recordOf(info.time);
+    const idleAt = time?.idle;
+    const running = active[sessionID];
+    last = JSON.stringify({ outcome, idleAt, running });
+    return (
+      running === undefined &&
+      (outcome === "succeeded" || outcome === "failed" || outcome === "interrupted") &&
+      IDLE_OUTCOMES.has(outcome) &&
+      typeof idleAt === "number"
+    );
+  }, `session ${sessionID} idle (last ${last})`);
 }
 
 export async function waitUntil(predicate: () => boolean | Promise<boolean>, what: string, timeoutMs = 60_000) {
@@ -500,7 +537,7 @@ export interface StartThreadOptions {
 }
 
 export interface LiveContextOptions {
-  plugins?: (companionDir: string) => string[];
+  plugins?: (input: { companionDir: string; root: string }) => string[];
   env?: NodeJS.ProcessEnv;
   prepare?: (prepared: { root: string; workspace: string }) => void | Promise<void>;
   modelInput?: string[];
@@ -543,8 +580,39 @@ function clientRequestIdFor(value: number): string {
   return `creq_${suffix}`;
 }
 
+function copyPluginTree(source: string, dest: string): string {
+  mkdirSync(dest, { recursive: true });
+  cpSync(source, dest, {
+    recursive: true,
+    filter: (src) => basename(src) !== ".git" && basename(src) !== "node_modules",
+  });
+  const modules = join(source, "node_modules");
+  if (existsSync(modules)) symlinkSync(modules, join(dest, "node_modules"));
+  return dest;
+}
+
+function isolatePlugins(root: string, companionCopy: string, requested: readonly string[]): string[] {
+  const isolated: string[] = [];
+  let aux = 0;
+  for (const dir of requested) {
+    if (dir === companionCopy || dir === root || dir.startsWith(`${root}${sep}`)) {
+      isolated.push(dir);
+      continue;
+    }
+    aux += 1;
+    isolated.push(copyPluginTree(dir, join(root, "plugins", `aux-${aux}`)));
+  }
+  return isolated;
+}
+
+function keepEngineRoot(root: string): void {
+  const kept = join("/tmp/shuvcode/kept-roots", basename(root));
+  mkdirSync(join("/tmp/shuvcode/kept-roots"), { recursive: true });
+  cpSync(root, kept, { recursive: true });
+}
+
 export function createLiveContext(options: LiveContextOptions = {}): LiveContext {
-  const resolvePlugins = options.plugins ?? ((dir: string) => [dir]);
+  const resolvePlugins = options.plugins ?? ((input: { companionDir: string }) => [input.companionDir]);
   const modelInput = options.modelInput ?? ["text"];
   let model: MockModel | undefined;
   let engine: Engine | undefined;
@@ -553,9 +621,15 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
 
   beforeEach(async () => {
     model = await startMockModel();
-    const prepared = prepareEngineRoot(model, resolvePlugins(companionDir), modelInput);
+    const root = mkdtempSync(join(tmpdir(), "bb-oc-live-"));
+    const companionCopy = copyPluginTree(companionDir, join(root, "plugins", "companion"));
+    const plugins = isolatePlugins(root, companionCopy, resolvePlugins({ companionDir: companionCopy, root }));
+    const prepared = prepareEngineRoot(model, plugins, modelInput, root);
     await options.prepare?.(prepared);
-    engine = await startEngine(prepared.root, prepared.workspace, options.env);
+    engine = await startEngine(prepared.root, prepared.workspace, options.env, {
+      companionDir: companionCopy,
+      plugins,
+    });
     await waitForCompanion(engine);
     live = await startLiveBridge(engine);
   }, 90_000);
@@ -564,6 +638,9 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
     await live?.teardown();
     await engine?.stop();
     await model?.close();
+    if (engine !== undefined && process.env.BB_OPENCODE_LIVE_KEEP !== undefined) {
+      keepEngineRoot(engine.root);
+    }
     if (engine !== undefined && process.env.BB_OPENCODE_LIVE_KEEP === undefined) {
       rmSync(engine.root, { recursive: true, force: true });
     }
