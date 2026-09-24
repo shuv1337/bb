@@ -252,6 +252,28 @@ export async function startEngine(root: string, workspace: string): Promise<Engi
   };
 }
 
+export async function engineRpc(
+  engine: Engine,
+  method: string,
+  input: unknown,
+): Promise<{ status: number; body: string }> {
+  const response = await fetch(
+    new URL(
+      `/api/rpc/bb.tools.v1/${method}?location[directory]=${encodeURIComponent(engine.workspace)}`,
+      engine.url,
+    ),
+    {
+      method: "POST",
+      headers: {
+        authorization: engineAuthorization(),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ input }),
+    },
+  );
+  return { status: response.status, body: await response.text() };
+}
+
 export async function engineFetch(engine: Engine, path: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(new URL(path, engine.url), {
     ...init,
@@ -304,6 +326,8 @@ export interface LiveBridge {
   toolCalls: ToolCallRequest[];
   answered: Set<string | number>;
   handleLine(line: string): void;
+  injectResync(threadId: string): Promise<void>;
+  capability(threadId: string): string | undefined;
   teardown(): Promise<void>;
 }
 
@@ -335,6 +359,8 @@ export async function startLiveBridge(engine: Engine): Promise<LiveBridge> {
     toolCalls,
     answered: new Set(),
     handleLine: bridge.handleLine,
+    injectResync: (threadId) => bridge.injectResync(threadId),
+    capability: (threadId) => bridge.bbToolCapability(threadId),
     teardown: async () => {
       await bridge.closeAll();
       rpc.restore();
@@ -456,6 +482,10 @@ export interface LiveContext {
   readonly live: LiveBridge;
   startThread(threadId: string, opts?: StartThreadOptions): Promise<string>;
   startTurn(threadId: string, providerThreadId: string, text: string): Promise<void>;
+  request(
+    method: string,
+    params: BridgeJsonRpcObject,
+  ): Promise<{ error?: unknown; result?: unknown }>;
 }
 
 function clientRequestIdFor(value: number): string {
@@ -542,6 +572,13 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
       });
       const response = await started.live.rpc.waitForResponse(id);
       expect(response.error).toBeUndefined();
+    },
+    async request(method, params) {
+      const started = requireStarted();
+      requestId += 1;
+      const id = requestId;
+      started.live.rpc.sendRequest(id, method, params);
+      return started.live.rpc.waitForResponse(id);
     },
   };
 }
