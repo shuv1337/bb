@@ -418,7 +418,8 @@ export function createFakeOpenCodeRuntime(
       },
       rpc: async (rpcID) => {
         assertOpen();
-        throw new Error(`OpenCode RPC ${rpcID} is not registered`);
+        const message = `RPC is unavailable: ${rpcID}`;
+        throw new Error(message, { cause: { _tag: "RpcError", type: "rpc.unavailable", message } });
       },
       setInstructions: async (input) => {
         assertOpen();

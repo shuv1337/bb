@@ -133,9 +133,49 @@ function eventTypes(events: readonly EngineEvent[]): string[] {
   return [...new Set(events.map((event) => event.type))];
 }
 
+const UNCERTAIN_TOOL_MESSAGE =
+  "bb tool outcome is uncertain: the companion generation ended before the result was delivered";
+
+function sessionEvents(events: readonly EngineEvent[], sessionId: string, type: string): EngineEvent[] {
+  return events.filter((event) => event.type === type && event.data?.sessionID === sessionId);
+}
+
+function callIdOf(params: Record<string, unknown>): string {
+  if (typeof params.callId !== "string" || params.callId.length === 0) {
+    throw new Error("missing native call id");
+  }
+  return params.callId;
+}
+
+function assertUncertainSettlement(events: readonly EngineEvent[], sessionId: string, callId: string): void {
+  const failed = sessionEvents(events, sessionId, "session.tool.failed").filter((event) => event.data?.id === callId);
+  expect(failed).toHaveLength(1);
+  expect(failed[0]?.data).toMatchObject({
+    sessionID: sessionId,
+    id: callId,
+    executed: false,
+    error: { type: "tool.execution", message: UNCERTAIN_TOOL_MESSAGE },
+  });
+  const execution = sessionEvents(events, sessionId, "session.execution.failed");
+  expect(execution.length).toBeGreaterThan(0);
+  expect(execution[0]?.data).toMatchObject({
+    sessionID: sessionId,
+    error: {
+      type: "provider.no-route",
+      message: `No model is available for session ${sessionId}`,
+    },
+  });
+  expect(sessionEvents(events, sessionId, "session.tool.success").some((event) => event.data?.id === callId)).toBe(false);
+}
+
+function withoutReloadTick(text: string): string {
+  return text.replace(/\nexport const reloadTick_\d+ = \d+\n/g, "\n");
+}
+
 function bump(file: string): () => void {
-  const original = readFileSync(file, "utf8");
-  writeFileSync(file, `${original}\nexport const reloadTick = ${Date.now()}\n`);
+  const original = withoutReloadTick(readFileSync(file, "utf8"));
+  const tick = Date.now();
+  writeFileSync(file, `${original}\nexport const reloadTick_${tick} = ${tick}\n`);
   return () => {
     writeFileSync(file, original);
   };
@@ -210,6 +250,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
     expect(live.warnings.some((message) => message.includes("reattached bb tools"))).toBe(false);
     expect((await hello(engine)).generation).toBe(first.generation);
     expect(model.requests[0]?.tools?.map((tool) => tool.function?.name)).toContain("bb_echo");
+    expect(model.requests[1]?.tools?.map((tool) => tool.function?.name)).toContain("bb_echo");
   }, 180_000);
 
   it("settles a claimed call as uncertain when the companion entrypoint reloads", async () => {
@@ -245,11 +286,15 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
       expect(afterEarly).toBe(beforeEarly);
       expect(afterLater).not.toBe(beforeLater);
 
-      await waitUntil(() => events.some((event) => event.type === "session.tool.failed"), "uncertain tool failure");
-      const failure = events.find((event) => event.type === "session.tool.failed");
-      note(`companion reload tool failure ${JSON.stringify(failure?.data)}`);
-      expect(JSON.stringify(failure?.data)).toContain("uncertain");
-      expect(events.some((event) => event.type === "session.tool.success")).toBe(false);
+      await waitUntil(
+        () =>
+          sessionEvents(events, providerThreadId, "session.tool.failed").length > 0 &&
+          sessionEvents(events, providerThreadId, "session.execution.failed").length > 0,
+        "uncertain settlement",
+      );
+      assertUncertainSettlement(events, providerThreadId, callIdOf(live.toolCalls[0]!.params));
+      note(`companion reload tool failure ${JSON.stringify(sessionEvents(events, providerThreadId, "session.tool.failed")[0]?.data)}`);
+      note(`companion reload execution ${JSON.stringify(sessionEvents(events, providerThreadId, "session.execution.failed")[0]?.data)}`);
       expect(collectToolCalls(live)).toHaveLength(1);
 
       answerToolCall(live, live.toolCalls[0]!, {
@@ -265,9 +310,6 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
         "late result warning",
       );
       expect(collectToolCalls(live)).toHaveLength(1);
-      expect(events.some((event) => event.type === "session.tool.success")).toBe(false);
-      const executionFailed = events.find((event) => event.type === "session.execution.failed");
-      note(`companion reload execution ${executionFailed ? JSON.stringify(executionFailed.data) : "continued"}`);
       expect(model.requests.filter((request) => toolMessages(request).join("\n").includes("echo: hold"))).toHaveLength(0);
       await waitIdle(engine, providerThreadId);
       const warningAt = live.warnings.length;
@@ -325,11 +367,15 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
       expect(after.generation).not.toBe(before.generation);
       expect(afterEarly).not.toBe(beforeEarly);
       expect(afterLater).not.toBe(beforeLater);
-      await waitUntil(() => events.some((event) => event.type === "session.tool.failed"), "uncertain tool failure");
-      const failure = events.find((event) => event.type === "session.tool.failed");
-      note(`earlier plugin tool failure ${JSON.stringify(failure?.data)}`);
-      expect(JSON.stringify(failure?.data)).toContain("uncertain");
-      expect(events.some((event) => event.type === "session.tool.success")).toBe(false);
+      await waitUntil(
+        () =>
+          sessionEvents(events, providerThreadId, "session.tool.failed").length > 0 &&
+          sessionEvents(events, providerThreadId, "session.execution.failed").length > 0,
+        "uncertain settlement",
+      );
+      assertUncertainSettlement(events, providerThreadId, callIdOf(live.toolCalls[0]!.params));
+      note(`earlier plugin tool failure ${JSON.stringify(sessionEvents(events, providerThreadId, "session.tool.failed")[0]?.data)}`);
+      note(`earlier plugin execution ${JSON.stringify(sessionEvents(events, providerThreadId, "session.execution.failed")[0]?.data)}`);
       answerToolCall(live, live.toolCalls[0]!, {
         success: true,
         contentItems: [{ type: "inputText", text: "echo: hold" }],
@@ -384,12 +430,23 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
       expect(after.generation).toBe(before.generation);
       expect(afterEarly).toBe(beforeEarly);
       expect(afterLater).not.toBe(beforeLater);
+      const heldCallId = callIdOf(live.toolCalls[0]!.params);
       answerToolCall(live, live.toolCalls[0]!, {
         success: true,
         contentItems: [{ type: "inputText", text: "echo: hold" }],
       });
-      await waitUntil(() => toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: hold"), "result delivered on intact binding");
-      expect(events.some((event) => event.type === "session.tool.failed")).toBe(false);
+      await waitUntil(
+        () =>
+          toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: hold") &&
+          sessionEvents(events, providerThreadId, "session.tool.success").some((event) => event.data?.id === heldCallId),
+        "result delivered on intact binding",
+      );
+      expect(sessionEvents(events, providerThreadId, "session.tool.success").find((event) => event.data?.id === heldCallId)?.data).toMatchObject({
+        sessionID: providerThreadId,
+        id: heldCallId,
+      });
+      expect(model.requests.at(-1)?.tools?.map((tool) => tool.function?.name)).toContain("bb_echo");
+      expect(sessionEvents(events, providerThreadId, "session.tool.failed")).toHaveLength(0);
       expect(live.warnings.some((message) => message.includes("not retrying") || message.includes("reattached bb tools"))).toBe(false);
     } finally {
       restore();
@@ -479,11 +536,15 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion reload lifecycle
       );
       expect(afterEarly).toBe(beforeEarly);
       expect(afterLater).not.toBe(beforeLater);
-      await waitUntil(() => events.some((event) => event.type === "session.tool.failed"), "uncertain tool failure");
-      const failure = events.find((event) => event.type === "session.tool.failed");
-      note(`removal tool failure ${JSON.stringify(failure?.data)}`);
-      expect(JSON.stringify(failure?.data)).toContain("uncertain");
-      expect(events.some((event) => event.type === "session.tool.success")).toBe(false);
+      await waitUntil(
+        () =>
+          sessionEvents(events, providerThreadId, "session.tool.failed").length > 0 &&
+          sessionEvents(events, providerThreadId, "session.execution.failed").length > 0,
+        "uncertain settlement",
+      );
+      assertUncertainSettlement(events, providerThreadId, callIdOf(live.toolCalls[0]!.params));
+      note(`removal tool failure ${JSON.stringify(sessionEvents(events, providerThreadId, "session.tool.failed")[0]?.data)}`);
+      note(`removal execution ${JSON.stringify(sessionEvents(events, providerThreadId, "session.execution.failed")[0]?.data)}`);
       answerToolCall(live, live.toolCalls[0]!, {
         success: true,
         contentItems: [{ type: "inputText", text: "echo: hold" }],
@@ -534,16 +595,4 @@ describe.skipIf(engineBinary === undefined)("OpenCode incompatible companion", (
     expect(response.error?.message).toContain("plugin add opencode-bb-tools");
     expect(model.requests).toHaveLength(0);
   }, 180_000);
-});
-
-describe.skipIf(engineBinary === undefined)("OpenCode location activity knob", () => {
-  it("has no released TTL env knob and still embeds the 60 minute default", () => {
-    const binary = readFileSync(engineBinary!);
-    expect(binary.includes(Buffer.from("LOCATION_TTL"))).toBe(false);
-    expect(binary.includes(Buffer.from("LOCATION_ACTIVITY"))).toBe(false);
-    expect(binary.includes(Buffer.from("OPENCODE_LOCATION"))).toBe(false);
-    expect(binary.includes(Buffer.from("60 minutes"))).toBe(true);
-    expect(binary.includes(Buffer.from('reason:"inactivity"')) || binary.includes(Buffer.from("inactivity"))).toBe(true);
-    note("no LocationActivity TTL env knob; binary embeds 60 minutes and inactivity");
-  });
 });

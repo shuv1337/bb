@@ -1369,3 +1369,142 @@ it("turn/start rejects a native command naming an unknown skill before dispatch"
   expect(harness.fake.calls.commands).toEqual([]);
   expect(deltaKinds(threadId)).not.toContain("input.accepted");
 });
+
+const bbEchoTool = {
+  name: "bb_echo",
+  description: "echo",
+  inputSchema: { type: "object" },
+};
+
+function unavailableRpc(rpcID: string): Error {
+  const message = `RPC is unavailable: ${rpcID}`;
+  return new Error(message, { cause: { _tag: "RpcError", type: "rpc.unavailable", message } });
+}
+
+it("serializes concurrent turn/start checks into one companion attach", async () => {
+  let armed = false;
+  let bound = false;
+  let turnAttaches = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let releaseFirst: () => void = () => undefined;
+  const firstAttach = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const generation = "gen-1";
+  await useHarness({
+    scriptTurns: true,
+    wrapRuntime: (fake) => ({
+      ...fake,
+      createSession: async (input) => {
+        const handle = await fake.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (rpcID !== "bb.tools.v1") return handle.rpc(rpcID, method, payload);
+            if (method === "hello") {
+              return { protocol: "bb.tools.v1", version: 1, generation };
+            }
+            if (method === "status") {
+              return bound
+                ? { bound: true, generation, epoch: "b1" }
+                : { bound: false, generation };
+            }
+            if (method === "attach") {
+              if (!armed) {
+                bound = true;
+                return { bindingID: "b1", capability: "cap-1", generation };
+              }
+              turnAttaches += 1;
+              inFlight += 1;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              if (turnAttaches === 1) await firstAttach;
+              bound = true;
+              inFlight -= 1;
+              return { bindingID: "b1", capability: "cap-1", generation };
+            }
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const threadId = "thr_attach_race";
+  const started = await harness.startThread(threadId, { dynamicTools: [bbEchoTool] });
+  expect(started.error).toBeUndefined();
+  armed = true;
+  bound = false;
+  const sessionId = providerThreadId(started);
+  const turn = (id: number, clientRequestId: string) => {
+    harness.rpc.sendRequest(id, "turn/start", {
+      threadId,
+      providerThreadId: sessionId,
+      clientRequestId,
+      input: [{ type: "text", text: "go", mentions: [] }],
+      options: FULL_PERMISSION_OPTIONS,
+    });
+    return harness.rpc.waitForResponse(id);
+  };
+  const first = turn(801, "creq_23456789ab");
+  const second = turn(802, "creq_3456789abd");
+  await harness.waitFor(() => turnAttaches === 1, "first turn attach");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(turnAttaches).toBe(1);
+  expect(maxInFlight).toBe(1);
+  releaseFirst();
+  const responses = await Promise.all([first, second]);
+  expect(responses.every((response) => response.error === undefined)).toBe(true);
+  expect(turnAttaches).toBe(1);
+  expect(maxInFlight).toBe(1);
+});
+
+it("treats an unregistered companion as native-only and a transport failure as a turn error", async () => {
+  const threadId = "thr_companion_absent";
+  const started = await harness.startThread(threadId, { dynamicTools: [bbEchoTool] });
+  expect(started.error).toBeUndefined();
+  expect(
+    harness.deltasOf(threadId).some(
+      (delta) => delta.kind === "provider.warning" && String(delta.details).includes("bb_echo"),
+    ),
+  ).toBe(true);
+  const native = await harness.request("creq_456789abde", "turn/start", {
+    threadId,
+    providerThreadId: providerThreadId(started),
+    clientRequestId: "creq_456789abde",
+    input: [{ type: "text", text: "native", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(native.error).toBeUndefined();
+
+  await useHarness({
+    scriptTurns: true,
+    wrapRuntime: (fake) => ({
+      ...fake,
+      createSession: async (input) => {
+        const handle = await fake.createSession(input);
+        return {
+          ...handle,
+          rpc: async () => {
+            throw new Error("socket hang up");
+          },
+        };
+      },
+    }),
+  });
+  const brokenId = "thr_companion_transport";
+  const broken = await harness.startThread(brokenId, { dynamicTools: [bbEchoTool] });
+  expect(broken.error).toBeUndefined();
+  expect(harness.deltasOf(brokenId).some((delta) => delta.kind === "provider.warning")).toBe(false);
+  const failed = await harness.request("creq_56789abdef", "turn/start", {
+    threadId: brokenId,
+    providerThreadId: providerThreadId(broken),
+    clientRequestId: "creq_56789abdef",
+    input: [{ type: "text", text: "retry", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  expect(failed.error?.message).toContain("could not be reached");
+  expect(failed.error?.message).toContain("socket hang up");
+  expect(failed.error?.message).toContain("were not dropped");
+  expect(harness.deltasOf(brokenId).some((delta) => delta.kind === "provider.warning")).toBe(false);
+  expect(unavailableRpc("bb.tools.v1").message).toBe("RPC is unavailable: bb.tools.v1");
+});

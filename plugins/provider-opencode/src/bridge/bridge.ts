@@ -188,6 +188,7 @@ interface ThreadSession {
   dispatches: Set<InFlightDispatch>;
   bbToolDescriptors: readonly DynamicTool[] | undefined;
   bbTools: BbToolBinding | null;
+  bbToolsGate: Promise<void>;
 }
 
 interface BbToolBinding {
@@ -235,7 +236,10 @@ const bbToolStatusOutputSchema = z.object({
 const bbToolAttachOutputSchema = z.object({
   capability: z.string().min(1),
   bindingID: z.string().min(1),
+  generation: z.string().min(1),
 });
+
+const BB_TOOLS_ATTACH_ATTEMPTS = 3;
 
 class BbToolsSetupError extends Error {
   constructor(message: string) {
@@ -247,7 +251,14 @@ class BbToolsSetupError extends Error {
 type BbToolsHello =
   | { kind: "absent" }
   | { kind: "rejected"; message: string }
+  | { kind: "failed"; error: unknown }
   | { kind: "ok"; generation: string };
+
+type BbToolsHold =
+  | { kind: "held" }
+  | { kind: "unbound" }
+  | { kind: "absent" }
+  | { kind: "failed"; error: unknown };
 
 const bbToolPendingOutputSchema = z.object({
   calls: z.array(
@@ -1042,12 +1053,44 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     return `OpenCode companion ${protocol} protocol version ${version} is not supported (supported version: ${SUPPORTED_BB_TOOLS_PROTOCOL_VERSION}). Install a compatible opencode-bb-tools release with the engine's \`plugin add opencode-bb-tools\` and retry the turn.`;
   }
 
+  function bbToolsReachError(error: unknown): BbToolsSetupError {
+    return new BbToolsSetupError(
+      `OpenCode companion ${BB_TOOLS_RPC} could not be reached (${failureMessage(error)}). Retry the turn; bb tools were not dropped.`,
+    );
+  }
+
+  function isCompanionAbsent(error: unknown): boolean {
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (current !== undefined && current !== null && !seen.has(current)) {
+      seen.add(current);
+      if (typeof current === "object") {
+        const record = current as Record<string, unknown>;
+        if (record.type === "rpc.unavailable") return true;
+        if (typeof record.message === "string" && record.message === `RPC is unavailable: ${BB_TOOLS_RPC}`) {
+          return true;
+        }
+        current = record.cause;
+        continue;
+      }
+      break;
+    }
+    return false;
+  }
+
+  function classifyBbToolsRpcError(error: unknown): "absent" | "failed" {
+    if (error instanceof OpenCodeUnauthenticatedError) throw error;
+    return isCompanionAbsent(error) ? "absent" : "failed";
+  }
+
   async function readBbToolsHello(session: ThreadSession): Promise<BbToolsHello> {
     let raw: unknown;
     try {
       raw = await session.handle.rpc(BB_TOOLS_RPC, "hello", {});
-    } catch {
-      return { kind: "absent" };
+    } catch (error) {
+      return classifyBbToolsRpcError(error) === "absent"
+        ? { kind: "absent" }
+        : { kind: "failed", error };
     }
     const parsed = bbToolHelloOutputSchema.safeParse(raw);
     if (!parsed.success) {
@@ -1069,31 +1112,29 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     return { kind: "ok", generation: parsed.data.generation };
   }
 
-  async function bindingStillHeld(
+  async function readBbToolsHold(
     session: ThreadSession,
     binding: BbToolBinding,
     generation: string,
-  ): Promise<boolean> {
-    if (binding.generation !== generation) return false;
+  ): Promise<BbToolsHold> {
+    if (binding.generation !== generation) return { kind: "unbound" };
     try {
       const status = bbToolStatusOutputSchema.parse(
         await session.handle.rpc(BB_TOOLS_RPC, "status", { capability: binding.capability }),
       );
-      return (
-        status.bound &&
-        status.generation === generation &&
-        status.epoch === binding.epoch
-      );
-    } catch {
-      return false;
+      if (status.bound && status.generation === generation && status.epoch === binding.epoch) {
+        return { kind: "held" };
+      }
+      return { kind: "unbound" };
+    } catch (error) {
+      return classifyBbToolsRpcError(error) === "absent" ? { kind: "absent" } : { kind: "failed", error };
     }
   }
 
   async function installBbTools(
     session: ThreadSession,
     tools: readonly DynamicTool[],
-    generation: string,
-  ): Promise<void> {
+  ): Promise<BbToolBinding> {
     const output = bbToolAttachOutputSchema.parse(
       await session.handle.rpc(BB_TOOLS_RPC, "attach", {
         sessionID: session.handle.id,
@@ -1104,9 +1145,9 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         })),
       }),
     );
-    session.bbTools = {
+    return {
       capability: output.capability,
-      generation,
+      generation: output.generation,
       epoch: output.bindingID,
       inFlight: new Set(),
       draining: false,
@@ -1114,54 +1155,109 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     };
   }
 
+  function withBbToolsLock<T>(session: ThreadSession, body: () => Promise<T>): Promise<T> {
+    const run = session.bbToolsGate.then(body, body);
+    session.bbToolsGate = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  function absentBbTools(session: ThreadSession, tools: readonly DynamicTool[]): void {
+    session.bbTools = null;
+    warnDroppedTools(session, tools, "opencode-bb-tools is not installed");
+  }
+
+  async function syncBbTools(session: ThreadSession, mode: "construct" | "turn"): Promise<void> {
+    const tools = session.bbToolDescriptors;
+    if (tools === undefined || tools.length === 0) return;
+    const previous = session.bbTools;
+    for (let attempt = 0; attempt < BB_TOOLS_ATTACH_ATTEMPTS; attempt += 1) {
+      const hello = await readBbToolsHello(session);
+      if (hello.kind === "absent") {
+        absentBbTools(session, tools);
+        return;
+      }
+      if (hello.kind === "failed") {
+        if (mode === "turn") throw bbToolsReachError(hello.error);
+        return;
+      }
+      if (hello.kind === "rejected") {
+        session.bbTools = null;
+        if (mode === "turn") throw new BbToolsSetupError(hello.message);
+        return;
+      }
+      const current = session.bbTools;
+      if (current !== null) {
+        const held = await readBbToolsHold(session, current, hello.generation);
+        if (held.kind === "held") return;
+        if (held.kind === "absent") {
+          absentBbTools(session, tools);
+          return;
+        }
+        if (held.kind === "failed") {
+          if (mode === "turn") throw bbToolsReachError(held.error);
+          return;
+        }
+      }
+      let installed: BbToolBinding;
+      try {
+        installed = await installBbTools(session, tools);
+      } catch (error) {
+        if (error instanceof OpenCodeUnauthenticatedError) throw error;
+        if (isCompanionAbsent(error)) {
+          absentBbTools(session, tools);
+          return;
+        }
+        if (mode === "turn" && attempt + 1 === BB_TOOLS_ATTACH_ATTEMPTS) {
+          throw new BbToolsSetupError(
+            `OpenCode companion is installed but bb tools could not be reattached: ${failureMessage(error)}. Install a compatible opencode-bb-tools release with the engine's \`plugin add opencode-bb-tools\` and retry the turn.`,
+          );
+        }
+        if (mode === "construct" && attempt + 1 === BB_TOOLS_ATTACH_ATTEMPTS) {
+          warnDroppedTools(session, tools, failureMessage(error));
+          return;
+        }
+        continue;
+      }
+      if (installed.generation !== hello.generation) continue;
+      const confirmed = await readBbToolsHold(session, installed, installed.generation);
+      if (confirmed.kind === "held") {
+        session.bbTools = installed;
+        if (previous !== null) {
+          warn(
+            `reattached bb tools for ${session.threadId}: generation ${previous.generation} -> ${installed.generation}`,
+          );
+        }
+        return;
+      }
+      if (confirmed.kind === "absent") {
+        absentBbTools(session, tools);
+        return;
+      }
+      if (confirmed.kind === "failed") {
+        if (mode === "turn") throw bbToolsReachError(confirmed.error);
+        return;
+      }
+    }
+    if (mode === "turn") {
+      throw new BbToolsSetupError(
+        `OpenCode companion ${BB_TOOLS_RPC} generation changed before the binding could be confirmed. Retry the turn.`,
+      );
+    }
+  }
+
   async function attachBbTools(
     session: ThreadSession,
     tools: readonly DynamicTool[] | undefined,
   ): Promise<void> {
-    if (tools === undefined || tools.length === 0) return;
-    const hello = await readBbToolsHello(session);
-    if (hello.kind === "absent") {
-      warnDroppedTools(session, tools, "opencode-bb-tools is not installed");
-      return;
-    }
-    if (hello.kind === "rejected") return;
-    try {
-      await installBbTools(session, tools, hello.generation);
-    } catch (error) {
-      warnDroppedTools(session, tools, failureMessage(error));
-    }
+    session.bbToolDescriptors = tools;
+    await withBbToolsLock(session, () => syncBbTools(session, "construct"));
   }
 
   async function ensureBbTools(session: ThreadSession): Promise<void> {
-    const tools = session.bbToolDescriptors;
-    if (tools === undefined || tools.length === 0) return;
-    const hello = await readBbToolsHello(session);
-    if (hello.kind === "absent") {
-      session.bbTools = null;
-      warnDroppedTools(session, tools, "opencode-bb-tools is not installed");
-      return;
-    }
-    if (hello.kind === "rejected") {
-      session.bbTools = null;
-      throw new BbToolsSetupError(hello.message);
-    }
-    const previous = session.bbTools;
-    if (previous !== null && (await bindingStillHeld(session, previous, hello.generation))) {
-      return;
-    }
-    try {
-      await installBbTools(session, tools, hello.generation);
-    } catch (error) {
-      session.bbTools = null;
-      throw new BbToolsSetupError(
-        `OpenCode companion is installed but bb tools could not be reattached: ${failureMessage(error)}. Install a compatible opencode-bb-tools release with the engine's \`plugin add opencode-bb-tools\` and retry the turn.`,
-      );
-    }
-    if (previous !== null) {
-      warn(
-        `reattached bb tools for ${session.threadId}: generation ${previous.generation} -> ${hello.generation}`,
-      );
-    }
+    await withBbToolsLock(session, () => syncBbTools(session, "turn"));
   }
 
   function scheduleBbToolDrain(session: ThreadSession): void {
@@ -1348,6 +1444,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       dispatches: new Set(),
       bbToolDescriptors: undefined,
       bbTools: null,
+      bbToolsGate: Promise.resolve(),
     };
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
