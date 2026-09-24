@@ -223,6 +223,7 @@ const bbToolPendingOutputSchema = z.object({
     z.object({
       key: z.string().min(1),
       sessionID: z.string().min(1),
+      messageID: z.string().min(1),
       callID: z.string().min(1),
       tool: z.string().min(1),
       arguments: z.unknown(),
@@ -804,6 +805,20 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         );
       }
     }
+    if (
+      wrapped.sessionID === session.handle.id &&
+      session.bbTools !== null &&
+      translated.deltas.some((delta) => delta.kind === "turn.boundary")
+    ) {
+      await session.handle
+        .rpc(BB_TOOLS_RPC, "turn", {
+          capability: session.bbTools.capability,
+          state: "closed",
+        })
+        .catch((error: unknown) => {
+          warn(`could not mark bb turn closed for ${session.threadId}: ${failureMessage(error)}`);
+        });
+    }
     sendDeltas(session.threadId, translated.deltas);
     if (translated.deltas.some(isUnauthorizedFailure)) {
       sendAuthRecovery(session.threadId);
@@ -1114,6 +1129,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           tool: call.tool,
           arguments: call.arguments ?? {},
           providerNativeIds: true,
+          nativeSessionID: call.sessionID,
+          nativeMessageID: call.messageID,
         },
       });
     });
@@ -1393,6 +1410,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
     startPump(session, oc);
     await applyKnobs(session, args.knobs, args.instructions);
+    if (args.method === "thread/fork") {
+      const info = await args.handle.info();
+      await args.handle.update({
+        metadata: { ...(info.metadata ?? {}), bbThreadId: args.threadId },
+      });
+    }
     await attachBbTools(session, args.dynamicTools);
     announce(args.id, args.threadId, args.handle.id);
   }

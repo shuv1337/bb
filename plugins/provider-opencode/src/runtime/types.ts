@@ -238,6 +238,7 @@ export interface SessionHandle {
   update(patch: {
     title?: string;
     permissions?: OpenCodePermissionRule[];
+    metadata?: Record<string, unknown>;
   }): Promise<void>;
   fork(checkpointMessageId?: string): Promise<SessionHandle>;
   context(): Promise<readonly OpenCodeSessionMessage[]>;
