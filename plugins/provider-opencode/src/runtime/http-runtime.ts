@@ -31,6 +31,7 @@ import type {
   OpenCodeCommand,
   OpenCodeCommandInput,
   OpenCodeDiscoveryHealth,
+  OpenCodeJsonValue,
   OpenCodeLocation,
   OpenCodeModel,
   OpenCodeModelRef,
@@ -607,6 +608,11 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
           wrapClientError(error);
         }
       },
+      rpc: (rpcID: string, method: string, input: OpenCodeJsonValue) =>
+        run(async (client) => {
+          const response = await client.rpc.call({ rpcID, method, input, location });
+          return response.output;
+        }),
     };
   }
 

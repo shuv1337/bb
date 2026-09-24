@@ -8,6 +8,7 @@ export type {
   OpenCodeDiscoveryHealth,
   OpenCodeHealthStatus,
   OpenCodeInstructionMode,
+  OpenCodeJsonValue,
   OpenCodeLocation,
   OpenCodeModel,
   OpenCodeModelLimit,

@@ -33,6 +33,7 @@ import {
   threadStopParamsSchema,
   turnStartParamsSchema,
   turnSteerParamsSchema,
+  type DynamicTool,
   type InitializeResult,
   type PendingInteractionPayload,
   type ProviderBridgeContext,
@@ -62,6 +63,7 @@ import {
   OpenCodeUnauthenticatedError,
   resolvePlanExitAgentId,
   type OpenCodeModel,
+  type OpenCodeJsonValue,
   type OpenCodeNativeEvent,
   type OpenCodePermissionRule,
   type OpenCodeRuntime,
@@ -184,6 +186,54 @@ interface ThreadSession {
     timer: ReturnType<typeof setTimeout> | null;
   }>;
   dispatches: Set<InFlightDispatch>;
+  bbTools: BbToolBinding | null;
+}
+
+interface BbToolBinding {
+  capability: string;
+  inFlight: Set<string>;
+  draining: boolean;
+  drainAgain: boolean;
+}
+
+interface PendingBbToolCall {
+  threadId: string;
+  resolve: (result: BbToolCallResult) => void;
+}
+
+type BbToolCallResult = z.infer<typeof bbToolCallResultSchema>;
+
+const BB_TOOLS_RPC = "bb.tools.v1";
+const BB_TOOLS_CONTROL_EVENT = `rpc.${BB_TOOLS_RPC}.control`;
+
+const bbToolCallResultSchema = z.object({
+  success: z.boolean(),
+  contentItems: z.array(
+    z.discriminatedUnion("type", [
+      z.object({ type: z.literal("inputText"), text: z.string() }),
+      z.object({ type: z.literal("inputImage"), imageUrl: z.string() }),
+    ]),
+  ),
+});
+
+const bbToolAttachOutputSchema = z.object({ capability: z.string().min(1) });
+
+const bbToolPendingOutputSchema = z.object({
+  calls: z.array(
+    z.object({
+      key: z.string().min(1),
+      sessionID: z.string().min(1),
+      callID: z.string().min(1),
+      tool: z.string().min(1),
+      arguments: z.unknown(),
+    }),
+  ),
+});
+
+type BbPendingToolCall = z.infer<typeof bbToolPendingOutputSchema>["calls"][number];
+
+function toJsonValue(value: unknown): OpenCodeJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null));
 }
 
 interface InFlightDispatch {
@@ -228,6 +278,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   const sessions = new Map<string, ThreadSession>();
   const sessionsByProviderId = new Map<string, ThreadSession>();
   const pendingInteractions = new Map<string, PendingInteraction>();
+  const pendingBbToolCalls = new Map<string, PendingBbToolCall>();
+  let bbToolCallSerial = 0;
   const replyingInteractions = new Set<string>();
   const owners = new Map<string, OwnerRecord>();
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
@@ -718,6 +770,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     const native: OpenCodeNativeEvent = wrapped.event;
+    if (native.type === BB_TOOLS_CONTROL_EVENT) {
+      scheduleBbToolDrain(session);
+      return;
+    }
     if (
       wrapped.sessionID === session.handle.id &&
       PROVIDER_ACTIVITY.has(native.type)
@@ -936,6 +992,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   function warnDroppedTools(
     session: ThreadSession,
     tools: readonly { name: string }[] | undefined,
+    reason: string,
   ): void {
     if (session.warnedTools || tools === undefined || tools.length === 0) {
       return;
@@ -945,9 +1002,152 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       {
         kind: "provider.warning",
         summary: "OpenCode does not run bb plugin tools",
-        details: `Dropped dynamicTools: ${tools.map((tool) => tool.name).join(", ")}`,
+        details: `Dropped dynamicTools: ${tools.map((tool) => tool.name).join(", ")} (${reason})`,
       },
     ]);
+  }
+
+  async function attachBbTools(
+    session: ThreadSession,
+    tools: readonly DynamicTool[] | undefined,
+  ): Promise<void> {
+    if (tools === undefined || tools.length === 0) return;
+    try {
+      const output = bbToolAttachOutputSchema.parse(
+        await session.handle.rpc(BB_TOOLS_RPC, "attach", {
+          sessionID: session.handle.id,
+          tools: tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: toJsonValue(tool.inputSchema),
+          })),
+        }),
+      );
+      session.bbTools = {
+        capability: output.capability,
+        inFlight: new Set(),
+        draining: false,
+        drainAgain: false,
+      };
+    } catch (error) {
+      warnDroppedTools(session, tools, failureMessage(error));
+    }
+  }
+
+  function scheduleBbToolDrain(session: ThreadSession): void {
+    const binding = session.bbTools;
+    if (binding === null) return;
+    if (binding.draining) {
+      binding.drainAgain = true;
+      return;
+    }
+    binding.draining = true;
+    void (async () => {
+      try {
+        do {
+          binding.drainAgain = false;
+          const pending = bbToolPendingOutputSchema.parse(
+            await session.handle.rpc(BB_TOOLS_RPC, "pending", {
+              capability: binding.capability,
+            }),
+          );
+          for (const call of pending.calls) {
+            if (binding.inFlight.has(call.key)) continue;
+            binding.inFlight.add(call.key);
+            void runBbToolCall(session, binding, call).finally(() => {
+              binding.inFlight.delete(call.key);
+            });
+          }
+        } while (binding.drainAgain && !session.closed);
+      } catch (error) {
+        warn(`could not read pending bb tool calls for ${session.threadId}: ${failureMessage(error)}`);
+      } finally {
+        binding.draining = false;
+      }
+    })();
+  }
+
+  async function runBbToolCall(
+    session: ThreadSession,
+    binding: BbToolBinding,
+    call: BbPendingToolCall,
+  ): Promise<void> {
+    try {
+      await session.handle.rpc(BB_TOOLS_RPC, "claim", {
+        capability: binding.capability,
+        key: call.key,
+      });
+    } catch (error) {
+      warn(`could not claim bb tool call ${call.key}: ${failureMessage(error)}`);
+      return;
+    }
+    const result = await forwardBbToolCall(session, call);
+    try {
+      await session.handle.rpc(BB_TOOLS_RPC, "result", {
+        capability: binding.capability,
+        key: call.key,
+        success: result.success,
+        contentItems: result.contentItems,
+      });
+    } catch (error) {
+      warn(`could not deliver bb tool result ${call.key}: ${failureMessage(error)}`);
+    }
+  }
+
+  function forwardBbToolCall(
+    session: ThreadSession,
+    call: BbPendingToolCall,
+  ): Promise<BbToolCallResult> {
+    bbToolCallSerial += 1;
+    const id = `oc-tool-${bbToolCallSerial}`;
+    return new Promise((resolve) => {
+      pendingBbToolCalls.set(id, { threadId: session.threadId, resolve });
+      send({
+        jsonrpc: "2.0",
+        id,
+        method: "item/tool/call",
+        params: {
+          providerThreadId: session.handle.id,
+          threadId: session.threadId,
+          turnId: liveTurnIdOf(session) ?? null,
+          callId: call.callID,
+          tool: call.tool,
+          arguments: call.arguments ?? {},
+          providerNativeIds: true,
+        },
+      });
+    });
+  }
+
+  function handleBbToolCallResponse(response: NonNullable<ReturnType<typeof decodeBridgeJsonRpcResponse>>): void {
+    const id = String(response.id);
+    const pending = pendingBbToolCalls.get(id);
+    if (pending === undefined) return;
+    pendingBbToolCalls.delete(id);
+    if ("error" in response) {
+      pending.resolve({
+        success: false,
+        contentItems: [{ type: "inputText", text: response.error.message ?? "bb tool call failed" }],
+      });
+      return;
+    }
+    const parsed = bbToolCallResultSchema.safeParse(response.result);
+    pending.resolve(
+      parsed.success
+        ? parsed.data
+        : {
+            success: false,
+            contentItems: [{ type: "inputText", text: "bb returned an invalid tool result" }],
+          },
+    );
+  }
+
+  function settleBbToolCalls(threadId: string, reason: string): void {
+    for (const [id, pending] of pendingBbToolCalls) {
+      if (pending.threadId !== threadId) continue;
+      pendingBbToolCalls.delete(id);
+      pending.resolve({ success: false, contentItems: [{ type: "inputText", text: reason }] });
+    }
   }
 
   async function retireSession(
@@ -1014,6 +1214,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       liveProviderTurnId: undefined,
       pendingAccepts: [],
       dispatches: new Set(),
+      bbTools: null,
     };
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
@@ -1028,6 +1229,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     session.closed = true;
     clearPendingAccept(session);
     prunePendingInteractions(session.threadId);
+    settleBbToolCalls(session.threadId, "bb tool call was cancelled because the thread detached");
+    const bbTools = session.bbTools;
+    session.bbTools = null;
+    if (bbTools !== null) {
+      void session.handle
+        .rpc(BB_TOOLS_RPC, "detach", { capability: bbTools.capability })
+        .catch(() => undefined);
+    }
     session.abort.abort();
     if (sessions.get(session.threadId) === session) {
       sessions.delete(session.threadId);
@@ -1168,7 +1377,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     knobs: AppliedSessionKnobs;
     disallowedTools: readonly string[];
     instructions: "construct" | "frozen";
-    dynamicTools: readonly { name: string }[] | undefined;
+    dynamicTools: readonly DynamicTool[] | undefined;
   }): Promise<void> {
     const previous = await retireSession(args.threadId, args.handle.id);
     const oc = await runtime();
@@ -1184,7 +1393,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
     startPump(session, oc);
     await applyKnobs(session, args.knobs, args.instructions);
-    warnDroppedTools(session, args.dynamicTools);
+    await attachBbTools(session, args.dynamicTools);
     announce(args.id, args.threadId, args.handle.id);
   }
 
@@ -1653,6 +1862,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   function handleParsedMessage(parsed: unknown): void {
     const response = decodeBridgeJsonRpcResponse(parsed);
     if (response !== null) {
+      if (pendingBbToolCalls.has(String(response.id))) {
+        handleBbToolCallResponse(response);
+        return;
+      }
       if (pendingInteractions.has(String(response.id))) {
         handleInteractionResponse(response);
       }

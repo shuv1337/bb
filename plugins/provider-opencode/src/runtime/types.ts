@@ -1,3 +1,11 @@
+export type OpenCodeJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OpenCodeJsonValue[]
+  | { [key: string]: OpenCodeJsonValue };
+
 export type OpenCodeLocation = {
   directory: string;
 };
@@ -247,6 +255,7 @@ export interface SessionHandle {
     mode: OpenCodeInstructionMode;
     text: string;
   }): Promise<void>;
+  rpc(rpcID: string, method: string, input: OpenCodeJsonValue): Promise<unknown>;
 }
 
 export interface OpenCodeRuntime {

@@ -661,7 +661,7 @@ it("thread/fork warns about dropped tools and persists the fork's owner", async 
     expect.arrayContaining([
       expect.objectContaining({
         kind: "provider.warning",
-        details: "Dropped dynamicTools: bb_lookup",
+        details: expect.stringContaining("Dropped dynamicTools: bb_lookup"),
       }),
     ]),
   );

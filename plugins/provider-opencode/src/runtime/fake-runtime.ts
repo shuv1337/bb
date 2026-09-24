@@ -416,6 +416,10 @@ export function createFakeOpenCodeRuntime(
         assertOpen();
         session.environment = { ...variables };
       },
+      rpc: async (rpcID) => {
+        assertOpen();
+        throw new Error(`OpenCode RPC ${rpcID} is not registered`);
+      },
       setInstructions: async (input) => {
         assertOpen();
         if (input.mode === "replace") {
