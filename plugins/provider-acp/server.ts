@@ -82,7 +82,7 @@ export default async function acpProvidersPlugin(
     },
   });
 
-  let enableOpenCode = false;
+  let enableOpenCode = true;
 
   const registered = new Map<string, { key: string; dispose(): void }>();
 
