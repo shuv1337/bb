@@ -81,13 +81,6 @@ export const BB_TOOL_CALL_CANCELLED = "bb tool call cancelled";
 export const BB_TOOL_OUTCOME_UNKNOWN =
   "bb tool outcome unknown: claimed call was cancelled before a result arrived";
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
-
-const turnInterruptParamsSchema = z
-  .object({
-    threadId: z.string().min(1),
-    providerThreadId: z.string().min(1),
-  })
-  .passthrough();
 const RESUBSCRIBE_BACKOFF_INITIAL_MS = 250;
 const RESUBSCRIBE_BACKOFF_MAX_MS = 8_000;
 
@@ -127,7 +120,6 @@ const commandSchema = z.discriminatedUnion("method", [
   z.object({ method: z.literal("thread/fork"), params: threadForkParamsSchema }),
   z.object({ method: z.literal("turn/start"), params: turnStartParamsSchema }),
   z.object({ method: z.literal("turn/steer"), params: turnSteerParamsSchema }),
-  z.object({ method: z.literal("turn/interrupt"), params: turnInterruptParamsSchema }),
   z.object({ method: z.literal("thread/stop"), params: threadStopParamsSchema }),
   z.object({ method: z.literal("thread/discard"), params: threadDiscardParamsSchema }),
   z.object({ method: z.literal("thread/name/set"), params: threadNameSetParamsSchema }),
@@ -198,7 +190,6 @@ interface ThreadSession {
   }>;
   dispatches: Set<InFlightDispatch>;
   bbTools: BbToolBinding | null;
-  toolFailureWaiters: Set<() => void>;
 }
 
 interface BbToolBinding {
@@ -867,9 +858,6 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       });
     }
     if (wrapped.sessionID === session.handle.id) {
-      if (native.type === "session.tool.failed" && wrapped.sessionID === session.handle.id) {
-        for (const waiter of [...session.toolFailureWaiters]) waiter();
-      }
       if (native.type === "session.execution.started") {
         session.busy = true;
       }
@@ -1254,19 +1242,6 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
   }
 
-  function waitForObservedToolFailure(session: ThreadSession, timeoutMs: number): Promise<void> {
-    return new Promise((resolve) => {
-      const finish = (): void => {
-        clearTimeout(timer);
-        session.toolFailureWaiters.delete(finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, timeoutMs);
-      timer.unref?.();
-      session.toolFailureWaiters.add(finish);
-    });
-  }
-
   async function abandonForwardedCalls(session: ThreadSession): Promise<boolean> {
     const binding = session.bbTools;
     const hadOpen = (binding?.inFlight.size ?? 0) > 0 || (binding?.seenOpen.size ?? 0) > 0;
@@ -1367,7 +1342,6 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       pendingAccepts: [],
       dispatches: new Set(),
       bbTools: null,
-      toolFailureWaiters: new Set(),
     };
     sessions.set(threadId, session);
     sessionsByProviderId.set(handle.id, session);
@@ -1846,38 +1820,13 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         sendResult(request.id, { threadId: request.params.threadId });
         break;
       }
-      case "turn/interrupt": {
-        const session = sessions.get(request.params.threadId);
-        if (session === undefined || session.closed) {
-          sendResult(request.id, { ok: true });
-          break;
-        }
-        if (session.handle.id !== request.params.providerThreadId) {
-          sendError(
-            request.id,
-            BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
-            "providerThreadId does not match the live session",
-          );
-          break;
-        }
-        const abandoned = await abandonForwardedCalls(session);
-        if (abandoned) await waitForObservedToolFailure(session, 3_000);
-        if (hasInterruptibleWork(session, null) || hasOpenCompanionCalls(session)) {
-          await session.handle.interrupt().catch((error: unknown) => {
-            warn(`could not interrupt OpenCode session ${session.handle.id}: ${failureMessage(error)}`);
-          });
-        }
-        sendResult(request.id, { ok: true });
-        break;
-      }
       case "thread/stop": {
         const session = sessions.get(request.params.threadId);
         if (session === undefined) {
           sendResult(request.id, { ok: true, providerCheckpointId: null });
           break;
         }
-        const abandoned = await abandonForwardedCalls(session);
-        if (abandoned) await waitForObservedToolFailure(session, 3_000);
+        await abandonForwardedCalls(session);
         if (request.params.intent === "interrupt" && hasInterruptibleWork(session, request.params.activeTurnId)) {
           await session.handle.interrupt();
           const settled = await waitForSettlement(session);

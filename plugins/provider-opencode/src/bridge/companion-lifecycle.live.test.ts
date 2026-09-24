@@ -31,23 +31,20 @@ const OUTCOME_UNKNOWN_REPLACED = "bb tool outcome unknown: owner replaced while 
 describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () => {
   const ctx = createLiveContext();
 
-  it("settles a claimed call on bb interrupt and keeps tools for the next turn", async () => {
+  it("settles a claimed call on thread/stop interrupt and reattaches on resume", async () => {
     const { model, engine, live, startThread, startTurn, request } = ctx;
-    model.script.push(
-      { kind: "tool", name: "bb_echo", args: { text: "hold" } },
-      { kind: "text", text: "after interrupt" },
-      { kind: "tool", name: "bb_echo", args: { text: "again" } },
-      { kind: "text", text: "next done" },
-    );
+    model.script.push({ kind: "tool", name: "bb_echo", args: { text: "hold" } });
     const providerThreadId = await startThread("thread-interrupt");
     const capability = live.capability("thread-interrupt");
     await startTurn("thread-interrupt", providerThreadId, "call the echo tool and wait");
     const call = await claimedCall(live);
-    const interrupted = await request("turn/interrupt", {
+    const stopped = await request("thread/stop", {
       threadId: "thread-interrupt",
       providerThreadId,
+      intent: "interrupt",
+      activeTurnId: openTurnId(live, "thread-interrupt"),
     });
-    expect(interrupted.error).toBeUndefined();
+    expect(stopped.error).toBeUndefined();
     await waitUntil(
       () => cancelledIds(live).includes(call.id),
       "notifications/cancelled for the reverse call",
@@ -56,8 +53,30 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
       success: true,
       contentItems: [{ type: "inputText", text: LATE_REPLY }],
     });
+    const retained = await request("turn/start", {
+      threadId: "thread-interrupt",
+      providerThreadId,
+      input: [{ type: "text", text: "should not run", mentions: [] }],
+      clientRequestId: "creq_23456789ad",
+      options: FULL_PERMISSION_OPTIONS,
+    });
+    expect(JSON.stringify(retained.error)).toContain("No active OpenCode session");
+    const resumed = await request("thread/resume", {
+      threadId: "thread-interrupt",
+      cwd: engine.workspace,
+      providerThreadId,
+      instructionMode: "append",
+      options: FULL_PERMISSION_OPTIONS,
+      dynamicTools: [echoTool],
+    });
+    expect(resumed.error).toBeUndefined();
+    expect(live.capability("thread-interrupt")).toEqual(expect.any(String));
+    expect(live.capability("thread-interrupt")).not.toBe(capability);
     await waitIdle(engine, providerThreadId);
-    expect(live.capability("thread-interrupt")).toBe(capability);
+    model.script.push(
+      { kind: "tool", name: "bb_echo", args: { text: "again" } },
+      { kind: "text", text: "next done" },
+    );
     await startTurn("thread-interrupt", providerThreadId, "call the echo tool again");
     const next = await claimedCall(live, call.id);
     expect(seenByModel(model.requests, BB_TOOL_OUTCOME_UNKNOWN)).toBe(true);
@@ -65,7 +84,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
       success: true,
       contentItems: [{ type: "inputText", text: "echo: again" }],
     });
-    await waitUntil(() => seenByModel(model.requests, "echo: again"), "next turn round trip");
+    await waitUntil(() => seenByModel(model.requests, "echo: again"), "resumed turn round trip");
     expect(toolNames(model.requests.at(-1))).toContain("bb_echo");
     expect(seenByModel(model.requests, LATE_REPLY)).toBe(false);
     process.stderr.write(
@@ -78,6 +97,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     model.script.push({ kind: "tool", name: "bb_echo", args: { text: "native" } });
     const subscription = subscribeEngineEvents(engine);
     const providerThreadId = await startThread("thread-native-interrupt");
+    const capability = live.capability("thread-native-interrupt");
     await startTurn("thread-native-interrupt", providerThreadId, "call the echo tool and wait");
     const call = await claimedCall(live);
     const interrupted = await nativeInterrupt(engine, providerThreadId);
@@ -98,6 +118,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     expect(seenByModel(model.requests, LATE_REPLY)).toBe(false);
     expect(seenByModel(model.requests, "echo: native")).toBe(false);
     expect(JSON.stringify(failure)).toContain("Tool execution interrupted");
+    expect(live.capability("thread-native-interrupt")).toBe(capability);
     await subscription.stop();
     model.script.push(
       { kind: "tool", name: "bb_echo", args: { text: "after-native" } },
@@ -113,14 +134,9 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     expect(seenByModel(model.requests, LATE_REPLY)).toBe(false);
   }, 180_000);
 
-  it("revokes the binding on thread/stop and reattaches before the reconstructed next turn", async () => {
+  it("releases a claimed call on thread/stop and reattaches on resume", async () => {
     const { model, engine, live, startThread, startTurn, request } = ctx;
-    model.script.push(
-      { kind: "tool", name: "bb_echo", args: { text: "stopping" } },
-      { kind: "text", text: "after stop" },
-      { kind: "tool", name: "bb_echo", args: { text: "resumed" } },
-      { kind: "text", text: "resume done" },
-    );
+    model.script.push({ kind: "tool", name: "bb_echo", args: { text: "stopping" } });
     const providerThreadId = await startThread("thread-stop");
     const capability = live.capability("thread-stop");
     expect(capability).toEqual(expect.any(String));
@@ -129,7 +145,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     const stopped = await request("thread/stop", {
       threadId: "thread-stop",
       providerThreadId,
-      intent: "interrupt",
+      intent: "release",
       activeTurnId: null,
     });
     expect(stopped.error).toBeUndefined();
@@ -167,8 +183,13 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
       ),
     ).toBe(false);
     await waitIdle(engine, providerThreadId);
+    model.script.push(
+      { kind: "tool", name: "bb_echo", args: { text: "resumed" } },
+      { kind: "text", text: "resume done" },
+    );
     await startTurn("thread-stop", providerThreadId, "call the echo tool after resume");
     const next = await claimedCall(live, call.id);
+    expect(seenByModel(model.requests, BB_TOOL_OUTCOME_UNKNOWN)).toBe(true);
     answerToolCall(live, next, {
       success: true,
       contentItems: [{ type: "inputText", text: "echo: resumed" }],
@@ -177,7 +198,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     expect(seenByModel(model.requests, LATE_REPLY)).toBe(false);
     expect(toolNames(model.requests.at(-1))).toContain("bb_echo");
     process.stderr.write(
-      `\nLIVE stop always detaches; no retained-session stop path. engine=${engineAppId}\n`,
+      `\nLIVE release detaches; next turn is thread/resume. engine=${engineAppId}\n`,
     );
   }, 180_000);
 
@@ -224,12 +245,14 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     );
     expect(live.answered.has(call.id)).toBe(false);
     const startedAt = Date.now();
-    const interrupted = await request("turn/interrupt", {
+    const stopped = await request("thread/stop", {
       threadId: "thread-blocked",
       providerThreadId,
+      intent: "interrupt",
+      activeTurnId: openTurnId(live, "thread-blocked"),
     });
     const elapsedMs = Date.now() - startedAt;
-    expect(interrupted.error).toBeUndefined();
+    expect(stopped.error).toBeUndefined();
     expect(elapsedMs).toBeLessThan(8_000);
     process.stderr.write(`\nLIVE interrupt returned in ${elapsedMs}ms while a call was claimed\n`);
     expect(model.requests.some((item) => JSON.stringify(item.messages).includes("finish without waiting"))).toBe(true);
@@ -323,6 +346,16 @@ function cancelledIds(live: LiveBridge): Array<string | number> {
     if (typeof requestId === "string" || typeof requestId === "number") ids.push(requestId);
   }
   return ids;
+}
+
+function openTurnId(live: LiveBridge, threadId: string): string {
+  const open = [...deltaKinds(live, threadId)].reverse().find(
+    (delta) => delta.kind === "turn.open" && typeof delta.providerTurnId === "string",
+  );
+  if (open === undefined || typeof open.providerTurnId !== "string") {
+    throw new Error(`no open turn for ${threadId}`);
+  }
+  return open.providerTurnId;
 }
 
 async function claimedCall(live: LiveBridge, except?: string | number): Promise<ToolCallRequest> {
