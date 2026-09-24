@@ -83,12 +83,16 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
         additionalProperties: false,
       },
     };
-    model.script.push(
-      { kind: "tool", name: "bb_lookup", args: { id: "alpha" } },
-      { kind: "text", text: "a-done" },
-      { kind: "tool", name: "bb_lookup", args: { query: "beta", limit: 2 } },
-      { kind: "text", text: "b-done" },
-    );
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("catalog a lookup") && !blob.includes("found alpha")) {
+        return { kind: "tool", name: "bb_lookup", args: { id: "alpha" } };
+      }
+      if (blob.includes("catalog b lookup") && !blob.includes("found beta")) {
+        return { kind: "tool", name: "bb_lookup", args: { query: "beta", limit: 2 } };
+      }
+      return { kind: "text", text: "done" };
+    };
     const rootA = await startThread("thread-catalog-a", { dynamicTools: [byId] });
     const rootB = await startThread("thread-catalog-b", { dynamicTools: [byQuery] });
     await startTurn("thread-catalog-a", rootA, "catalog a lookup");
@@ -180,9 +184,11 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
       .filter((item) => JSON.stringify(item.messages).includes("unrelated"))
       .flatMap((item) => toolMessages(item));
     process.stderr.write(`\nLIVE unrelated tools: ${JSON.stringify(toolNames(request ?? { messages: [] }))}\n`);
-    process.stderr.write(`\nLIVE unrelated failures: ${seen.join(" | ")}\n`);
+    const failures = seen.join("\n");
+    process.stderr.write(`\nLIVE unrelated failures: ${failures}\n`);
     expect(collectToolCalls(live)).toHaveLength(0);
-    expect(seen.join("\n")).not.toMatch(/echo:/);
+    expect(failures.replaceAll('\\"', '"')).toContain('No tool named "bb_echo" is currently available');
+    expect(failures).toContain("Tool is not available for this request: bbt_b1_0");
   }, 180_000);
 
   it("rejects a bb call from an imported session whose parentID is the bound root", async () => {
@@ -261,10 +267,12 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
       arguments: { text: "child-hello" },
       providerNativeIds: true,
     });
-    expect(call.params.turnId).toEqual(expect.any(String));
-    expect(call.params.nativeSessionID).toEqual(expect.any(String));
-    expect(call.params.nativeSessionID).not.toBe(root);
-    expect(call.params.nativeMessageID).toEqual(expect.any(String));
+    const opened = deltaKinds(live, "thread-child").find(
+      (delta) => delta.kind === "turn.open" && delta.parentRef === undefined && typeof delta.providerTurnId === "string",
+    );
+    expect(call.params.turnId).toBe(opened?.providerTurnId);
+    expect(call.params.nativeSessionID).toBeUndefined();
+    expect(call.params.nativeMessageID).toBeUndefined();
     expect(call.params.callId).toEqual(expect.any(String));
     const childRequest = model.requests.find((request) =>
       JSON.stringify(request.messages).includes("Call bb_echo with text child-hello"),
@@ -277,7 +285,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
       "child owning turn boundary",
     );
     await subscription.stop();
-    expect(JSON.stringify(progress?.data)).toContain(String(call.params.nativeSessionID));
+    expect(JSON.stringify(progress?.data)).toContain("sessionID");
   }, 180_000);
 
   it("rejects a background subagent bb call after the owning turn ends", async () => {
@@ -334,6 +342,185 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     expect(collectToolCalls(live)).toHaveLength(before);
   }, 180_000);
 
+  it("rejects an old child call after a new root turn opens", async () => {
+    const { model, engine, live, startThread, startTurn } = ctx;
+    const subscription = subscribeEngineEvents(engine);
+    let launched = false;
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("CALL_BB_AFTER_NEW_TURN")) return { kind: "tool", name: "bb_echo", args: { text: "late" } };
+      if (blob.includes("You are a subagent")) return { kind: "text", text: "child waiting" };
+      if (!launched && blob.includes("launch then replace")) {
+        launched = true;
+        return {
+          kind: "tool",
+          name: "subagent",
+          args: {
+            agent: "general",
+            description: "Background echo",
+            prompt: "Say hello and stop.",
+            background: true,
+          },
+        };
+      }
+      return { kind: "text", text: "parent done" };
+    };
+    const root = await startThread("thread-stale-child");
+    await startTurn("thread-stale-child", root, "launch then replace");
+    await waitUntil(
+      () =>
+        deltaKinds(live, "thread-stale-child").some(
+          (delta) =>
+            delta.kind === "turn.boundary" &&
+            typeof delta.providerTurnId === "string" &&
+            delta.providerTurnId.includes(root),
+        ),
+      "first owning turn boundary",
+    );
+    const progress = subscription.events.find((event) => event.type === "session.tool.progress");
+    const progressMeta = isRecord(progress?.data) && isRecord(progress.data.metadata) ? progress.data.metadata : {};
+    const sessionID = typeof progressMeta.sessionID === "string" ? progressMeta.sessionID : "";
+    expect(sessionID.startsWith("ses_")).toBe(true);
+    await startTurn("thread-stale-child", root, "second root turn");
+    await waitUntil(
+      () =>
+        deltaKinds(live, "thread-stale-child").filter(
+          (delta) =>
+            delta.kind === "turn.boundary" &&
+            typeof delta.providerTurnId === "string" &&
+            delta.providerTurnId.includes(root),
+        ).length >= 2,
+      "second owning turn boundary",
+    );
+    const before = collectToolCalls(live).length;
+    await promptNative(engine, sessionID, "CALL_BB_AFTER_NEW_TURN");
+    await waitUntil(() => {
+      const late = model.requests.filter((request) => JSON.stringify(request.messages).includes("CALL_BB_AFTER_NEW_TURN"));
+      return late.flatMap((request) => toolMessages(request)).join("\n").includes(TURN_ENDED);
+    }, "stale child rejection");
+    await subscription.stop();
+    const failure = model.requests
+      .filter((request) => JSON.stringify(request.messages).includes("CALL_BB_AFTER_NEW_TURN"))
+      .flatMap((request) => toolMessages(request))
+      .join("\n");
+    process.stderr.write(`\nLIVE stale child rejection: ${failure}\n`);
+    expect(failure).toContain(TURN_ENDED);
+    expect(collectToolCalls(live)).toHaveLength(before);
+  }, 180_000);
+
+  it("does not authorize an imported session resumed through subagent", async () => {
+    const { model, engine, live, startThread, startTurn } = ctx;
+    let importedID = "";
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("CALL_BB_FROM_IMPORTED")) return { kind: "tool", name: "bb_echo", args: { text: "stolen" } };
+      if (importedID.length > 0 && blob.includes("resume imported")) {
+        return {
+          kind: "tool",
+          name: "subagent",
+          args: {
+            agent: "general",
+            description: "Resume imported",
+            prompt: "CALL_BB_FROM_IMPORTED",
+            sessionID: importedID,
+          },
+        };
+      }
+      return { kind: "text", text: "setup done" };
+    };
+    const root = await startThread("thread-launder");
+    await startTurn("thread-launder", root, "setup before resume");
+    await waitUntil(
+      () => deltaKinds(live, "thread-launder").some((delta) => delta.kind === "turn.boundary"),
+      "launder setup boundary",
+    );
+    const exported = payloadOf(await engineFetch(engine, `/api/experimental/session/${root}/export`));
+    const info = isRecord(exported.info) ? exported.info : payloadOf(await engineFetch(engine, `/api/session/${root}`));
+    importedID = `ses_resume_${Date.now().toString(36)}`;
+    await engineFetch(engine, "/api/experimental/session/im" + "port", {
+      method: "POST",
+      body: JSON.stringify({
+        info: { ...info, id: importedID, parentID: root, title: "resumed imported" },
+        messages: [],
+        location: { directory: engine.workspace },
+      }),
+    });
+    await startTurn("thread-launder", root, "resume imported");
+    await waitUntil(
+      () => model.requests.some((request) => JSON.stringify(request.messages).includes("CALL_BB_FROM_IMPORTED")),
+      "resumed imported model request",
+    );
+    const request = model.requests.find((item) => JSON.stringify(item.messages).includes("CALL_BB_FROM_IMPORTED"));
+    expect(toolNames(request ?? { messages: [] }).some((name) => name === "bb_echo" || name.startsWith("bbt_"))).toBe(
+      false,
+    );
+    await waitUntil(() => {
+      const late = model.requests.filter((item) => JSON.stringify(item.messages).includes("CALL_BB_FROM_IMPORTED"));
+      return late.flatMap((item) => toolMessages(item)).length > 0;
+    }, "resumed imported call to settle");
+    const failure = model.requests
+      .filter((item) => JSON.stringify(item.messages).includes("CALL_BB_FROM_IMPORTED"))
+      .flatMap((item) => toolMessages(item))
+      .join("\n");
+    process.stderr.write(`\nLIVE resumed imported: ${failure}\n`);
+    expect(failure.replaceAll('\\"', '"')).toContain('No tool named "bb_echo" is currently available');
+    expect(collectToolCalls(live)).toHaveLength(0);
+  }, 180_000);
+
+  it("denies a descendant call after the root disallowedTools list changes", async () => {
+    const { model, engine, live, startThread, startTurn, steerTurn } = ctx;
+    const subscription = subscribeEngineEvents(engine);
+    let launched = false;
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("CHILD_DENIED_ECHO")) return { kind: "tool", name: "bb_echo", args: { text: "late" } };
+      if (blob.includes("You are a subagent")) return { kind: "text", text: "child ready" };
+      if (!launched && blob.includes("spawn for deny")) {
+        launched = true;
+        return {
+          kind: "tool",
+          name: "subagent",
+          args: {
+            agent: "general",
+            description: "Hold",
+            prompt: "Say ready.",
+            background: true,
+          },
+        };
+      }
+      return { kind: "tool", name: "bb_echo", args: { text: "hold-parent" } };
+    };
+    const root = await startThread("thread-deny-later");
+    await startTurn("thread-deny-later", root, "spawn for deny");
+    await waitUntil(
+      () => collectToolCalls(live).some((call) => call.params.arguments !== undefined && JSON.stringify(call.params.arguments).includes("hold-parent")),
+      "parent hold call",
+    );
+    const progress = subscription.events.find((event) => event.type === "session.tool.progress");
+    const progressMeta = isRecord(progress?.data) && isRecord(progress.data.metadata) ? progress.data.metadata : {};
+    const sessionID = typeof progressMeta.sessionID === "string" ? progressMeta.sessionID : "";
+    expect(sessionID.startsWith("ses_")).toBe(true);
+    const opened = deltaKinds(live, "thread-deny-later").find(
+      (delta) => delta.kind === "turn.open" && delta.parentRef === undefined && typeof delta.providerTurnId === "string",
+    );
+    expect(typeof opened?.providerTurnId).toBe("string");
+    await steerTurn("thread-deny-later", root, String(opened?.providerTurnId), "policy update", ["bb_echo"]);
+    const before = collectToolCalls(live).length;
+    await promptNative(engine, sessionID, "CHILD_DENIED_ECHO");
+    await waitUntil(() => {
+      const late = model.requests.filter((request) => JSON.stringify(request.messages).includes("CHILD_DENIED_ECHO"));
+      return late.flatMap((request) => toolMessages(request)).length > 0;
+    }, "denied descendant call");
+    await subscription.stop();
+    const failure = model.requests
+      .filter((request) => JSON.stringify(request.messages).includes("CHILD_DENIED_ECHO"))
+      .flatMap((request) => toolMessages(request))
+      .join("\n");
+    process.stderr.write(`\nLIVE descendant deny: ${failure}\n`);
+    expect(failure).toContain("bb_echo is denied for this bb thread");
+    expect(collectToolCalls(live)).toHaveLength(before);
+  }, 180_000);
+
   it("runs a native fork native-only and gives a bb fork its own binding", async () => {
     const { model, engine, live, startThread, startTurn, forkThread } = ctx;
     const forkedTool = {
@@ -346,12 +533,14 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
         additionalProperties: false,
       },
     };
-    model.script.push(
-      { kind: "text", text: "source done" },
-      { kind: "text", text: "native fork done" },
-      { kind: "tool", name: "bb_forked", args: { note: "fresh" } },
-      { kind: "text", text: "bb fork done" },
-    );
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("bb fork turn") && !blob.includes("fresh")) {
+        return { kind: "tool", name: "bb_forked", args: { note: "fresh" } };
+      }
+      if (blob.includes("native fork turn")) return { kind: "text", text: "native fork done" };
+      return { kind: "text", text: "source done" };
+    };
     const root = await startThread("thread-fork-source");
     await startTurn("thread-fork-source", root, "source turn before fork");
     await waitUntil(
@@ -449,12 +638,17 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
       ],
     });
     await waitUntil(() => model.requests.length >= 2, "image continuation");
-    const next = model.requests[1];
-    process.stderr.write(`\nLIVE image continuation: ${JSON.stringify(next.messages)}\n`);
-    const blob = JSON.stringify(next.messages);
-    expect(toolMessages(next).join("\n")).toContain("caption");
-    expect(blob).toContain("image");
-    expect(blob).toContain("data:image/png;base64,");
+    const next = model.requests.find((request) => toolMessages(request).some((text) => text.includes("caption")));
+    expect(next).toBeDefined();
+    const messages = next?.messages ?? [];
+    const toolIndex = messages.findIndex(
+      (message) => message.role === "tool" && String(message.content).includes("caption"),
+    );
+    const follow = messages[toolIndex + 1];
+    process.stderr.write(`\nLIVE image follow: ${JSON.stringify(follow)}\n`);
+    expect(toolIndex).toBeGreaterThanOrEqual(0);
+    expect(follow?.role).toBe("user");
+    expect(follow?.content).toEqual([{ type: "image_url", image_url: { url: PNG } }]);
   }, 180_000);
 
   it("delivers a result over 50 KiB without native truncation", async () => {
@@ -478,40 +672,52 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
 
   it("strips bb tools from compaction and generate model requests", async () => {
     const { model, engine, live, startThread, startTurn } = ctx;
-    model.script.push({ kind: "text", text: "ready for auxiliary" });
+    const subscription = subscribeEngineEvents(engine);
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("MUST use this format") || blob.includes("summarize the conversation")) {
+        return { kind: "text", text: "## Objective\n- auxiliary setup\n" };
+      }
+      return { kind: "text", text: "ready for auxiliary" };
+    };
     const root = await startThread("thread-auxiliary");
     await startTurn("thread-auxiliary", root, "auxiliary setup");
     await waitUntil(
       () => deltaKinds(live, "thread-auxiliary").some((delta) => delta.kind === "turn.boundary"),
       "auxiliary setup boundary",
     );
-    const before = model.allRequests.length;
+    const beforeGenerate = model.allRequests.length;
     const generated = await engineFetch(engine, `/api/session/${root}/generate`, {
       method: "POST",
       body: JSON.stringify({ prompt: "generate a private label" }),
     });
+    const generateRequests = model.allRequests
+      .slice(beforeGenerate)
+      .filter((request) => JSON.stringify(request.messages).includes("generate a private label"));
+    const beforeCompact = model.allRequests.length;
     await engineFetch(engine, `/api/session/${root}/compact`, {
       method: "POST",
       body: JSON.stringify({}),
     });
-    await waitUntil(() => model.allRequests.length > before + 1, "auxiliary model requests", 90_000);
-    await waitUntil(
-      () => deltaKinds(live, "thread-auxiliary").filter((delta) => delta.kind === "turn.boundary").length >= 2,
-      "compaction boundary",
-      90_000,
-    ).catch(() => undefined);
-    const auxiliary = model.allRequests.slice(before);
-    const names = auxiliary.flatMap((request) => toolNames(request));
+    await waitUntil(async () => {
+      if (deltaKinds(live, "thread-auxiliary").some((delta) => delta.kind === "context.compacted")) return true;
+      const listed = JSON.stringify(await engineFetch(engine, `/api/session/${root}/message`));
+      return listed.includes('"type":"compaction"') && listed.includes('"status":"completed"');
+    }, "compaction ended", 90_000);
+    await subscription.stop();
+    const compactRequests = model.allRequests.slice(beforeCompact);
+    const phase = [...generateRequests, ...compactRequests];
     process.stderr.write(
       `\nLIVE auxiliary requests: ${JSON.stringify({
         generated,
-        count: auxiliary.length,
-        tools: auxiliary.map((request) => toolNames(request)),
-        roles: auxiliary.map((request) => request.messages.map((message) => message.role)),
+        generate: generateRequests.map((request) => toolNames(request)),
+        compact: compactRequests.map((request) => toolNames(request)),
       })}\n`,
     );
-    expect(auxiliary.length).toBeGreaterThan(0);
-    expect(names.some((name) => name === "bb_echo" || name.startsWith("bbt_"))).toBe(false);
-    expect(JSON.stringify(auxiliary)).not.toContain("bbt_");
+    expect(generateRequests.length).toBeGreaterThan(0);
+    expect(phase.some((request) => toolNames(request).some((name) => name === "bb_echo" || name.startsWith("bbt_")))).toBe(
+      false,
+    );
+    expect(JSON.stringify(phase)).not.toContain("bbt_");
   }, 180_000);
 });

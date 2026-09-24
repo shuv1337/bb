@@ -480,6 +480,14 @@ export interface LiveContext {
     providerThreadId: string,
     text: string,
     options?: BridgeJsonRpcObject,
+    disallowedTools?: readonly string[],
+  ): Promise<void>;
+  steerTurn(
+    threadId: string,
+    providerThreadId: string,
+    expectedTurnId: string,
+    text: string,
+    disallowedTools?: readonly string[],
   ): Promise<void>;
   forkThread(threadId: string, sourceProviderThreadId: string, opts?: StartThreadOptions): Promise<string>;
 }
@@ -557,7 +565,7 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
       const result = response.result as { providerThreadId: string };
       return result.providerThreadId;
     },
-    async startTurn(threadId, providerThreadId, text, options) {
+    async startTurn(threadId, providerThreadId, text, options, disallowedTools) {
       const started = requireStarted();
       requestId += 1;
       const id = requestId;
@@ -567,6 +575,23 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
         input: [{ type: "text", text, mentions: [] }],
         clientRequestId: clientRequestIdFor(id),
         options: options ?? FULL_PERMISSION_OPTIONS,
+        ...(disallowedTools !== undefined ? { disallowedTools: [...disallowedTools] } : {}),
+      });
+      const response = await started.live.rpc.waitForResponse(id);
+      expect(response.error).toBeUndefined();
+    },
+    async steerTurn(threadId, providerThreadId, expectedTurnId, text, disallowedTools) {
+      const started = requireStarted();
+      requestId += 1;
+      const id = requestId;
+      started.live.rpc.sendRequest(id, "turn/steer", {
+        threadId,
+        providerThreadId,
+        expectedTurnId,
+        input: [{ type: "text", text, mentions: [] }],
+        clientRequestId: clientRequestIdFor(id),
+        options: FULL_PERMISSION_OPTIONS,
+        ...(disallowedTools !== undefined ? { disallowedTools: [...disallowedTools] } : {}),
       });
       const response = await started.live.rpc.waitForResponse(id);
       expect(response.error).toBeUndefined();
