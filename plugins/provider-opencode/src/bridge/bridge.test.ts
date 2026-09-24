@@ -7,6 +7,7 @@ import type {
   BridgeJsonRpcOutputMessage,
 } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { toOpenCodeModel } from "../models.js";
+import { capturedRequestIssue, type BbToolsFixture } from "../tool-bridge-contract.js";
 import {
   createFakeOpenCodeRuntime,
   type OpenCodeRuntime,
@@ -847,6 +848,136 @@ it("persists the companion capability at mode 0600 for takeover", async () => {
   expect(statSync(ownersFile).mode & 0o777).toBe(0o600);
   const parsed = JSON.parse(readFileSync(ownersFile, "utf8")) as Record<string, { capability?: string }>;
   expect(Object.values(parsed).some((record) => record.capability === "cap-secret")).toBe(true);
+});
+
+it("processes native events while an attach waits on owner_active", async () => {
+  const fake = createFakeOpenCodeRuntime();
+  const digest = "f".repeat(64);
+  let attaches = 0;
+  let ownerActive = false;
+  await useHarness({
+    fake,
+    wrapRuntime: (runtime) => ({
+      ...runtime,
+      createSession: async (input) => {
+        const handle = await runtime.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+            if (method === "status") {
+              return ownerActive
+                ? { bound: false, generation: "g" }
+                : { bound: true, generation: "g", epoch: 1, catalogDigest: digest, leaseExpiresAt: 1 };
+            }
+            if (method === "attach") {
+              attaches += 1;
+              if (ownerActive && attaches === 2) {
+                throw new Error("owner lease is active", {
+                  cause: { type: "owner_active", message: "owner lease is active", data: { retryAfterMs: 400 } },
+                });
+              }
+              if (ownerActive) {
+                throw new Error("owner lease is active", {
+                  cause: { type: "owner_active", message: "owner lease is active", data: { retryAfterMs: 40_000 } },
+                });
+              }
+              return {
+                bindingID: "b1",
+                capability: "cap-live",
+                generation: "g",
+                epoch: 1,
+                catalogDigest: digest,
+                ownerLeaseMs: 30_000,
+              };
+            }
+            if (method === "pending") return { calls: [], settled: [] };
+            if (method === "configure" || method === "detach") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const threadId = "thr_owner_wait";
+  const started = await harness.startThread(threadId, {
+    dynamicTools: [{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }],
+  });
+  expect(started.error).toBeUndefined();
+  ownerActive = true;
+  const sessionId = providerThreadId(started);
+  const turn = harness.request(93, "turn/start", {
+    threadId,
+    providerThreadId: sessionId,
+    clientRequestId: "creq_23456789ag",
+    input: [{ type: "text", text: "go", mentions: [] }],
+    options: FULL_PERMISSION_OPTIONS,
+  });
+  await harness.waitFor(() => attaches >= 2, "owner_active attach");
+  const playedAt = Date.now();
+  await harness.fake.play({
+    type: "session.step.started",
+    data: { sessionID: sessionId, agent: "reviewer", assistantMessageID: "msg_wait" },
+  });
+  await harness.waitFor(
+    () => JSON.stringify(harness.deltasOf(threadId)).includes("reviewer"),
+    "native event during owner wait",
+  );
+  expect(Date.now() - playedAt).toBeLessThan(250);
+  const response = await turn;
+  expect(JSON.stringify(response.error)).toContain("owner lease is active");
+});
+
+it("sends companion requests that match the vendored fixture shapes", async () => {
+  const fake = createFakeOpenCodeRuntime();
+  const digest = "a".repeat(64);
+  const captured: Array<{ method: string; input: unknown }> = [];
+  await useHarness({
+    fake,
+    wrapRuntime: (runtime) => ({
+      ...runtime,
+      createSession: async (input) => {
+        const handle = await runtime.createSession(input);
+        return {
+          ...handle,
+          rpc: async (rpcID, method, payload) => {
+            if (rpcID === "bb.tools.v1") captured.push({ method, input: payload });
+            if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+            if (method === "status") {
+              return { bound: true, generation: "g", epoch: 1, catalogDigest: digest, leaseExpiresAt: 1 };
+            }
+            if (method === "attach") {
+              return {
+                bindingID: "b1",
+                capability: "cap-shape",
+                generation: "g",
+                epoch: 1,
+                catalogDigest: digest,
+                ownerLeaseMs: 30_000,
+              };
+            }
+            if (method === "pending") return { calls: [], settled: [] };
+            if (method === "configure" || method === "detach") return {};
+            return handle.rpc(rpcID, method, payload);
+          },
+        };
+      },
+    }),
+  });
+  const started = await harness.startThread("thr_shapes", {
+    dynamicTools: [{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }],
+  });
+  expect(started.error).toBeUndefined();
+  const root = join(import.meta.dirname, "../fixtures/bb-tools-v1");
+  const fixtures = readdirSync(root)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(readFileSync(join(root, name), "utf8")) as BbToolsFixture);
+  const methods = new Set(captured.map((call) => call.method));
+  expect(methods.has("hello")).toBe(true);
+  expect(methods.has("attach")).toBe(true);
+  for (const call of captured) {
+    expect(capturedRequestIssue(call.method, call.input, fixtures), call.method).toBeUndefined();
+  }
 });
 
 it("keeps thread/start working when the owners file cannot be written", async () => {

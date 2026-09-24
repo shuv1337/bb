@@ -15,6 +15,7 @@ function host(partial: Partial<BbToolHost> & Pick<BbToolHost, "handle">): BbTool
     appId: async () => "opencode",
     takeoverCapability: () => undefined,
     rememberCapability: async () => undefined,
+    secrets: () => [],
     listPlugins: async () => [],
     hasDeferredResync: false,
     liveTurnId: () => "exec:ses:1",
@@ -381,5 +382,102 @@ describe("bb tool call lifecycle", () => {
     await new Promise((resolve) => setTimeout(resolve, 45));
     expect(statuses).toBeGreaterThan(afterAttach);
     session.close();
+  });
+
+  it("keeps only one heartbeat status in flight while a renewal is stalled", async () => {
+    let statuses = 0;
+    const rpc: SessionHandle["rpc"] = async (_id, method) => {
+      if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+      if (method === "status") {
+        statuses += 1;
+        if (statuses === 1) {
+          return { bound: true, generation: "g", epoch: 1, catalogDigest: "d".repeat(64), leaseExpiresAt: 1 };
+        }
+        return new Promise(() => undefined);
+      }
+      if (method === "attach") {
+        return {
+          bindingID: "b",
+          capability: "cap",
+          generation: "g",
+          epoch: 1,
+          catalogDigest: "d".repeat(64),
+          ownerLeaseMs: 30,
+        };
+      }
+      return {};
+    };
+    const session = createBbToolCalls({ leaseStatusTimeoutMs: 80 }).bind(
+      host({
+        handle: { id: "ses", location: { directory: "/a" }, rpc } as SessionHandle,
+        turnOpen: false,
+        busy: false,
+      }),
+    );
+    await session.attach([{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }]);
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    expect(statuses).toBe(2);
+    session.close();
+  });
+
+  it("stops the heartbeat when status is unbound and reattaches on the next turn", async () => {
+    let statuses = 0;
+    let attaches = 0;
+    const rpc: SessionHandle["rpc"] = async (_id, method) => {
+      if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+      if (method === "status") {
+        statuses += 1;
+        if (statuses === 2) return { bound: false, generation: "g" };
+        return { bound: true, generation: "g", epoch: Math.max(attaches, 1), catalogDigest: "d".repeat(64), leaseExpiresAt: 1 };
+      }
+      if (method === "attach") {
+        attaches += 1;
+        return {
+          bindingID: `b${attaches}`,
+          capability: `cap-${attaches}`,
+          generation: "g",
+          epoch: attaches,
+          catalogDigest: "d".repeat(64),
+          ownerLeaseMs: 30,
+        };
+      }
+      return {};
+    };
+    const session = createBbToolCalls().bind(
+      host({
+        handle: { id: "ses", location: { directory: "/a" }, rpc } as SessionHandle,
+        turnOpen: false,
+        busy: false,
+      }),
+    );
+    await session.attach([{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }]);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const stopped = statuses;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(statuses).toBe(stopped);
+    await session.ensure();
+    expect(attaches).toBe(2);
+    session.close();
+  });
+
+  it("redacts a capability echoed by an upstream attach error", async () => {
+    const secret = "cap-secret-value";
+    const sent: unknown[] = [];
+    const rpc: SessionHandle["rpc"] = async (_id, method) => {
+      if (method === "hello") return { protocol: "bb.tools.v1", version: 1, generation: "g" };
+      if (method === "attach") throw new Error(`attach failed for ${secret} {"capability":"${secret}","takeover":{"capability":"${secret}"}}`);
+      return {};
+    };
+    const session = createBbToolCalls().bind(
+      host({
+        handle: { id: "ses", location: { directory: "/a" }, rpc } as SessionHandle,
+        secrets: () => [secret],
+        send: (message) => sent.push(message),
+      }),
+    );
+    await session.attach([{ name: "bb_echo", description: "echo", inputSchema: { type: "object" } }]);
+    const wire = JSON.stringify(sent);
+    expect(wire).not.toContain(secret);
+    expect(wire).toContain("[redacted]");
   });
 });

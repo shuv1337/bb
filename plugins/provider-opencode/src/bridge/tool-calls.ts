@@ -22,6 +22,7 @@ import {
   failureMessage,
   isCompanionAbsent,
   isUnboundRpc,
+  redactCompanionSecrets,
   withTimeout,
   type BbPendingToolCall,
   type BbToolCallResult,
@@ -73,6 +74,7 @@ export interface BbToolHost {
   appId(): Promise<string | null>;
   takeoverCapability(): string | undefined;
   rememberCapability(capability: string): Promise<void>;
+  secrets(): readonly string[];
   listPlugins(): Promise<unknown>;
   liveTurnId(): string | undefined;
   executionTurnId(): string | undefined;
@@ -97,6 +99,7 @@ interface BbToolBinding {
   catalogDigest: string;
   ownerLeaseMs: number;
   lease: ReturnType<typeof setTimeout> | undefined;
+  leaseRenewing: boolean;
   inFlight: Set<string>;
   draining: boolean;
   drainAgain: boolean;
@@ -175,6 +178,7 @@ export interface CreateBbToolCallsOptions {
   now?: () => number;
   pollMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  leaseStatusTimeoutMs?: number;
 }
 
 function clientOf(rpc: BbToolsRpc): BbToolsClient {
@@ -189,6 +193,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
   const now = options.now ?? Date.now;
   const pollMs = options.pollMs ?? BB_TOOL_POLL_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const leaseStatusTimeoutMs = options.leaseStatusTimeoutMs ?? BB_TOOL_TEARDOWN_RPC_MS;
   const pending = new Map<string, PendingBbToolCall>();
   let serial = 0;
   let ignoreControl = false;
@@ -233,38 +238,56 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
 
   function startLease(state: ToolState, binding: BbToolBinding): void {
     stopLease(binding);
+    binding.leaseRenewing = false;
     const interval = Math.max(1, Math.floor(binding.ownerLeaseMs / 3));
     const tick = (): void => {
-      if (state.host.closed || state.binding !== binding) {
+      if (state.host.closed || state.binding !== binding || binding.lease === undefined) {
         binding.lease = undefined;
         return;
       }
-      void renewLease(state, binding);
-      binding.lease = setTimeout(tick, interval);
-      binding.lease.unref?.();
+      if (!binding.leaseRenewing) {
+        binding.leaseRenewing = true;
+        void renewLease(state, binding).finally(() => {
+          binding.leaseRenewing = false;
+        });
+      }
+      const timer = setTimeout(tick, interval);
+      timer.unref?.();
+      if (state.binding !== binding) {
+        clearTimeout(timer);
+        return;
+      }
+      binding.lease = timer;
     };
-    binding.lease = setTimeout(tick, interval);
-    binding.lease.unref?.();
+    const timer = setTimeout(tick, interval);
+    timer.unref?.();
+    binding.lease = timer;
   }
 
   async function renewLease(state: ToolState, binding: BbToolBinding): Promise<void> {
     if (state.binding !== binding || state.host.closed) return;
     try {
-      const status = await clientOf(state.host.handle.rpc.bind(state.host.handle)).status(binding.capability);
+      const status = await clientOf(state.host.handle.rpc.bind(state.host.handle)).status(binding.capability, {
+        timeoutMs: leaseStatusTimeoutMs,
+      });
       if (state.binding !== binding) return;
+      if (!status.bound) {
+        stopLease(binding);
+        state.stale = true;
+        return;
+      }
       const digestMismatch =
-        binding.catalogDigest.length > 0 &&
-        status.bound &&
-        status.catalogDigest !== binding.catalogDigest;
-      if (!status.bound || status.generation !== binding.generation || digestMismatch) {
+        binding.catalogDigest.length > 0 && status.catalogDigest !== binding.catalogDigest;
+      if (status.generation !== binding.generation || digestMismatch) {
         state.stale = true;
       }
     } catch (error) {
       if (isUnboundRpc(error) || (error instanceof BbToolsRpcError && error.kind === "unbound")) {
+        stopLease(binding);
         state.stale = true;
         return;
       }
-      state.host.warn(`bb tool owner heartbeat failed for ${state.host.threadId}: ${failureMessage(error)}`);
+      state.host.warn(diagnostic(state, `bb tool owner heartbeat failed for ${state.host.threadId}: ${failureMessage(error)}`));
     }
   }
 
@@ -354,12 +377,12 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       if (failureMessage(error).includes("conflict")) return "conflict";
       if (deliveryLost(state, binding, error)) {
         state.host.warn(
-          `could not deliver bb tool result ${key}: ${failureMessage(error)}; not retrying into a new companion generation`,
+          diagnostic(state, `could not deliver bb tool result ${key}: ${failureMessage(error)}; not retrying into a new companion generation`),
         );
         await detachCaptured(state, binding, BB_TOOL_TEARDOWN_RPC_MS);
         return "lost";
       }
-      state.host.warn(`could not deliver bb tool result ${key}: ${failureMessage(error)}`);
+      state.host.warn(diagnostic(state, `could not deliver bb tool result ${key}: ${failureMessage(error)}`));
       return "failed";
     }
   }
@@ -424,7 +447,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     } catch (error) {
       if (deliveryLost(state, binding, error) || isCompanionAbsent(error)) {
         state.host.warn(
-          `could not deliver bb tool result ${call.key}: ${failureMessage(error)}; not retrying into a new companion generation`,
+          diagnostic(state, `could not deliver bb tool result ${call.key}: ${failureMessage(error)}; not retrying into a new companion generation`),
         );
         await detachCaptured(state, binding, BB_TOOL_TEARDOWN_RPC_MS);
       }
@@ -546,7 +569,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
             }),
           )
           .catch((error: unknown) => {
-            state.host.warn(`bb tool owner heartbeat failed for ${state.host.threadId}: ${failureMessage(error)}`);
+            state.host.warn(diagnostic(state, `bb tool owner heartbeat failed for ${state.host.threadId}: ${failureMessage(error)}`));
           });
       }
       scheduleDrain(state);
@@ -597,7 +620,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           await releaseDeferred(state, false);
         } while (binding.drainAgain && !state.host.closed && state.binding === binding);
       } catch (error) {
-        state.host.warn(`could not read pending bb tool calls for ${state.host.threadId}: ${failureMessage(error)}`);
+        state.host.warn(diagnostic(state, `could not read pending bb tool calls for ${state.host.threadId}: ${failureMessage(error)}`));
       } finally {
         binding.draining = false;
         if (binding.drainAgain && !state.host.closed && state.binding === binding) {
@@ -623,7 +646,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       return parsed;
     } catch (error) {
       if (isUnboundRpc(error) || (error instanceof BbToolsRpcError && error.kind === "unbound")) return "unbound";
-      state.host.warn(`could not read pending bb tool calls for ${state.host.threadId}: ${failureMessage(error)}`);
+      state.host.warn(diagnostic(state, `could not read pending bb tool calls for ${state.host.threadId}: ${failureMessage(error)}`));
       return "failed";
     }
   }
@@ -723,7 +746,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       }
     } catch (error) {
       state.originRecoveryIncomplete = true;
-      state.host.warn(`could not read OpenCode session log for ${state.host.threadId}: ${failureMessage(error)}`);
+      state.host.warn(diagnostic(state, `could not read OpenCode session log for ${state.host.threadId}: ${failureMessage(error)}`));
       return;
     }
     state.originRecoveryIncomplete = false;
@@ -787,7 +810,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     } catch (error) {
       if (isUnboundRpc(error) || isCompanionAbsent(error)) return;
       if (error instanceof BbToolsRpcError && (error.kind === "unbound" || error.kind === "absent")) return;
-      state.host.warn(`could not reject bb tool call ${key}: ${failureMessage(error)}`);
+      state.host.warn(diagnostic(state, `could not reject bb tool call ${key}: ${failureMessage(error)}`));
     }
   }
 
@@ -876,7 +899,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       });
     } catch (error) {
       binding.callTurns.delete(call.key);
-      state.host.warn(`could not claim bb tool call ${call.key}: ${failureMessage(error)}`);
+      state.host.warn(diagnostic(state, `could not claim bb tool call ${call.key}: ${failureMessage(error)}`));
       return;
     }
     if (!bindingStillCurrent(state, binding)) return;
@@ -1002,9 +1025,12 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     return explicitRootBoundaryId(deltas) ?? state.host.liveTurnId();
   }
 
-  function reachError(error: unknown): BbToolsSetupError {
+  function reachError(state: ToolState, error: unknown): BbToolsSetupError {
     return new BbToolsSetupError(
-      `OpenCode companion ${BB_TOOLS_RPC} could not be reached (${failureMessage(error)}). Retry the turn; bb tools were not dropped.`,
+      diagnostic(
+        state,
+        `OpenCode companion ${BB_TOOLS_RPC} could not be reached (${failureMessage(error)}). Retry the turn; bb tools were not dropped.`,
+      ),
     );
   }
 
@@ -1041,6 +1067,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       catalogDigest: output.catalogDigest,
       ownerLeaseMs: output.ownerLeaseMs > 0 ? output.ownerLeaseMs : limits.ownerLeaseMs,
       lease: undefined,
+      leaseRenewing: false,
       inFlight: new Set(),
       draining: false,
       drainAgain: false,
@@ -1078,6 +1105,22 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     return reports;
   }
 
+  class OwnerActiveWait extends Error {
+    readonly retryAfterMs: number;
+    readonly leaseMs: number;
+
+    constructor(retryAfterMs: number, leaseMs: number) {
+      super("owner lease is active");
+      this.name = "OwnerActiveWait";
+      this.retryAfterMs = retryAfterMs;
+      this.leaseMs = leaseMs;
+    }
+  }
+
+  function diagnostic(state: ToolState, text: string, extra: readonly string[] = []): string {
+    return redactCompanionSecrets(text, [...state.host.secrets(), ...extra]);
+  }
+
   function ownerActiveMessage(retryAfterMs: number): string {
     return `OpenCode companion owner lease is active. A restarted bridge must present its saved capability; a second bridge without that proof cannot attach for another ${retryAfterMs}ms. Stop the other bridge or retry the turn after the lease expires.`;
   }
@@ -1088,7 +1131,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     try {
       plugins = companionPluginSpecsFrom(await state.host.listPlugins());
     } catch (error) {
-      plugins = { kind: "failed", message: failureMessage(error) };
+      plugins = { kind: "failed", message: diagnostic(state, failureMessage(error)) };
     }
     return duplicateCompanionAttachmentMessage({
       instances,
@@ -1112,7 +1155,6 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     const takeover = state.host.takeoverCapability();
     let catalog = [...tools];
     let droppedInvalid = false;
-    const started = now();
     for (;;) {
       try {
         const output = await client.attach({
@@ -1127,12 +1169,8 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
       } catch (error) {
         if (error instanceof BbToolsRpcError && error.kind === "owner_active") {
           const retryAfter = typeof error.data.retryAfterMs === "number" ? Math.max(0, error.data.retryAfterMs) : limits.ownerLeaseMs;
-          const elapsed = now() - started;
-          if (retryAfter <= 0 || elapsed + retryAfter > limits.ownerLeaseMs) {
-            throw new BbToolsSetupError(ownerActiveMessage(retryAfter));
-          }
-          await sleep(retryAfter);
-          continue;
+          if (retryAfter <= 0) throw new BbToolsSetupError(ownerActiveMessage(retryAfter));
+          throw new OwnerActiveWait(retryAfter, limits.ownerLeaseMs);
         }
         if (error instanceof BbToolsRpcError && error.kind === "overloaded") {
           throw new BbToolsSetupError(overloadedMessage(error));
@@ -1167,7 +1205,18 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     if (state.binding === binding) await abandonForwarded(state);
   }
 
-  function bind(host: BbToolHost): BbToolSession {
+  function bind(rawHost: BbToolHost): BbToolSession {
+    const host: BbToolHost = new Proxy(rawHost, {
+      get(target, prop, receiver) {
+        if (prop === "warn") {
+          return (message: string) => rawHost.warn(redactCompanionSecrets(message, rawHost.secrets()));
+        }
+        if (prop === "send") {
+          return (message: unknown) => rawHost.send(redactCompanionSecrets(message, rawHost.secrets()));
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
     const state: ToolState = {
       host,
       descriptors: undefined,
@@ -1227,6 +1276,33 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
         },
       });
     }
+    async function syncOutsideWait(
+      mode: "construct" | "turn",
+      warnTools: (tools: readonly DynamicTool[], reason: string) => void,
+      run: (body: () => Promise<void>) => Promise<void>,
+    ): Promise<void> {
+      const started = now();
+      for (;;) {
+        let deferral: OwnerActiveWait | undefined;
+        await run(async () => {
+          try {
+            await syncWithWarning(state, mode, warnTools);
+          } catch (error) {
+            if (error instanceof OwnerActiveWait) {
+              deferral = error;
+              return;
+            }
+            throw error;
+          }
+        });
+        if (deferral === undefined) return;
+        const elapsed = now() - started;
+        if (state.host.closed || elapsed + deferral.retryAfterMs > deferral.leaseMs) {
+          throw new BbToolsSetupError(ownerActiveMessage(deferral.retryAfterMs));
+        }
+        await sleep(deferral.retryAfterMs);
+      }
+    }
     function warnDropped(dropped: readonly { name: string; reason: string; detail: string }[]): void {
       if (dropped.length === 0) return;
       host.send({
@@ -1247,11 +1323,11 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
     const session: BbToolSession = {
       attach(tools, mode = "construct") {
         state.descriptors = tools;
-        return withLock(state, () => syncWithWarning(state, mode, (list, reason) => warnOnce(list, reason)));
+        return syncOutsideWait(mode, (list, reason) => warnOnce(list, reason), (body) => withLock(state, body));
       },
       ensure() {
-        return host.enqueue(() =>
-          withLock(state, () => syncWithWarning(state, "turn", (list, reason) => warnOnce(list, reason))),
+        return syncOutsideWait("turn", (list, reason) => warnOnce(list, reason), (body) =>
+          host.enqueue(() => withLock(state, body)),
         );
       },
       async pushDisallowed() {
@@ -1379,7 +1455,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           return;
         }
         if (hello.kind === "failed") {
-          if (mode === "turn") throw reachError(hello.error);
+          if (mode === "turn") throw reachError(current, hello.error);
           return;
         }
         if (hello.kind === "rejected") {
@@ -1410,7 +1486,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
             return;
           }
           if (held.kind === "failed") {
-            if (mode === "turn") throw reachError(held.error);
+            if (mode === "turn") throw reachError(current, held.error);
             return;
           }
         }
@@ -1418,7 +1494,13 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
         try {
           installed = await install(current, tools, hello.limits, warnDropped);
         } catch (error) {
-          if (error instanceof BbToolsSetupError || error instanceof OpenCodeUnauthenticatedError) throw error;
+          if (
+            error instanceof OwnerActiveWait ||
+            error instanceof BbToolsSetupError ||
+            error instanceof OpenCodeUnauthenticatedError
+          ) {
+            throw error;
+          }
           if (isCompanionAbsent(error)) {
             const bound = current.binding;
             if (bound !== null) await retire(current, bound);
@@ -1428,11 +1510,14 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           }
           if (mode === "turn" && attempt + 1 === BB_TOOLS_ATTACH_ATTEMPTS) {
             throw new BbToolsSetupError(
-              `OpenCode companion is installed but bb tools could not be reattached: ${failureMessage(error)}. Install a compatible opencode-bb-tools release with the engine's \`plugin add opencode-bb-tools\` and retry the turn.`,
+              diagnostic(
+                current,
+                `OpenCode companion is installed but bb tools could not be reattached: ${failureMessage(error)}. Install a compatible opencode-bb-tools release with the engine's \`plugin add opencode-bb-tools\` and retry the turn.`,
+              ),
             );
           }
           if (mode === "construct" && attempt + 1 === BB_TOOLS_ATTACH_ATTEMPTS) {
-            warnTools(tools, failureMessage(error));
+            warnTools(tools, diagnostic(current, failureMessage(error)));
             return;
           }
           continue;
@@ -1462,7 +1547,7 @@ export function createBbToolCalls(options: CreateBbToolCallsOptions = {}): BbToo
           return;
         }
         if (confirmed.kind === "failed") {
-          if (mode === "turn") throw reachError(confirmed.error);
+          if (mode === "turn") throw reachError(current, confirmed.error);
           return;
         }
       }

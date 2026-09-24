@@ -30,8 +30,8 @@ describe("bb.tools.v1 contract", () => {
     const pinned = readFileSync(join(root, "COMPANION_VERSION"), "utf8");
     expect(pinned).toContain("package=opencode-bb-tools");
     expect(pinned).toContain("version=0.1.0-dev");
-    expect(pinned).toContain("commit=7f8eb6688dab9c3a61cf3615b04af95279c465df");
-    expect(pinned).toContain("short=7f8eb66");
+    expect(pinned).toContain("commit=fb0a952b66c5c94125a28ed599d26a97786afed3");
+    expect(pinned).toContain("short=fb0a952");
   });
 
   it("validates every vendored fixture against bb schemas", () => {

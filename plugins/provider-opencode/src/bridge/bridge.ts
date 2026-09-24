@@ -81,7 +81,7 @@ import {
   type BbToolHost,
   type BbToolSession,
 } from "./tool-calls.js";
-import { BB_TOOLS_CONTROL_EVENT } from "../runtime/tool-bridge.js";
+import { BB_TOOLS_CONTROL_EVENT, redactCompanionSecrets } from "../runtime/tool-bridge.js";
 
 export { BB_TOOL_CALL_CANCELLED, BB_TOOL_OUTCOME_UNKNOWN };
 export const UNOPENED_DISPATCH_GRACE_MS = 250;
@@ -246,7 +246,28 @@ function bbThreadIdFromMetadata(metadata: Record<string, unknown> | undefined): 
 }
 
 export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
-  const { send, sendResult, sendError } = createBridgeIo();
+  const bridgeIo = createBridgeIo();
+  const knownCapabilities = new Set<string>();
+  function scrub<T>(value: T): T {
+    return redactCompanionSecrets(value, [...knownCapabilities]);
+  }
+  function noteCapability(value: string | undefined): void {
+    if (value !== undefined && value.length > 0) knownCapabilities.add(value);
+  }
+  const send: typeof bridgeIo.send = (message) => {
+    bridgeIo.send(scrub(message));
+  };
+  const sendResult: typeof bridgeIo.sendResult = (id, result) => {
+    bridgeIo.sendResult(id, scrub(result));
+  };
+  const sendError: typeof bridgeIo.sendError = (id, code, message, data) => {
+    bridgeIo.sendError(
+      id,
+      code,
+      scrub(message),
+      data === undefined ? undefined : scrub(data),
+    );
+  };
   const translator = createOpenCodeDeltaTranslator();
   const sessions = new Map<string, ThreadSession>();
   const sessionsByProviderId = new Map<string, ThreadSession>();
@@ -267,11 +288,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     initial: RESUBSCRIBE_BACKOFF_INITIAL_MS,
     max: RESUBSCRIBE_BACKOFF_MAX_MS,
   };
-  const warn =
+  const report =
     deps.warn ??
     ((message: string) => {
       process.stderr.write(`[provider-opencode] ${message}\n`);
     });
+  const warn = (message: string): void => {
+    report(scrub(message));
+  };
   const toolCalls = createBbToolCalls();
 
   function clearPendingAccept(session: ThreadSession): void {
@@ -547,6 +571,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         ) {
           const pending = (record as OwnerRecord).pendingDirectory;
           const capability = (record as OwnerRecord).capability;
+          noteCapability(typeof capability === "string" ? capability : undefined);
           owners.set(sessionID, {
             threadId: (record as OwnerRecord).threadId,
             cwd: (record as OwnerRecord).cwd,
@@ -602,6 +627,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   function rememberCapability(sessionID: string, capability: string): Promise<void> {
     const current = owners.get(sessionID);
     if (current === undefined) return Promise.resolve();
+    noteCapability(capability);
     owners.set(sessionID, { ...current, capability });
     return enqueueOwnerWrite();
   }
@@ -1060,8 +1086,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         return session.bbToolsRequired;
       },
       appId: () => engineAppId(),
-      takeoverCapability: () => owners.get(session.handle.id)?.capability,
+      takeoverCapability: () => {
+        const capability = owners.get(session.handle.id)?.capability;
+        noteCapability(capability);
+        return capability;
+      },
       rememberCapability: (capability) => rememberCapability(session.handle.id, capability),
+      secrets: () => {
+        noteCapability(session.tools?.capability());
+        noteCapability(owners.get(session.handle.id)?.capability);
+        return [...knownCapabilities];
+      },
       listPlugins: async () => (await runtime()).listPlugins(session.handle.location),
       get hasDeferredResync() {
         return session.deferredResyncMessages !== undefined;
