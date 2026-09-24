@@ -392,7 +392,10 @@ export interface LiveBridge {
   teardown(): Promise<void>;
 }
 
-export async function startLiveBridge(engine: Engine): Promise<LiveBridge> {
+export async function startLiveBridge(
+  engine: Engine,
+  options?: { dataDir?: string },
+): Promise<LiveBridge> {
   const warnings: string[] = [];
   const bridge = createOpenCodeBridge({
     createRuntime: async () =>
@@ -403,7 +406,7 @@ export async function startLiveBridge(engine: Engine): Promise<LiveBridge> {
       warnings.push(message);
     },
   });
-  const dataDir = join(engine.root, "bridge-data");
+  const dataDir = options?.dataDir ?? join(engine.root, "bridge-data");
   mkdirSync(dataDir, { recursive: true });
   bridge.experimental_providerBridge.start?.({ pluginId: "provider-opencode", dataDir, tempDir: dataDir });
   const rpc = createBridgeJsonRpcTestHarness(bridge.handleLine);
@@ -549,6 +552,7 @@ export interface LiveContextOptions {
   env?: NodeJS.ProcessEnv;
   prepare?: (prepared: { root: string; workspace: string }) => void | Promise<void>;
   modelInput?: string[];
+  requireCompanion?: boolean;
 }
 
 export interface LiveContext {
@@ -638,7 +642,7 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
       companionDir: companionCopy,
       plugins,
     });
-    await waitForCompanion(engine);
+    if (options.requireCompanion !== false) await waitForCompanion(engine);
     live = await startLiveBridge(engine);
   }, 90_000);
 

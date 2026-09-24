@@ -25,7 +25,10 @@ Before npm publication, pin a tag:
 on a Shuvcode host.
 
 Supported companion protocol is `bb.tools.v1` versions 1 through 1. A companion
-outside that range fails the turn. It does not drop tools quietly.
+outside that range fails the turn. It does not drop tools quietly. More than
+one registration fails attachment and names the specs to remove. A restarted
+bridge takes over with the capability saved in the owners file. A second bridge
+without that proof cannot attach while the owner lease is live.
 
 `OPENCODE_SERVER_URL` mode uses `hello` and the engine plugin list. Do not look
 for companion files on disk. Confirm pickup with status, not by assuming a

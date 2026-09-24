@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BridgeJsonRpcObject } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { describe, expect, it } from "vitest";
@@ -296,7 +296,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     expect(live.answered.has(call.id)).toBe(false);
   }, 180_000);
 
-  it("fences a restarted bridge's attach and does not redispatched the claimed call", async () => {
+  it("lets a restarted bridge take over with the persisted capability and does not redispatched the claimed call", async () => {
     const { model, engine, live, startThread, startTurn } = ctx;
     model.script.push(
       { kind: "tool", name: "bb_echo", args: { text: "takeover" } },
@@ -307,12 +307,11 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
     const providerThreadId = await startThread("thread-takeover");
     const capability = live.capability("thread-takeover");
     expect(capability).toEqual(expect.any(String));
+    const persisted = capability ?? "";
     await startTurn("thread-takeover", providerThreadId, "call the echo tool and wait");
     const call = await claimedCall(live);
-    await waitUntil(
-      () => existsSync(join(engine.root, "bridge-data", "opencode-session-owners.json")),
-      "owners file",
-    );
+    const ownersFile = join(engine.root, "bridge-data", "opencode-session-owners.json");
+    await waitUntil(() => existsSync(ownersFile) && readFileSync(ownersFile, "utf8").includes(persisted), "persisted capability");
     const restarted = await startLiveBridge(engine);
     try {
       const resumed = await send(restarted, "thread/resume", {
@@ -422,6 +421,35 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
       expect(collectToolCalls(restarted).map((item) => item.params.callId)).not.toContain(call.params.callId);
     } finally {
       await restarted.teardown();
+    }
+  }, 180_000);
+});
+
+describe.skipIf(engineBinary === undefined)("OpenCode companion owner fence", () => {
+  const fenced = createLiveContext({ env: { BB_TOOLS_OWNER_LEASE_MS: "1500" } });
+
+  it("rejects a foreign bridge that has no persisted capability while the owner is live", async () => {
+    const { model, engine, live, startThread, startTurn } = fenced;
+    model.script.push({ kind: "tool", name: "bb_echo", args: { text: "foreign" } });
+    const providerThreadId = await startThread("thread-foreign");
+    await startTurn("thread-foreign", providerThreadId, "call the echo tool and wait");
+    const call = await claimedCall(live);
+    const foreign = await startLiveBridge(engine, { dataDir: join(engine.root, "foreign-bridge") });
+    try {
+      const resumed = await send(foreign, "thread/resume", {
+        threadId: "thread-foreign",
+        cwd: engine.workspace,
+        providerThreadId,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+        dynamicTools: [echoTool],
+      });
+      expect(JSON.stringify(resumed.error)).toContain("owner lease is active");
+      expect(collectToolCalls(foreign).some((item) => item.params.callId === call.params.callId)).toBe(false);
+      const stillOwned = await engineRpc(engine, "pending", { capability: live.capability("thread-foreign") });
+      expect(stillOwned.body).not.toContain("unbound");
+    } finally {
+      await foreign.teardown();
     }
   }, 180_000);
 });

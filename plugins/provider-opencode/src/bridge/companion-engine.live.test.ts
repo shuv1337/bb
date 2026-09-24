@@ -13,6 +13,12 @@ import {
   toolMessages,
   waitUntil,
 } from "./companion-engine.live-harness.js";
+import { FULL_PERMISSION_OPTIONS } from "./test-support.js";
+
+const REQUIRED_OPTIONS = {
+  ...FULL_PERMISSION_OPTIONS,
+  providerOptions: { bbToolsRequired: true },
+};
 
 describe.skipIf(engineBinary === undefined)("OpenCode companion live engine", () => {
   const ctx = createLiveContext();
@@ -125,5 +131,53 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion live engine", ()
     process.stderr.write(`\nLIVE after move tools: ${JSON.stringify(tools)}\n`);
     expect(JSON.stringify(after.messages)).toContain("first turn");
     expect(JSON.stringify(after.messages)).toContain("second turn after move");
+  }, 120_000);
+
+  it("runs bb tools when they are required and the companion is present", async () => {
+    const { model, live, startThread, startTurn } = ctx;
+    model.script.push({ kind: "text", text: "required present" });
+    const providerThreadId = await startThread("thread-required", { options: REQUIRED_OPTIONS });
+    await startTurn("thread-required", providerThreadId, "required present", REQUIRED_OPTIONS);
+    await waitUntil(() => model.requests.some((item) => JSON.stringify(item.messages).includes("required present")), "required turn");
+    expect(model.requests.at(-1)?.tools?.map((tool) => tool.function?.name)).toContain("bb_echo");
+    expect(
+      deltaKinds(live, "thread-required").some(
+        (delta) => delta.kind === "provider.warning" && String(delta.summary).includes("does not run bb plugin tools"),
+      ),
+    ).toBe(false);
+  }, 120_000);
+});
+
+describe.skipIf(engineBinary === undefined)("OpenCode bb tools required without a companion", () => {
+  const absent = createLiveContext({ plugins: () => [], requireCompanion: false });
+
+  it("warns and stays native-only when bb tools are not required", async () => {
+    const { model, live, startThread, startTurn } = absent;
+    model.script.push({ kind: "text", text: "native only" });
+    const providerThreadId = await startThread("thread-optional-absent");
+    expect(JSON.stringify(deltaKinds(live, "thread-optional-absent"))).toContain("Dropped dynamicTools: bb_echo");
+    await startTurn("thread-optional-absent", providerThreadId, "native only");
+    await waitUntil(() => model.requests.length > 0, "native turn");
+    expect(model.requests[0]?.tools?.map((tool) => tool.function?.name) ?? []).not.toContain("bb_echo");
+  }, 120_000);
+
+  it("fails the turn when bb tools are required and the companion is absent", async () => {
+    const { model, live, startThread, request } = absent;
+    const providerThreadId = await startThread("thread-required-absent", { options: REQUIRED_OPTIONS });
+    expect(
+      deltaKinds(live, "thread-required-absent").some(
+        (delta) => delta.kind === "provider.warning" && String(delta.summary).includes("does not run bb plugin tools"),
+      ),
+    ).toBe(false);
+    const response = await request("turn/start", {
+      threadId: "thread-required-absent",
+      providerThreadId,
+      input: [{ type: "text", text: "should not start", mentions: [] }],
+      clientRequestId: "creq_23456789af",
+      options: REQUIRED_OPTIONS,
+    });
+    expect(JSON.stringify(response.error)).toContain("bb tools are required");
+    expect(JSON.stringify(response.error)).toContain("opencode-bb-tools");
+    expect(model.requests).toHaveLength(0);
   }, 120_000);
 });

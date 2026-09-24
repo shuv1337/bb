@@ -58,9 +58,18 @@ Replace `opencode` with `shuvcode` on a Shuvcode host. Config changes are
 watched; confirm pickup with status, not by assuming a reload.
 
 This provider supports companion protocol `bb.tools.v1` versions 1 through 1.
-`hello` answers even when the ranges do not overlap. A companion outside that
-range fails the turn with an install hint. It does not emit the dropped-tools
-warning.
+`hello` sends that range. A companion outside it fails the turn with an install
+hint. It does not emit the dropped-tools warning. More than one `bb.tools.v1`
+registration fails attachment and lists the installed specs to remove.
+
+The bridge keeps the attach capability in its owners file (mode 0600) and
+presents it on resume so a restarted bridge can take over. A second bridge
+without that proof waits for the owner lease, then fails. While a binding is
+held, including between turns, the bridge heartbeats `status` at least every
+one third of the owner lease. An invalid tool is dropped once, named in a
+warning, and omitted from a single retry. A result over the companion byte
+limit fails the tool with `bb tool result exceeded the companion limit of N
+bytes` and is not retried.
 
 Status uses `hello` and the engine plugin list, including when
 `OPENCODE_SERVER_URL` points at a remote engine. It does not read companion
