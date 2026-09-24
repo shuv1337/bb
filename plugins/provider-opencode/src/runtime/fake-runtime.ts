@@ -20,6 +20,7 @@ import type {
   OpenCodeDiscoveryHealth,
   OpenCodeLocation,
   OpenCodeModel,
+  OpenCodeNativeEvent,
   OpenCodePermissionRule,
   OpenCodePromptInput,
   OpenCodeRuntime,
@@ -187,7 +188,20 @@ export function createFakeOpenCodeRuntime(
     }
   });
 
+  const durable = new Map<string, OpenCodeNativeEvent[]>();
+  const rememberDurable = (event: Record<string, unknown>): void => {
+    const data = event.data;
+    const sessionID =
+      data !== null && typeof data === "object" && !Array.isArray(data) && typeof (data as { sessionID?: unknown }).sessionID === "string"
+        ? (data as { sessionID: string }).sessionID
+        : undefined;
+    if (sessionID === undefined) return;
+    const list = durable.get(sessionID) ?? [];
+    list.push(event as OpenCodeNativeEvent);
+    durable.set(sessionID, list);
+  };
   const emit = (event: Record<string, unknown>): void => {
+    rememberDurable(event);
     void queueEvent(event);
   };
 
@@ -401,6 +415,16 @@ export function createFakeOpenCodeRuntime(
       context: async () => {
         assertOpen();
         return session.messages;
+      },
+      durableLog: async () => {
+        assertOpen();
+        return durable.get(id) ?? [];
+      },
+      assistantMessages: async () => {
+        assertOpen();
+        return session.messages.flatMap((message) =>
+          message.type === "assistant" ? [{ id: message.id, completed: message.finish !== undefined }] : [],
+        );
       },
       replyPermission: async (requestID, reply) => {
         assertOpen();

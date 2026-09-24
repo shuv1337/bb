@@ -42,4 +42,4 @@ Passed on Shuvcode 2.0.15-shuv.1 and stock `@opencode/cli@2.0.15`. Live file: `p
 - Companion executor does not re-check a live `disallowedTools` list beyond the list last pushed by `configure`; canonical deny is also the native permission rule on `options.permission`.
 - Descendant authorization is in-memory for the Location lifetime.
 - `metadata` update bypasses `@opencode/client@2.0.10` with a raw PATCH.
-- A gap that skips `session.step.started` leaves that assistant message unmapped until a later root event carries `assistantMessageID`. The call stays unclaimed; it is not rejected on a timer.
+- A gap or restart rebuilds origin → execution from `GET /api/experimental/session/:id/log` (bounded, stops at `log.synced`). A root boundary rejects any still-unresolved call for that root whose message is not mapped to a still-open execution, so a lost map cannot leave a call open.

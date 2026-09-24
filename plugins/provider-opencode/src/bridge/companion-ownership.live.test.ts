@@ -19,6 +19,23 @@ import {
 const PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const TURN_ENDED = "bb turn ended; bb tools are unavailable to background subagents after their owning turn";
+const IDENTITY_EVENTS = [
+  "session.step.started",
+  "session.step.streamed",
+  "session.step.ended",
+  "session.step.failed",
+  "session.tool.input.started",
+  "session.tool.input.delta",
+  "session.tool.input.ended",
+  "session.tool.called",
+  "session.tool.progress",
+  "session.text.started",
+  "session.text.delta",
+  "session.text.ended",
+  "session.reasoning.started",
+  "session.reasoning.delta",
+  "session.reasoning.ended",
+];
 const PLAN_OPTIONS = {
   ...FULL_PERMISSION_OPTIONS,
   providerOptions: { agent: "plan" },
@@ -423,6 +440,92 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     await waitUntil(() => toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: immediate"), "fast call delivered");
     expect(toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n")).not.toContain(TURN_ENDED);
     expect(collectToolCalls(live)).toHaveLength(1);
+  }, 180_000);
+
+  it("resolves a call whose step events were lost by reading the durable session log", async () => {
+    const { model, live, startThread, startTurn } = ctx;
+    live.setIgnoredNativeEvents(IDENTITY_EVENTS);
+    model.script.push(
+      { kind: "tool", name: "bb_echo", args: { text: "from-log" } },
+      { kind: "text", text: "gap done" },
+    );
+    const root = await startThread("thread-gap");
+    await startTurn("thread-gap", root, "call echo immediately");
+    await waitUntil(async () => {
+      if (collectToolCalls(live).length === 0) await live.injectResync("thread-gap");
+      return collectToolCalls(live).length === 1;
+    }, "call resolved from the session log");
+    const call = live.toolCalls[0];
+    if (call === undefined) throw new Error("missing rebuilt call");
+    expect(String(call.params.turnId)).toContain(root);
+    answerToolCall(live, call, { success: true, contentItems: [{ type: "inputText", text: "echo: from-log" }] });
+    await waitUntil(
+      () => toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: from-log"),
+      "rebuilt call delivered",
+    );
+    expect(toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n")).not.toContain(TURN_ENDED);
+  }, 180_000);
+
+  it("rejects an old child call after the origin map is lost and rebuilt", async () => {
+    const { model, engine, live, startThread, startTurn } = ctx;
+    const subscription = subscribeEngineEvents(engine);
+    let launched = false;
+    model.respond = (request) => {
+      const blob = JSON.stringify(request.messages);
+      if (blob.includes("CALL_BB_AFTER_LOST_MAP")) return { kind: "tool", name: "bb_echo", args: { text: "late" } };
+      if (blob.includes("You are a subagent")) return { kind: "text", text: "child waiting" };
+      if (!launched && blob.includes("launch then forget")) {
+        launched = true;
+        return {
+          kind: "tool",
+          name: "subagent",
+          args: {
+            agent: "general",
+            description: "Background echo",
+            prompt: "Say hello and stop.",
+            background: true,
+          },
+        };
+      }
+      return { kind: "text", text: "parent done" };
+    };
+    const root = await startThread("thread-lost-map");
+    await startTurn("thread-lost-map", root, "launch then forget");
+    await waitUntil(
+      () =>
+        deltaKinds(live, "thread-lost-map").some(
+          (delta) =>
+            delta.kind === "turn.boundary" &&
+            typeof delta.providerTurnId === "string" &&
+            delta.providerTurnId.includes(root),
+        ),
+      "first turn boundary before the map is dropped",
+    );
+    const progress = subscription.events.find((event) => event.type === "session.tool.progress");
+    const progressMeta = isRecord(progress?.data) && isRecord(progress.data.metadata) ? progress.data.metadata : {};
+    const sessionID = typeof progressMeta.sessionID === "string" ? progressMeta.sessionID : "";
+    expect(sessionID.startsWith("ses_")).toBe(true);
+    live.forgetOriginMap("thread-lost-map");
+    await live.injectResync("thread-lost-map");
+    await startTurn("thread-lost-map", root, "second root turn");
+    await waitUntil(
+      () =>
+        deltaKinds(live, "thread-lost-map").filter(
+          (delta) =>
+            delta.kind === "turn.boundary" &&
+            typeof delta.providerTurnId === "string" &&
+            delta.providerTurnId.includes(root),
+        ).length >= 2,
+      "second turn boundary after rebuild",
+    );
+    const before = collectToolCalls(live).length;
+    await promptNative(engine, sessionID, "CALL_BB_AFTER_LOST_MAP");
+    await waitUntil(() => {
+      const late = model.requests.filter((request) => JSON.stringify(request.messages).includes("CALL_BB_AFTER_LOST_MAP"));
+      return late.flatMap((request) => toolMessages(request)).join("\n").includes(TURN_ENDED);
+    }, "lost-map child rejection");
+    await subscription.stop();
+    expect(collectToolCalls(live)).toHaveLength(before);
   }, 180_000);
 
   it("does not authorize an imported session resumed through subagent", async () => {

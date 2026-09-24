@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import type { FakeOpenCodeRuntime, OpenCodeRuntime, SessionHandle } from "../runtime/index.js";
+import type { FakeOpenCodeRuntime, OpenCodeNativeEvent, OpenCodeRuntime, SessionHandle } from "../runtime/index.js";
 import { startOpenCodeBridgeHarness, type OpenCodeBridgeHarness } from "./test-support.js";
 
 const tool = {
@@ -23,12 +23,15 @@ interface CompanionHooks {
   onDetach?: (capability: string) => void;
   onConfigure?: (capability: string) => void;
   epoch?: number;
+  durableLog?: () => Promise<readonly OpenCodeNativeEvent[]>;
+  resultPayloads?: Array<Record<string, unknown>>;
 }
 
 function wrapCompanion(runtime: FakeOpenCodeRuntime, hooks: CompanionHooks): OpenCodeRuntime {
   let boundEpoch = hooks.epoch ?? 1;
   const wrap = (handle: SessionHandle): SessionHandle => ({
     ...handle,
+    durableLog: async () => hooks.durableLog?.() ?? handle.durableLog(),
     rpc: async (_rpcID, method, payload) => {
       const input = isRecord(payload) ? payload : {};
       const generation = hooks.generation?.() ?? "gen-1";
@@ -47,6 +50,7 @@ function wrapCompanion(runtime: FakeOpenCodeRuntime, hooks: CompanionHooks): Ope
       if (method === "pending") return hooks.pending?.() ?? { calls: [], settled: [] };
       if (method === "claim") return {};
       if (method === "result") {
+        hooks.resultPayloads?.push(input);
         await hooks.onResult?.();
         return {};
       }
@@ -271,7 +275,7 @@ it("leaves a replacement binding untouched when a boundary is still settling the
     });
     await opened.harness.waitFor(() => resultEntered, "boundary result delivery");
     generation = "gen-2";
-    const steered = await opened.harness.request("creq_3456789abd", "turn/steer", {
+    const steered = opened.harness.request("creq_3456789abd", "turn/steer", {
       threadId: "thr_turn",
       providerThreadId: opened.providerThreadId,
       expectedTurnId: turnId,
@@ -284,15 +288,32 @@ it("leaves a replacement binding untouched when a boundary is still settling the
         permissionEscalation: null,
       },
     });
-    expect(steered.error).toBeUndefined();
-    expect(attaches.count).toBe(2);
-    expect(configures).toContain("cap-2");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(attaches.count).toBe(1);
     releaseResult();
     await closing;
+    await steered;
     await opened.harness.waitFor(
       () => opened.harness.deltasOf("thr_turn").some((delta) => delta.kind === "turn.boundary"),
       "turn.boundary",
     );
+    const boundary = opened.harness.deltasOf("thr_turn").find((delta) => delta.kind === "turn.boundary");
+    expect(boundary?.providerTurnId).toBe(turnId);
+    const next = await opened.harness.request("creq_456789abde", "turn/start", {
+      threadId: "thr_turn",
+      providerThreadId: opened.providerThreadId,
+      clientRequestId: "creq_456789abde",
+      input: [{ type: "text", text: "again", mentions: [] }],
+      options: {
+        permissionMode: "full",
+        permissionScope: "full",
+        approvalReviewer: null,
+        permissionEscalation: null,
+      },
+    });
+    expect(next.error).toBeUndefined();
+    expect(attaches.count).toBe(2);
+    expect(configures).toContain("cap-2");
     expect(detaches).not.toContain("cap-2");
     await opened.harness.fake.play({
       type: "rpc.bb.tools.v1.control",
@@ -382,3 +403,91 @@ it("rejects a call whose origin turn has closed and does not dispatch it", async
     await opened.harness.teardown();
   }
 }, 15_000);
+
+it("rebuilds a lost origin from the durable log and dispatches the live turn", async () => {
+  let offer = false;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_gap") : { calls: [], settled: [] }),
+    durableLog: async () => [
+      {
+        type: "session.execution.started",
+        data: { sessionID: opened.providerThreadId },
+        durable: { seq: 4 },
+      },
+      {
+        type: "session.step.started",
+        data: { sessionID: opened.providerThreadId, assistantMessageID: "msg_gap" },
+      },
+    ],
+  });
+  try {
+    await opened.harness.fake.play({
+      type: "session.execution.started",
+      data: { sessionID: opened.providerThreadId },
+      durable: { seq: 4 },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.deltasOf("thr_turn").some((delta) => delta.kind === "turn.open"),
+      "turn.open",
+    );
+    offer = true;
+    await opened.harness.fake.play({
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.rpc.messages.some((message) => message.method === "item/tool/call"),
+      "rebuilt reverse call",
+    );
+    const call = opened.harness.rpc.messages.find((message) => message.method === "item/tool/call");
+    expect(call?.params).toMatchObject({ turnId: openTurnId(opened.harness) });
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 15_000);
+
+it("stops result delivery after a finite budget instead of retrying immediately", async () => {
+  const payloads: Array<Record<string, unknown>> = [];
+  let offer = true;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    resultPayloads: payloads,
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_budget") : { calls: [], settled: [] }),
+    onResult: () => {
+      throw new Error("delivery failed");
+    },
+  });
+  try {
+    await openExecution(opened.harness, opened.providerThreadId, "msg_budget");
+    await opened.harness.fake.play({
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.rpc.messages.some((message) => message.method === "item/tool/call"),
+      "reverse item/tool/call",
+    );
+    const reverse = opened.harness.rpc.messages.find((message) => message.method === "item/tool/call");
+    opened.harness.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: reverse?.id,
+        result: { success: true, contentItems: [{ type: "inputText", text: "echo: ok" }] },
+      }),
+    );
+    const budgetDeadline = Date.now() + 12_000;
+    while (payloads.filter((payload) => payload.success === false).length < 1) {
+      if (Date.now() > budgetDeadline) throw new Error(`delivery budget did not settle: ${JSON.stringify(payloads)}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const successes = payloads.filter((payload) => payload.success === true);
+    expect(successes.length).toBe(5);
+    expect(payloads.filter((payload) => payload.success === false)).toHaveLength(1);
+    const settledAt = payloads.length;
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(payloads).toHaveLength(settledAt);
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 20_000);

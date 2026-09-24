@@ -82,7 +82,10 @@ export const BB_TOOL_OUTCOME_UNKNOWN =
   "bb tool outcome unknown: claimed call was cancelled before a result arrived";
 const BB_TOOL_POLL_MS = 500;
 const BB_TOOL_TEARDOWN_RPC_MS = 2_000;
-const RESULT_DELIVERY_ATTEMPTS = 3;
+const RESULT_DELIVERY_ATTEMPTS = 5;
+const RESULT_DELIVERY_BACKOFF_MS = [250, 500, 1_000, 2_000];
+const RESULT_UNDELIVERABLE =
+  "bb tool outcome is uncertain: the result could not be delivered";
 const COMPANION_TURN_ENDED =
   "bb turn ended; bb tools are unavailable to background subagents after their owning turn";
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
@@ -225,6 +228,8 @@ interface PendingBbToolCall {
   phase: BbReversePhase;
   result: BbToolCallResult | undefined;
   companionDelivery: "pending" | "started";
+  deliveryAttempts: number;
+  nextDeliveryAt: number;
   resolve: () => void;
 }
 
@@ -361,6 +366,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   const pendingBbToolCalls = new Map<string, PendingBbToolCall>();
   let bbToolCallSerial = 0;
   let ignoreBbToolControl = false;
+  let ignoredNativeTypes = new Set<string>();
   const replyingInteractions = new Set<string>();
   const owners = new Map<string, OwnerRecord>();
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
@@ -536,11 +542,13 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       }
       zeroWorkSerial += 1;
       const settledId = `zero-work-${zeroWorkSerial}`;
-      void emitTurnDeltas(session, [
-        { kind: "turn.open", providerTurnId: settledId },
-        { kind: "input.accepted", clientRequestId, providerTurnId: settledId },
-        { kind: "turn.boundary", providerTurnId: settledId, status: "completed" },
-      ]).catch((error: unknown) => {
+      void enqueue(session, () =>
+        emitTurnDeltas(session, [
+          { kind: "turn.open", providerTurnId: settledId },
+          { kind: "input.accepted", clientRequestId, providerTurnId: settledId },
+          { kind: "turn.boundary", providerTurnId: settledId, status: "completed" },
+        ]),
+      ).catch((error: unknown) => {
         warn(`could not publish zero-work turn for ${session.threadId}: ${failureMessage(error)}`);
       });
     }, UNOPENED_DISPATCH_GRACE_MS);
@@ -858,6 +866,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     if (wrapped.kind === "resync") {
+      await rebuildOrigins(session);
       const messages = await session.handle.context();
       scheduleBbToolDrain(session);
       ensureBbToolPoll(session);
@@ -865,6 +874,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     const native: OpenCodeNativeEvent = wrapped.event;
+    if (native.type !== BB_TOOLS_CONTROL_EVENT && ignoredNativeTypes.has(native.type)) return;
     if (native.type === BB_TOOLS_CONTROL_EVENT) {
       if (ignoreBbToolControl) return;
       const key = typeof native.data?.key === "string" ? native.data.key : undefined;
@@ -1363,7 +1373,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   }
 
   async function ensureBbTools(session: ThreadSession): Promise<void> {
-    await withBbToolsLock(session, () => syncBbTools(session, "turn"));
+    await enqueue(session, () => withBbToolsLock(session, () => syncBbTools(session, "turn")));
   }
 
   function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
@@ -1547,7 +1557,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         binding.seenOpen.add(call.key);
         continue;
       }
-      if (binding.cancelled.has(call.key) || binding.inFlight.has(call.key)) continue;
+      if (binding.cancelled.has(call.key) || binding.inFlight.has(call.key) || hasRetainedResult(session, call.key)) continue;
       binding.seenOpen.add(call.key);
       binding.inFlight.add(call.key);
       void runBbToolCall(session, binding, call).then(async (outcome) => {
@@ -1580,6 +1590,63 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     for (const entry of session.messageTurns.values()) {
       if (entry.turnId === turnId) entry.closed = true;
     }
+  }
+
+  function assistantMessageID(event: OpenCodeNativeEvent): string | undefined {
+    const value = event.data?.assistantMessageID;
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  }
+
+  async function rebuildOrigins(session: ThreadSession): Promise<void> {
+    let events: readonly OpenCodeNativeEvent[];
+    try {
+      events = await session.handle.durableLog();
+    } catch (error) {
+      warn(`could not read OpenCode session log for ${session.threadId}: ${failureMessage(error)}`);
+      return;
+    }
+    let openTurn: string | undefined;
+    for (const event of events) {
+      if (event.type === "log.synced") continue;
+      const sessionID =
+        typeof event.data?.sessionID === "string" ? event.data.sessionID : session.handle.id;
+      if (sessionID !== session.handle.id) continue;
+      const seq = event.durable?.seq;
+      if (event.type === "session.execution.started") {
+        if (openTurn === undefined) openTurn = `exec:${sessionID}:${seq ?? 0}`;
+        continue;
+      }
+      if (
+        event.type === "session.execution.succeeded" ||
+        event.type === "session.execution.failed" ||
+        event.type === "session.execution.interrupted"
+      ) {
+        if (openTurn !== undefined) noteTurnClosed(session, openTurn);
+        openTurn = undefined;
+        continue;
+      }
+      const messageID = assistantMessageID(event);
+      if (messageID !== undefined && openTurn !== undefined) noteMessageTurn(session, messageID, openTurn);
+    }
+    const live = liveTurnIdOf(session);
+    if (!session.turnOpen || live === undefined) return;
+    let assistants: readonly { id: string; completed: boolean }[] = [];
+    try {
+      assistants = await session.handle.assistantMessages();
+    } catch (error) {
+      warn(`could not read OpenCode assistant messages for ${session.threadId}: ${failureMessage(error)}`);
+      return;
+    }
+    for (const message of assistants) {
+      if (message.completed || session.messageTurns.has(message.id)) continue;
+      noteMessageTurn(session, message.id, live);
+    }
+  }
+
+  function mappedToOpenExecution(session: ThreadSession, messageID: string): boolean {
+    const mapped = session.messageTurns.get(messageID);
+    if (mapped === undefined || mapped.closed || session.closedTurnIds.has(mapped.turnId)) return false;
+    return session.turnOpen && liveTurnIdOf(session) === mapped.turnId;
   }
 
   function resolveCallTurn(
@@ -1626,8 +1693,19 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     call: BbPendingToolCall,
   ): Promise<"resolved" | "waiting"> {
     if (!bindingStillCurrent(session, binding)) return "resolved";
-    const resolved = resolveCallTurn(session, call);
-    if (resolved.kind === "unknown") return "waiting";
+    let resolved = resolveCallTurn(session, call);
+    if (resolved.kind === "unknown") {
+      await rebuildOrigins(session);
+      if (!bindingStillCurrent(session, binding)) return "resolved";
+      resolved = resolveCallTurn(session, call);
+    }
+    if (resolved.kind === "unknown") {
+      if (!session.turnOpen) {
+        await rejectCompanionCall(session, binding, call.key, COMPANION_TURN_ENDED);
+        return "resolved";
+      }
+      return "waiting";
+    }
     if (resolved.kind === "closed") {
       await rejectCompanionCall(session, binding, call.key, COMPANION_TURN_ENDED);
       return "resolved";
@@ -1687,6 +1765,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         phase: "dispatched",
         result: undefined,
         companionDelivery: "pending",
+        deliveryAttempts: 0,
+        nextDeliveryAt: 0,
         resolve: () => resolve(entry),
       };
       pendingBbToolCalls.set(id, entry);
@@ -1775,41 +1855,41 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     key: string,
     result: BbToolCallResult,
     options: { bound: boolean },
-  ): Promise<"acked" | "lost" | "failed"> {
+  ): Promise<"acked" | "lost" | "failed" | "conflict"> {
     if (!options.bound && !bindingStillCurrent(session, binding)) {
       await detachCapturedBinding(session, binding, 0);
       return "lost";
     }
-    const attempts = options.bound ? 1 : RESULT_DELIVERY_ATTEMPTS;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      if (!options.bound && !bindingStillCurrent(session, binding)) {
-        await detachCapturedBinding(session, binding, 0);
+    const rpc = session.handle.rpc(BB_TOOLS_RPC, "result", {
+      capability: binding.capability,
+      key,
+      success: result.success,
+      contentItems: result.contentItems,
+    });
+    try {
+      await (options.bound ? withTimeout(rpc, BB_TOOL_TEARDOWN_RPC_MS) : rpc);
+      return "acked";
+    } catch (error) {
+      if (failureMessage(error).includes("conflict")) return "conflict";
+      if (deliveryLost(session, binding, error)) {
+        warn(
+          `could not deliver bb tool result ${key}: ${failureMessage(error)}; not retrying into a new companion generation`,
+        );
+        await detachCapturedBinding(session, binding, BB_TOOL_TEARDOWN_RPC_MS);
         return "lost";
       }
-      const rpc = session.handle.rpc(BB_TOOLS_RPC, "result", {
-        capability: binding.capability,
-        key,
-        success: result.success,
-        contentItems: result.contentItems,
-      });
-      try {
-        await (options.bound ? withTimeout(rpc, BB_TOOL_TEARDOWN_RPC_MS) : rpc);
-        return "acked";
-      } catch (error) {
-        if (deliveryLost(session, binding, error)) {
-          warn(
-            `could not deliver bb tool result ${key}: ${failureMessage(error)}; not retrying into a new companion generation`,
-          );
-          await detachCapturedBinding(session, binding, BB_TOOL_TEARDOWN_RPC_MS);
-          return "lost";
-        }
-        if (attempt + 1 === attempts) {
-          warn(`could not deliver bb tool result ${key}: ${failureMessage(error)}`);
-          return "failed";
-        }
-      }
+      warn(`could not deliver bb tool result ${key}: ${failureMessage(error)}`);
+      return "failed";
     }
-    return "failed";
+  }
+
+  function hasRetainedResult(session: ThreadSession, key: string): boolean {
+    for (const call of pendingBbToolCalls.values()) {
+      if (call.threadId !== session.threadId || call.key !== key) continue;
+      if (call.phase === "acknowledged") continue;
+      return true;
+    }
+    return false;
   }
 
   function hasOpenCompanionCalls(session: ThreadSession): boolean {
@@ -1824,14 +1904,65 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     return false;
   }
 
+  function scheduleResultRetry(session: ThreadSession, binding: BbToolBinding, call: PendingBbToolCall): void {
+    const delay =
+      RESULT_DELIVERY_BACKOFF_MS[Math.min(call.deliveryAttempts - 1, RESULT_DELIVERY_BACKOFF_MS.length - 1)] ??
+      2_000;
+    call.nextDeliveryAt = Date.now() + delay;
+    const timer = setTimeout(() => {
+      if (bindingStillCurrent(session, binding)) scheduleBbToolDrain(session);
+    }, delay);
+    timer.unref?.();
+  }
+
+  async function settleUndeliverable(
+    session: ThreadSession,
+    binding: BbToolBinding,
+    call: PendingBbToolCall,
+  ): Promise<void> {
+    warn(
+      `could not deliver bb tool result ${call.key}: undeliverable after ${RESULT_DELIVERY_ATTEMPTS} attempts`,
+    );
+    call.phase = "uncertain";
+    pendingBbToolCalls.delete(call.id);
+    if (!bindingStillCurrent(session, binding)) return;
+    try {
+      await session.handle.rpc(BB_TOOLS_RPC, "result", {
+        capability: binding.capability,
+        key: call.key,
+        success: false,
+        contentItems: [{ type: "inputText", text: RESULT_UNDELIVERABLE }],
+      });
+    } catch (error) {
+      if (deliveryLost(session, binding, error) || isCompanionAbsent(error)) {
+        warn(
+          `could not deliver bb tool result ${call.key}: ${failureMessage(error)}; not retrying into a new companion generation`,
+        );
+        await detachCapturedBinding(session, binding, BB_TOOL_TEARDOWN_RPC_MS);
+      }
+    }
+  }
+
   async function finishDelivery(
     session: ThreadSession,
     binding: BbToolBinding,
     call: PendingBbToolCall,
     bound: boolean,
   ): Promise<void> {
+    if (call.companionDelivery === "started") return;
     const outcome = await deliverChosen(session, binding, call, bound);
-    if (outcome === "failed" && bindingStillCurrent(session, binding)) scheduleBbToolDrain(session);
+    if (outcome === "acked" || outcome === "lost") return;
+    if (outcome === "conflict") {
+      call.phase = "acknowledged";
+      pendingBbToolCalls.delete(call.id);
+      return;
+    }
+    call.deliveryAttempts += 1;
+    if (bound || call.deliveryAttempts >= RESULT_DELIVERY_ATTEMPTS) {
+      await settleUndeliverable(session, binding, call);
+      return;
+    }
+    scheduleResultRetry(session, binding, call);
   }
 
   async function deliverChosen(
@@ -1839,12 +1970,13 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     binding: BbToolBinding,
     call: PendingBbToolCall,
     bound: boolean,
-  ): Promise<"acked" | "lost" | "failed"> {
+  ): Promise<"acked" | "lost" | "failed" | "conflict"> {
     if (call.result === undefined) return "failed";
     if (call.phase === "acknowledged") return "acked";
     if (call.companionDelivery === "started") return "failed";
     call.companionDelivery = "started";
     const outcome = await deliverCompanionResult(session, binding, call.key, call.result, { bound });
+    if (outcome === "conflict") return "conflict";
     if (outcome === "acked" || outcome === "lost") {
       call.phase = outcome === "acked" ? "acknowledged" : "uncertain";
       pendingBbToolCalls.delete(call.id);
@@ -1860,6 +1992,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     for (const call of [...pendingBbToolCalls.values()]) {
       if (!bindingStillCurrent(session, binding)) return;
       if (call.threadId !== session.threadId || call.result === undefined) continue;
+      if (Date.now() < call.nextDeliveryAt) continue;
       if (call.phase !== "responded" || call.companionDelivery !== "pending") continue;
       if (!beginDelivery(call)) continue;
       await finishDelivery(session, binding, call, false);
@@ -1936,13 +2069,16 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     turnId: string | undefined,
   ): Promise<void> {
     if (!bindingStillCurrent(session, binding)) return;
+    await rebuildOrigins(session);
+    if (!bindingStillCurrent(session, binding)) return;
     const snapshot = await readBbToolPending(session, binding, true);
     if (!bindingStillCurrent(session, binding) || snapshot === "unbound" || snapshot === "failed") return;
     for (const call of snapshot.calls) {
       if (call.state === "claimed") continue;
-      if (resolveCallTurn(session, call).kind !== "closed") continue;
-      const mapped = session.messageTurns.get(call.origin.rootMessageID);
-      if (turnId !== undefined && mapped !== undefined && mapped.turnId !== turnId) continue;
+      if (call.origin.rootSessionID !== session.handle.id) continue;
+      if (mappedToOpenExecution(session, call.origin.rootMessageID)) continue;
+      binding.seenOpen.delete(call.key);
+      binding.inFlight.delete(call.key);
       await rejectCompanionCall(session, binding, call.key, COMPANION_TURN_ENDED);
       if (!bindingStillCurrent(session, binding)) return;
     }
@@ -1961,6 +2097,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       }
       if (binding === null || bindingStillCurrent(session, binding)) {
         session.deferredResyncMessages = undefined;
+      }
+      if (
+        turnId !== undefined &&
+        session.turnOpen &&
+        session.liveProviderTurnId !== undefined &&
+        session.liveProviderTurnId !== turnId
+      ) {
+        return;
       }
     }
     sendDeltas(session.threadId, deltas, true);
@@ -2813,6 +2957,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     ignoreBbToolControl = enabled;
   }
 
+  function setIgnoredNativeEvents(types: readonly string[]): void {
+    ignoredNativeTypes = new Set(types);
+  }
+
+  function forgetOriginMap(threadId: string): void {
+    const session = sessions.get(threadId);
+    if (session === undefined) return;
+    session.messageTurns.clear();
+    session.closedTurnIds.clear();
+  }
+
   async function injectResync(threadId: string): Promise<void> {
     const session = sessions.get(threadId);
     if (session === undefined || session.closed) return;
@@ -2830,6 +2985,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     injectResync,
     bbToolCapability,
     setIgnoreBbToolControl,
+    setIgnoredNativeEvents,
+    forgetOriginMap,
     get closed() {
       return closed;
     },

@@ -387,6 +387,8 @@ export interface LiveBridge {
   injectResync(threadId: string): Promise<void>;
   capability(threadId: string): string | undefined;
   setIgnoreBbToolControl(enabled: boolean): void;
+  setIgnoredNativeEvents(types: readonly string[]): void;
+  forgetOriginMap(threadId: string): void;
   teardown(): Promise<void>;
 }
 
@@ -422,6 +424,12 @@ export async function startLiveBridge(engine: Engine): Promise<LiveBridge> {
     capability: (threadId) => bridge.bbToolCapability(threadId),
     setIgnoreBbToolControl: (enabled) => {
       bridge.setIgnoreBbToolControl(enabled);
+    },
+    setIgnoredNativeEvents: (types) => {
+      bridge.setIgnoredNativeEvents(types);
+    },
+    forgetOriginMap: (threadId) => {
+      bridge.forgetOriginMap(threadId);
     },
     teardown: async () => {
       await bridge.closeAll();
@@ -641,7 +649,7 @@ export function createLiveContext(options: LiveContextOptions = {}): LiveContext
     if (engine !== undefined && process.env.BB_OPENCODE_LIVE_KEEP !== undefined) {
       keepEngineRoot(engine.root);
     }
-    if (engine !== undefined && process.env.BB_OPENCODE_LIVE_KEEP === undefined) {
+    if (engine !== undefined) {
       rmSync(engine.root, { recursive: true, force: true });
     }
     live = undefined;
