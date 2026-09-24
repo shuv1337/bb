@@ -61,4 +61,28 @@ describe("bb tools companion settings", () => {
     expect(slot.getByText("Turns fail until the companion is installed.")).toBeTruthy();
     expect(slot.getByText("github:shuv1337/opencode-bb-tools#v0.1.0")).toBeTruthy();
   });
+
+  it("renders each machine when one status call fails", async () => {
+    const slot = renderSlot(app.settingsSections[0]!, {}, {
+      sdk: {
+        hosts: {
+          list: async () => [
+            { id: "host-1", name: "Studio", status: "connected" },
+            { id: "host-2", name: "Laptop", status: "connected" },
+          ],
+        },
+      },
+      rpc: {
+        companionStatus: ({ machineId }: { machineId: string }) => {
+          if (machineId === "host-2") throw new Error("daemon down");
+          return status(false);
+        },
+      },
+    } as never);
+    expect(await slot.findByText("Studio")).toBeTruthy();
+    expect(slot.getByText("not installed")).toBeTruthy();
+    expect(slot.getByText("Laptop")).toBeTruthy();
+    expect(slot.getByText("daemon down")).toBeTruthy();
+    expect(slot.queryByText("Turns fail until the companion is installed.")).toBeNull();
+  });
 });

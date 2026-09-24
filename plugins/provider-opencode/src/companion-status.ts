@@ -60,14 +60,12 @@ export async function readCompanionStatus(
 ): Promise<CompanionProbe> {
   const deps = discoveryDepsFrom(options);
   const attached = await resolveAttachedRegistration(deps);
-  const requested = deps.env.OPENCODE_APP?.trim() ?? "";
   const facts: EngineFacts = {
     appId: engineAppIdFrom({
       explicitServerUrl: attached.explicit,
       healthAppId: attached.health.appId,
       pathBinaryAppId: attached.health.pathBinaryAppId,
       version: attached.health.version,
-      requestedApp: requested.length === 0 ? null : requested,
     }),
     version: attached.health.version,
     explicitServerUrl: attached.explicit,

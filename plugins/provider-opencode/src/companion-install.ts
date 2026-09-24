@@ -17,20 +17,38 @@ export function companionEngineAppId(
   return null;
 }
 
+export type CompanionInstallPlan = {
+  command: string;
+  writes: string;
+};
+
+const CONFIG_WRITES: Record<CompanionEngineAppId, string> = {
+  opencode: "stock OpenCode config (~/.config/opencode), not Shuvcode's",
+  shuvcode: "Shuvcode config (~/.config/shuvcode), not stock OpenCode's",
+};
+
+export function companionInstallPlans(
+  appId: string | null,
+): readonly CompanionInstallPlan[] {
+  const exact = companionEngineAppId(appId);
+  const ids: readonly CompanionEngineAppId[] =
+    exact === null ? ENGINE_APP_IDS : [exact];
+  return ids.map((cli) => ({
+    command: `${cli} plugin add ${COMPANION_PACKAGE_NAME}`,
+    writes: CONFIG_WRITES[cli],
+  }));
+}
+
 export function companionInstallCommand(appId: string | null): string | null {
-  const cli = companionEngineAppId(appId);
-  if (cli === null) return null;
-  return `${cli} plugin add ${COMPANION_PACKAGE_NAME}`;
+  const plans = companionInstallPlans(appId);
+  const only = plans[0];
+  return plans.length === 1 && only !== undefined ? only.command : null;
 }
 
 export function companionInstallCommands(
   appId: string | null,
 ): readonly string[] {
-  const exact = companionInstallCommand(appId);
-  if (exact !== null) return [exact];
-  return ENGINE_APP_IDS.map(
-    (cli) => `${cli} plugin add ${COMPANION_PACKAGE_NAME}`,
-  );
+  return companionInstallPlans(appId).map((plan) => plan.command);
 }
 
 export function companionPinnedGitSpecifier(tag: string): string {

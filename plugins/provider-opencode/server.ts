@@ -35,7 +35,7 @@ export default function plugin(bb: BbPluginApi): void {
       type: "boolean",
       label: "bb tools required",
       description:
-        "Fail the turn when opencode-bb-tools is not installed. Off keeps native-only threads and a setup warning.",
+        "Global setting for every machine. Fail the turn when the companion is absent. Off keeps native-only threads and a setup warning. An incompatible companion fails the turn either way.",
       default: false,
     },
   });

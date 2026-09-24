@@ -111,7 +111,8 @@ The OpenCode provider reports its bb tools companion with
 `bb opencode tools status --machine <id> [--json]`. The companion is a separate
 OpenCode plugin, `opencode-bb-tools`, installed with that engine's
 `plugin add`, not by bb. `bb plugin config provider-opencode set bbToolsRequired true`
-fails turns when it is absent. See `bb guide providers`.
+is global, not per-machine, and fails turns when the companion is absent. An
+incompatible companion fails the turn either way. See `bb guide providers`.
 
 The builtin Keep Awake plugin prevents macOS idle sleep while bb is running.
 Its settings page lets you target all hosts or selected hosts. The CLI

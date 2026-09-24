@@ -1,6 +1,6 @@
 import type { PluginProviderOptionsContext } from "@get-bb/plugin-sdk";
 import {
-  companionInstallCommands,
+  companionInstallPlans,
   COMPANION_PACKAGE_NAME,
   COMPANION_REPOSITORY_URL,
 } from "./companion-install.js";
@@ -24,8 +24,13 @@ export function withBbToolsRequired<T extends Record<string, unknown>>(
 }
 
 export function bbToolsRequiredSetupMessage(appId: string | null): string {
-  const command = companionInstallCommands(appId)
-    .map((entry) => `\`${entry}\``)
+  const plans = companionInstallPlans(appId);
+  const command = plans
+    .map((entry) =>
+      plans.length === 1
+        ? `\`${entry.command}\``
+        : `\`${entry.command}\` (writes ${entry.writes})`,
+    )
     .join(" or ");
-  return `bb tools are required on this host, and the ${COMPANION_PACKAGE_NAME} companion is not installed. Install it from ${COMPANION_REPOSITORY_URL} with ${command}, or turn off bb tools required, then retry the turn.`;
+  return `bb tools are required, and the ${COMPANION_PACKAGE_NAME} companion is not installed on this engine. Install it from ${COMPANION_REPOSITORY_URL} with ${command}, or turn off bb tools required, then retry the turn.`;
 }

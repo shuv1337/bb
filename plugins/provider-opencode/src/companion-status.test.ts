@@ -103,7 +103,7 @@ describe("readCompanionStatus", () => {
     const reads: string[] = [];
     try {
       const probe = await readCompanionStatus({
-        env: { OPENCODE_SERVER_URL: baseUrl },
+        env: { OPENCODE_SERVER_URL: baseUrl, OPENCODE_APP: "opencode" },
         homedir: home,
         readFile: async (path) => {
           reads.push(path);
@@ -116,7 +116,7 @@ describe("readCompanionStatus", () => {
       });
       expect(reads).toEqual([]);
       expect(paths).toEqual(expect.arrayContaining(["/api/info", "/api/rpc/bb.tools.v1/hello", "/api/plugin"]));
-      expect(probe.detected).toBe(true);
+      expect(probe.state).toEqual({ status: "ready" });
       expect(probe.duplicates).toBe(true);
       expect(probe.engine.explicitServerUrl).toBe(true);
       expect(probe.engine.installCommand).toBe("shuvcode plugin add opencode-bb-tools");
@@ -158,11 +158,47 @@ describe("readCompanionStatus", () => {
       const probe = await readCompanionStatus({
         env: { OPENCODE_SERVER_URL: baseUrl, OPENCODE_APP: "opencode" },
       });
-      expect(probe.detected).toBe(false);
-      expect(probe.reason).toContain("not installed");
-      expect(probe.engine.installCommand).toBe("opencode plugin add opencode-bb-tools");
+      expect(probe.state.status).toBe("absent");
+      expect(probe.engine.installCommand).toBeNull();
+      expect(probe.engine.installCommands.map((plan) => plan.command)).toEqual([
+        "opencode plugin add opencode-bb-tools",
+        "shuvcode plugin add opencode-bb-tools",
+      ]);
+      expect(probe.engine.installCommands[0]?.writes).toContain("OpenCode");
+      expect(probe.engine.installCommands[1]?.writes).toContain("Shuvcode");
       expect(probe.package.version).toBeNull();
       expect(probe.instances).toBeNull();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("reports authentication failure as unreachable, not absent", async () => {
+    const server = createServer((req, res) => {
+      const url = req.url ?? "/";
+      res.setHeader("content-type", "application/json");
+      if (url.startsWith("/api/info")) {
+        res.end(JSON.stringify({ version: "2.0.15", pid: 3, urls: [], paths: { tmp: "/tmp" } }));
+        return;
+      }
+      if (url.startsWith("/api/plugin")) {
+        res.end(JSON.stringify({ location: { directory: "/engine" }, data: [] }));
+        return;
+      }
+      res.statusCode = 401;
+      res.end();
+    });
+    const baseUrl = await listen(server);
+    try {
+      const probe = await readCompanionStatus({
+        env: { OPENCODE_SERVER_URL: baseUrl, OPENCODE_APP: "opencode" },
+      });
+      expect(probe.state.status).toBe("unreachable");
+      if (probe.state.status === "unreachable") {
+        expect(probe.state.message.length).toBeGreaterThan(0);
+        expect(probe.state.message).not.toContain("not installed");
+      }
+      expect(probe.engine.installCommand).toBeNull();
     } finally {
       await closeServer(server);
     }
@@ -209,7 +245,7 @@ describe("readCompanionStatus", () => {
       const probe = companionProbeSchema.parse(
         await harness.experimental_call("readCompanionStatus", {}),
       );
-      expect(probe.detected).toBe(true);
+      expect(probe.state).toEqual({ status: "ready" });
       expect(probe.protocol.versions).toBeNull();
       expect(probe.protocol.legacyVersion).toBe(1);
       expect(probe.package.version).toBeNull();

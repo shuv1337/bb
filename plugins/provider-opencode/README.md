@@ -64,7 +64,11 @@ warning.
 
 Status uses `hello` and the engine plugin list, including when
 `OPENCODE_SERVER_URL` points at a remote engine. It does not read companion
-files off disk.
+files off disk. `state` is `ready`, `absent`, `unreachable`, or
+`incompatible`. `absent` is only an unavailable companion RPC and is the only
+state shown as not installed, with an install command. `unreachable` is
+transport, auth, or an engine that is not ready. `incompatible` is a hello
+that does not match or a protocol range that does not overlap.
 
 ```sh
 bb opencode tools status --machine <id>
@@ -72,15 +76,19 @@ bb opencode tools status --machine <id> --json
 ```
 
 SDK: `callRpc("companionStatus", { machineId })`. The settings page shows the
-same status, the repository link, and the install command for the detected
-engine.
+same status and the repository link. An absent companion also shows the
+install command. A service version containing `-shuv` is Shuvcode.
+`/api/info` does not report an app id, so URL mode does not let
+`OPENCODE_APP` choose the command. When the service identity is uncertain,
+status shows both `opencode plugin add` and `shuvcode plugin add` and says
+which config each writes.
 
-`bb plugin config provider-opencode set bbToolsRequired true` opts the host
-into failing the turn when the companion is absent. The default is false:
-threads keep running native-only, and bb emits a persistent warning that names
-`opencode-bb-tools`, links the repository, and gives the install command. The
-bridge adopts that warning text at merge; until then the warning string lives
-in `src/strings.ts`.
+`bb plugin config provider-opencode set bbToolsRequired true` is a global
+plugin setting. It applies to every machine; bb settings are not per-machine.
+Default false. Absent companion and required fails the turn with the setup
+error. Off keeps native-only threads and a persistent warning that names
+`opencode-bb-tools`, links the repository, and gives the install command. An
+incompatible companion fails the turn either way.
 
 Released engines idle-evict a Location after 60 minutes with no durable session
 event. Tool progress and plugin RPC do not count. A bb tool call longer than

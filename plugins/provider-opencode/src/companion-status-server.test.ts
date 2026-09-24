@@ -24,7 +24,7 @@ describe("bb opencode tools status", () => {
     const rpc = await host.harness.callRpc("companionStatus", { machineId: "host-1" });
     expect(rpc).toMatchObject({
       machineId: "host-1",
-      detected: false,
+      state: { status: "absent" },
       bbToolsRequired: false,
       repositoryUrl: "https://github.com/shuv1337/opencode-bb-tools",
     });
@@ -36,7 +36,10 @@ describe("bb opencode tools status", () => {
       "--json",
     ]);
     expect(json.exitCode).toBe(0);
-    expect(JSON.parse(json.stdout)).toMatchObject({ machineId: "host-1", detected: false });
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      machineId: "host-1",
+      state: { status: "absent" },
+    });
     const text = await host.harness.runCli(["tools", "status", "--machine", "host-1"]);
     expect(text.stdout).toContain("shuvcode plugin add opencode-bb-tools");
     const missing = await host.harness.runCli(["tools", "status", "--machine", "missing"]);

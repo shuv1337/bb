@@ -6,7 +6,7 @@ import {
   COMPANION_PROTOCOL,
   COMPANION_REPOSITORY_URL,
   companionInstallCommand,
-  companionInstallCommands,
+  companionInstallPlans,
   SUPPORTED_PROTOCOL_RANGE,
 } from "./companion-install.js";
 
@@ -43,14 +43,40 @@ const companionEngineSchema = z
     version: z.string().nullable(),
     explicitServerUrl: z.boolean(),
     installCommand: z.string().nullable(),
-    installCommands: z.array(z.string().min(1)).min(1),
+    installCommands: z
+      .array(
+        z
+          .object({
+            command: z.string().min(1),
+            writes: z.string().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
   })
   .strict();
 
+export const companionStateSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("absent") }).strict(),
+  z
+    .object({
+      status: z.literal("unreachable"),
+      message: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("incompatible"),
+      message: z.string().min(1),
+      details: z.string().min(1),
+    })
+    .strict(),
+  z.object({ status: z.literal("ready") }).strict(),
+]);
+
 export const companionProbeSchema = z
   .object({
-    detected: z.boolean(),
-    reason: z.string().nullable(),
+    state: companionStateSchema,
     package: z
       .object({
         name: z.string().nullable(),
@@ -98,6 +124,7 @@ export const companionStatusSchema = companionProbeSchema
 export type CompanionProbe = z.infer<typeof companionProbeSchema>;
 export type CompanionStatus = z.infer<typeof companionStatusSchema>;
 export type CompanionPluginSpec = z.infer<typeof companionPluginSpecSchema>;
+export type CompanionState = z.infer<typeof companionStateSchema>;
 
 export const openCodeHostContract = defineRpcContract({
   resolveNativeRoots: experimental_nativeRootsHostContract.resolveNativeRoots,
@@ -169,11 +196,29 @@ export type EngineFacts = {
   explicitServerUrl: boolean;
 };
 
-const COMPANION_PLUGIN_IDS = new Set([
-  COMPANION_PACKAGE_NAME,
-  "bb.tools",
-  COMPANION_PROTOCOL,
-]);
+const COMPANION_GIT_REPO = "shuv1337/opencode-bb-tools";
+
+export function isCompanionRegistrationSpec(spec: string): boolean {
+  if (spec === COMPANION_PACKAGE_NAME) return true;
+  const pin = `${COMPANION_PACKAGE_NAME}@`;
+  if (spec.startsWith(pin)) {
+    const version = spec.slice(pin.length);
+    return /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(version);
+  }
+  const github = new RegExp(
+    `^github:${COMPANION_GIT_REPO}(?:\\.git)?(?:[?#].*)?$`,
+    "u",
+  );
+  const https = new RegExp(
+    `^(?:git\\+)?https://github\\.com/${COMPANION_GIT_REPO}(?:\\.git)?(?:[?#].*)?$`,
+    "u",
+  );
+  const gitHttps = new RegExp(
+    `^git:https://github\\.com/${COMPANION_GIT_REPO}(?:\\.git)?(?:[?#].*)?$`,
+    "u",
+  );
+  return github.test(spec) || https.test(spec) || gitHttps.test(spec);
+}
 
 export function protocolRangesOverlap(
   left: { min: number; max: number },
@@ -182,33 +227,27 @@ export function protocolRangesOverlap(
   return left.max >= right.min && left.min <= right.max;
 }
 
+function knownEngineAppId(value: string | null): "opencode" | "shuvcode" | null {
+  if (value === "opencode" || value === "shuvcode") return value;
+  return null;
+}
+
 export function engineAppIdFrom(input: {
   explicitServerUrl: boolean;
   healthAppId: string | null;
   pathBinaryAppId: string | null;
   version: string | null;
-  requestedApp: string | null;
 }): string | null {
   if (!input.explicitServerUrl && input.healthAppId !== null) {
     return input.healthAppId;
   }
-  if (
-    input.requestedApp === "opencode" ||
-    input.requestedApp === "shuvcode"
-  ) {
-    return input.requestedApp;
-  }
-  if (
-    !input.explicitServerUrl &&
-    (input.pathBinaryAppId === "opencode" ||
-      input.pathBinaryAppId === "shuvcode")
-  ) {
-    return input.pathBinaryAppId;
-  }
+  const reported = knownEngineAppId(input.healthAppId);
+  if (reported !== null) return reported;
   if (input.version !== null && input.version.includes("-shuv")) {
     return "shuvcode";
   }
-  return null;
+  if (input.explicitServerUrl) return null;
+  return knownEngineAppId(input.pathBinaryAppId);
 }
 
 function nonEmpty(value: string | undefined): string | null {
@@ -228,7 +267,7 @@ function engineFrom(facts: EngineFacts): CompanionProbe["engine"] {
     version: facts.version,
     explicitServerUrl: facts.explicitServerUrl,
     installCommand: companionInstallCommand(facts.appId),
-    installCommands: [...companionInstallCommands(facts.appId)],
+    installCommands: [...companionInstallPlans(facts.appId)],
   };
 }
 
@@ -242,20 +281,36 @@ function emptyProtocol(): CompanionProbe["protocol"] {
   };
 }
 
-function undetected(
+function messageOr(value: string, fallback: string): string {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function reliableSpecs(specs: readonly CompanionPluginSpec[]): CompanionPluginSpec[] {
+  return specs.filter((spec) => isCompanionRegistrationSpec(spec.spec));
+}
+
+function duplicatesFrom(
+  instances: number | null,
+  specs: readonly CompanionPluginSpec[],
+): boolean {
+  if (instances !== null) return instances > 1;
+  return specs.filter((spec) => spec.state === "active").length > 1;
+}
+
+function shellProbe(
   facts: EngineFacts,
-  reason: string,
   plugins: PluginListRead,
+  state: CompanionState,
 ): CompanionProbe {
-  const specs = plugins.kind === "ok" ? plugins.specs : [];
+  const specs = reliableSpecs(plugins.kind === "ok" ? plugins.specs : []);
   return {
-    detected: false,
-    reason,
+    state,
     package: { name: null, version: null },
     protocol: emptyProtocol(),
     install: { path: null, digest: null },
     instances: null,
-    duplicates: specs.length > 1,
+    duplicates: duplicatesFrom(null, specs),
     pluginSpecs: specs,
     pluginListError: plugins.kind === "failed" ? plugins.message : null,
     richFailures: null,
@@ -265,27 +320,59 @@ function undetected(
   };
 }
 
+function incompatibleHello(
+  facts: EngineFacts,
+  plugins: PluginListRead,
+  message: string,
+  details: string,
+): CompanionProbe {
+  return shellProbe(facts, plugins, {
+    status: "incompatible",
+    message,
+    details: messageOr(details, message),
+  });
+}
+
 export function companionProbeFrom(input: {
   engine: EngineFacts;
   hello: HelloRead;
   plugins: PluginListRead;
 }): CompanionProbe {
-  if (input.hello.kind !== "ok") {
-    return undetected(input.engine, input.hello.message, input.plugins);
+  if (input.hello.kind === "absent") {
+    return shellProbe(input.engine, input.plugins, { status: "absent" });
+  }
+  if (input.hello.kind === "failed") {
+    return shellProbe(input.engine, input.plugins, {
+      status: "unreachable",
+      message: messageOr(
+        input.hello.message,
+        "OpenCode companion hello failed",
+      ),
+    });
+  }
+  if (input.hello.kind === "unrecognized") {
+    return incompatibleHello(
+      input.engine,
+      input.plugins,
+      `OpenCode companion hello did not match ${COMPANION_PROTOCOL}.`,
+      input.hello.message,
+    );
   }
   const parsed = helloSchema.safeParse(input.hello.value);
   if (!parsed.success || parsed.data.protocol === undefined) {
-    return undetected(
+    return incompatibleHello(
       input.engine,
-      `OpenCode companion hello did not match ${COMPANION_PROTOCOL}. Install a compatible ${COMPANION_PACKAGE_NAME} release with the engine's plugin add command.`,
       input.plugins,
+      `OpenCode companion hello did not match ${COMPANION_PROTOCOL}.`,
+      parsed.success ? "missing protocol" : "malformed hello",
     );
   }
   if (parsed.data.protocol !== COMPANION_PROTOCOL) {
-    return undetected(
+    return incompatibleHello(
       input.engine,
-      `OpenCode companion protocol ${parsed.data.protocol} is not ${COMPANION_PROTOCOL}.`,
       input.plugins,
+      `OpenCode companion protocol ${parsed.data.protocol} is not ${COMPANION_PROTOCOL}.`,
+      `reported ${parsed.data.protocol}; supported ${COMPANION_PROTOCOL}`,
     );
   }
   const versions = parsed.data.versions ?? null;
@@ -295,11 +382,35 @@ export function companionProbeFrom(input: {
       ? null
       : { min: legacyVersion, max: legacyVersion }
   );
-  const specs = input.plugins.kind === "ok" ? input.plugins.specs : [];
+  const overlapsSupported =
+    overlapSource === null
+      ? null
+      : protocolRangesOverlap(overlapSource, SUPPORTED_PROTOCOL_RANGE);
+  const specs = reliableSpecs(
+    input.plugins.kind === "ok" ? input.plugins.specs : [],
+  );
   const instances = parsed.data.instances ?? null;
+  const rangeMismatch =
+    overlapsSupported === false
+      ? versions !== null
+        ? {
+            message: `OpenCode companion protocol range ${versions.min}-${versions.max} does not overlap supported ${SUPPORTED_PROTOCOL_RANGE.min}-${SUPPORTED_PROTOCOL_RANGE.max}.`,
+            details: `reported ${versions.min}-${versions.max}; supported ${SUPPORTED_PROTOCOL_RANGE.min}-${SUPPORTED_PROTOCOL_RANGE.max}`,
+          }
+        : {
+            message: `OpenCode companion protocol version ${legacyVersion} does not overlap supported ${SUPPORTED_PROTOCOL_RANGE.min}-${SUPPORTED_PROTOCOL_RANGE.max}.`,
+            details: `reported version ${legacyVersion}; supported ${SUPPORTED_PROTOCOL_RANGE.min}-${SUPPORTED_PROTOCOL_RANGE.max}`,
+          }
+      : null;
   return {
-    detected: true,
-    reason: null,
+    state:
+      rangeMismatch === null
+        ? { status: "ready" }
+        : {
+            status: "incompatible",
+            message: rangeMismatch.message,
+            details: rangeMismatch.details,
+          },
     package: {
       name: nonEmpty(parsed.data.package?.name),
       version: nonEmpty(parsed.data.package?.version),
@@ -308,10 +419,7 @@ export function companionProbeFrom(input: {
       name: parsed.data.protocol,
       versions,
       legacyVersion,
-      overlapsSupported:
-        overlapSource === null
-          ? null
-          : protocolRangesOverlap(overlapSource, SUPPORTED_PROTOCOL_RANGE),
+      overlapsSupported,
       supported: SUPPORTED_PROTOCOL_RANGE,
     },
     install: {
@@ -319,7 +427,7 @@ export function companionProbeFrom(input: {
       digest: nonEmpty(parsed.data.install?.digest),
     },
     instances,
-    duplicates: (instances !== null && instances > 1) || specs.length > 1,
+    duplicates: duplicatesFrom(instances, specs),
     pluginSpecs: specs,
     pluginListError:
       input.plugins.kind === "failed" ? input.plugins.message : null,
@@ -347,11 +455,6 @@ function pluginArray(value: unknown): unknown[] | null {
   return null;
 }
 
-function isCompanionPlugin(id: string | null, spec: string): boolean {
-  if (id !== null && COMPANION_PLUGIN_IDS.has(id)) return true;
-  return spec.includes(COMPANION_PACKAGE_NAME);
-}
-
 export function companionPluginSpecsFrom(value: unknown): PluginListRead {
   const items = pluginArray(value);
   if (items === null) {
@@ -370,7 +473,7 @@ export function companionPluginSpecsFrom(value: unknown): PluginListRead {
         : sourceType === "local" && typeof source?.path === "string"
           ? source.path
           : sourceType;
-    if (!isCompanionPlugin(id, spec)) continue;
+    if (!isCompanionRegistrationSpec(spec)) continue;
     const state = record(entry.state);
     const status = state?.status === "failed" ? "failed" : "active";
     const error =
@@ -395,14 +498,27 @@ export function companionPluginSpecsFrom(value: unknown): PluginListRead {
   return { kind: "ok", specs };
 }
 
+function companionHeadline(status: CompanionStatus): string {
+  if (status.state.status === "absent") return "Companion: not installed";
+  if (status.state.status === "unreachable") return "Companion: unreachable";
+  if (status.state.status === "incompatible") return "Companion: incompatible";
+  const name = status.package.name ?? COMPANION_PACKAGE_NAME;
+  const version =
+    status.package.version === null ? "" : ` ${status.package.version}`;
+  return `Companion: ${name}${version}`;
+}
+
 export function formatCompanionStatus(status: CompanionStatus): string {
-  const lines = [
-    `Machine: ${status.machineId}`,
-    status.detected
-      ? `Companion: ${status.package.name ?? COMPANION_PACKAGE_NAME}${status.package.version === null ? "" : ` ${status.package.version}`}`
-      : "Companion: not installed",
-  ];
-  if (status.reason !== null) lines.push(`Reason: ${status.reason}`);
+  const lines = [`Machine: ${status.machineId}`, companionHeadline(status)];
+  if (status.state.status === "unreachable") {
+    lines.push(status.state.message);
+  }
+  if (status.state.status === "incompatible") {
+    lines.push(status.state.message);
+    if (status.state.details !== status.state.message) {
+      lines.push(status.state.details);
+    }
+  }
   const protocol = status.protocol.versions;
   if (protocol !== null) {
     const overlap =
@@ -420,11 +536,17 @@ export function formatCompanionStatus(status: CompanionStatus): string {
   if (status.install.path !== null) lines.push(`Install path: ${status.install.path}`);
   if (status.install.digest !== null) lines.push(`Digest: ${status.install.digest}`);
   if (status.instances !== null) lines.push(`Instances: ${status.instances}`);
+  const activeSpecs = status.pluginSpecs.filter((spec) => spec.state === "active");
+  const failedSpecs = status.pluginSpecs.filter((spec) => spec.state === "failed");
   if (status.duplicates) {
     lines.push("Duplicates: remove every extra spec, then retry");
-    for (const spec of status.pluginSpecs) {
+    for (const spec of activeSpecs) {
       lines.push(`Spec: ${spec.spec}${spec.id === null ? "" : ` (${spec.id})`}`);
     }
+  }
+  for (const spec of failedSpecs) {
+    const error = spec.error === null ? "" : ` (${spec.error})`;
+    lines.push(`Failed registration: ${spec.spec}${error}`);
   }
   if (status.richFailures !== null) {
     lines.push(`Rich failures: ${status.richFailures ? "yes" : "no"}`);
@@ -434,13 +556,22 @@ export function formatCompanionStatus(status: CompanionStatus): string {
     .join(" ");
   if (engine.length > 0) lines.push(`Engine: ${engine}`);
   if (status.engine.explicitServerUrl) lines.push("Engine mode: OPENCODE_SERVER_URL");
-  for (const command of status.engine.installCommands) {
-    lines.push(`Install: ${command}`);
+  if (status.state.status === "absent") {
+    const uncertain = status.engine.installCommand === null;
+    for (const plan of status.engine.installCommands) {
+      lines.push(`Install: ${plan.command}`);
+      if (uncertain) lines.push(`Config: ${plan.writes}`);
+    }
   }
   lines.push(`Repository: ${status.repositoryUrl}`);
-  lines.push(`bb tools required: ${status.bbToolsRequired ? "on" : "off"}`);
-  if (!status.detected && status.bbToolsRequired) {
+  lines.push(
+    `bb tools required: ${status.bbToolsRequired ? "on" : "off"} (global setting, every machine)`,
+  );
+  if (status.state.status === "absent" && status.bbToolsRequired) {
     lines.push("Turns fail until the companion is installed.");
+  }
+  if (status.state.status === "incompatible") {
+    lines.push("Turns fail until the companion is compatible.");
   }
   return lines.join("\n");
 }

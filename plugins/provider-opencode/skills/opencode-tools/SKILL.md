@@ -39,10 +39,17 @@ bb opencode tools status --machine <id> --json
 SDK: `callRpc("companionStatus", { machineId })`. The provider settings page
 shows the same status.
 
-`bb plugin config provider-opencode set bbToolsRequired true` fails the turn
-when the companion is absent. Default is false: the thread stays native-only
-and warns, with the repository link and the install command. An incompatible
-companion fails the turn either way.
+`bb plugin config provider-opencode set bbToolsRequired true` is a global
+plugin setting, not per-machine. Absent companion and required fails the turn
+with the setup error. Default is false: the thread stays native-only and
+warns, with the repository link and the install command. An incompatible
+companion fails the turn either way. Status `absent` is only an unavailable
+companion RPC and is the only state shown as not installed. `unreachable` is
+transport, auth, or an engine that is not ready. `incompatible` is a hello
+that does not match or a protocol range that does not overlap. URL mode does
+not let `OPENCODE_APP` pick the install command. A `-shuv` service version is
+Shuvcode; otherwise status shows both plugin-add commands and which config
+each writes.
 
 Released engines interrupt a tool call after 60 minutes without a durable
 session event. There is no knob until the host has the in-flight Location

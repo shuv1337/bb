@@ -45,7 +45,7 @@ describe("companion status contract", () => {
         plugins: { kind: "ok", specs: [] },
       }),
     );
-    expect(probe.detected).toBe(true);
+    expect(probe.state).toEqual({ status: "ready" });
     expect(probe.package).toEqual({ name: "opencode-bb-tools", version: "0.1.0" });
     expect(probe.protocol.versions).toEqual({ min: 1, max: 1 });
     expect(probe.protocol.overlapsSupported).toBe(true);
@@ -71,7 +71,7 @@ describe("companion status contract", () => {
       },
       plugins: { kind: "ok", specs: [] },
     });
-    expect(probe.detected).toBe(true);
+    expect(probe.state).toEqual({ status: "ready" });
     expect(probe.package).toEqual({ name: null, version: null });
     expect(probe.protocol.versions).toBeNull();
     expect(probe.protocol.legacyVersion).toBe(1);
@@ -81,7 +81,7 @@ describe("companion status contract", () => {
     expect(probe.limits).toBeNull();
   });
 
-  it("treats a legacy version outside 1 as unsupported without dropping the companion", () => {
+  it("treats a legacy version outside 1 as incompatible without calling it absent", () => {
     const probe = companionProbeFrom({
       engine,
       hello: {
@@ -90,7 +90,10 @@ describe("companion status contract", () => {
       },
       plugins: { kind: "ok", specs: [] },
     });
-    expect(probe.detected).toBe(true);
+    expect(probe.state.status).toBe("incompatible");
+    if (probe.state.status === "incompatible") {
+      expect(probe.state.details).toContain("99");
+    }
     expect(probe.protocol.overlapsSupported).toBe(false);
     expect(protocolRangesOverlap({ min: 2, max: 2 }, { min: 1, max: 1 })).toBe(false);
     expect(protocolRangesOverlap({ min: 1, max: 2 }, { min: 1, max: 1 })).toBe(true);
@@ -117,6 +120,24 @@ describe("companion status contract", () => {
           features: {},
           state: { status: "active" },
         },
+        {
+          id: "bb.tools",
+          source: { type: "package", target: "not-the-companion" },
+          features: {},
+          state: { status: "active" },
+        },
+        {
+          id: "substring",
+          source: { type: "package", target: "my-opencode-bb-tools-extra" },
+          features: {},
+          state: { status: "active" },
+        },
+        {
+          id: "failed-npm",
+          source: { type: "package", target: "opencode-bb-tools" },
+          features: {},
+          state: { status: "failed", error: "load failed" },
+        },
       ],
     });
     const probe = companionProbeFrom({
@@ -128,7 +149,121 @@ describe("companion status contract", () => {
     expect(probe.pluginSpecs.map((spec) => spec.spec)).toEqual([
       "opencode-bb-tools",
       "github:shuv1337/opencode-bb-tools#v0.1.0",
+      "opencode-bb-tools",
     ]);
+    expect(probe.pluginSpecs.filter((spec) => spec.state === "failed")).toEqual([
+      {
+        id: "failed-npm",
+        source: "package",
+        spec: "opencode-bb-tools",
+        state: "failed",
+        error: "load failed",
+      },
+    ]);
+  });
+
+  it("trusts hello.instances and ignores non-companion and failed registrations", () => {
+    const plugins = companionPluginSpecsFrom({
+      data: [
+        {
+          id: "bb.tools",
+          source: { type: "package", target: "unrelated-provider" },
+          features: {},
+          state: { status: "active" },
+        },
+        {
+          id: "npm",
+          source: { type: "package", target: "opencode-bb-tools" },
+          features: {},
+          state: { status: "active" },
+        },
+        {
+          id: "git",
+          source: { type: "package", target: "github:shuv1337/opencode-bb-tools#v0.1.0" },
+          features: {},
+          state: { status: "failed", error: "boom" },
+        },
+      ],
+    });
+    const withoutInstances = { ...milestoneHello, instances: undefined };
+    delete withoutInstances.instances;
+    const listed = companionProbeFrom({
+      engine,
+      hello: { kind: "ok", value: withoutInstances },
+      plugins,
+    });
+    expect(listed.instances).toBeNull();
+    expect(listed.duplicates).toBe(false);
+    expect(listed.pluginSpecs.map((spec) => `${spec.state}:${spec.spec}`)).toEqual([
+      "active:opencode-bb-tools",
+      "failed:github:shuv1337/opencode-bb-tools#v0.1.0",
+    ]);
+    const authoritative = companionProbeFrom({
+      engine,
+      hello: { kind: "ok", value: { ...milestoneHello, instances: 1 } },
+      plugins,
+    });
+    expect(authoritative.duplicates).toBe(false);
+    const extra = companionProbeFrom({
+      engine,
+      hello: { kind: "ok", value: { ...milestoneHello, instances: 2 } },
+      plugins: { kind: "ok", specs: [] },
+    });
+    expect(extra.duplicates).toBe(true);
+  });
+
+  it("keeps transport and malformed hello out of the absent state", () => {
+    const unreachable = companionProbeFrom({
+      engine,
+      hello: { kind: "failed", message: "OpenCode rejected authentication" },
+      plugins: { kind: "ok", specs: [] },
+    });
+    expect(unreachable.state).toEqual({
+      status: "unreachable",
+      message: "OpenCode rejected authentication",
+    });
+    const missingProtocol = companionProbeFrom({
+      engine,
+      hello: { kind: "ok", value: { generation: "nope" } },
+      plugins: { kind: "ok", specs: [] },
+    });
+    expect(missingProtocol.state.status).toBe("incompatible");
+    if (missingProtocol.state.status === "incompatible") {
+      expect(missingProtocol.state.details).toBe("missing protocol");
+      expect(missingProtocol.state.message).not.toContain("plugin add");
+    }
+    const malformed = companionProbeFrom({
+      engine,
+      hello: { kind: "ok", value: "nope" },
+      plugins: { kind: "ok", specs: [] },
+    });
+    expect(malformed.state.status).toBe("incompatible");
+    if (malformed.state.status === "incompatible") {
+      expect(malformed.state.details).toBe("malformed hello");
+    }
+    const absent = formatCompanionStatus({
+      ...companionProbeFrom({
+        engine: { appId: null, version: "2.0.15", explicitServerUrl: true },
+        hello: { kind: "absent", message: "rpc.unavailable" },
+        plugins: { kind: "ok", specs: [] },
+      }),
+      machineId: "host-1",
+      bbToolsRequired: false,
+    });
+    expect(absent).toContain("Companion: not installed");
+    expect(absent).toContain("opencode plugin add opencode-bb-tools");
+    expect(absent).toContain("stock OpenCode config (~/.config/opencode), not Shuvcode's");
+    expect(absent).toContain("shuvcode plugin add opencode-bb-tools");
+    expect(absent).toContain("Shuvcode config (~/.config/shuvcode), not stock OpenCode's");
+    const down = formatCompanionStatus({
+      ...unreachable,
+      machineId: "host-1",
+      bbToolsRequired: true,
+    });
+    expect(down).toContain("Companion: unreachable");
+    expect(down).toContain("OpenCode rejected authentication");
+    expect(down).not.toContain("not installed");
+    expect(down).not.toContain("plugin add");
   });
 
   it("names the companion, links it, and gives the install command in the absent warning", () => {
@@ -146,14 +281,13 @@ describe("companion status contract", () => {
 });
 
 describe("engine install command", () => {
-  it("does not treat the URL-mode registration placeholder as the engine", () => {
+  it("prefers a verified service identity and leaves URL mode uncertain otherwise", () => {
     expect(
       engineAppIdFrom({
         explicitServerUrl: true,
         healthAppId: null,
         pathBinaryAppId: null,
         version: "2.0.15",
-        requestedApp: null,
       }),
     ).toBeNull();
     expect(
@@ -162,18 +296,24 @@ describe("engine install command", () => {
         healthAppId: null,
         pathBinaryAppId: "opencode",
         version: "2.0.15-shuv.2",
-        requestedApp: null,
       }),
     ).toBe("shuvcode");
     expect(
       engineAppIdFrom({
-        explicitServerUrl: true,
-        healthAppId: null,
-        pathBinaryAppId: null,
-        version: "2.0.15",
-        requestedApp: "opencode",
+        explicitServerUrl: false,
+        healthAppId: "opencode",
+        pathBinaryAppId: "shuvcode",
+        version: "2.0.15-shuv.2",
       }),
     ).toBe("opencode");
+    expect(
+      engineAppIdFrom({
+        explicitServerUrl: true,
+        healthAppId: "shuvcode",
+        pathBinaryAppId: "opencode",
+        version: "2.0.15",
+      }),
+    ).toBe("shuvcode");
   });
 });
 
@@ -190,7 +330,11 @@ describe("bb tools required", () => {
     expect(bbToolsRequiredSetupMessage("shuvcode")).toContain(
       "`shuvcode plugin add opencode-bb-tools`",
     );
-    expect(bbToolsRequiredSetupMessage(null)).toContain("or");
+    expect(bbToolsRequiredSetupMessage("shuvcode")).not.toContain("on this host");
+    const uncertain = bbToolsRequiredSetupMessage(null);
+    expect(uncertain).toContain("or");
+    expect(uncertain).toContain("writes stock OpenCode config");
+    expect(uncertain).toContain("writes Shuvcode config");
   });
 });
 
@@ -210,5 +354,7 @@ describe("formatCompanionStatus", () => {
     expect(text).toContain("shuvcode plugin add opencode-bb-tools");
     expect(text).toContain("https://github.com/shuv1337/opencode-bb-tools");
     expect(text).toContain("Turns fail until the companion is installed.");
+    expect(text).toContain("global setting, every machine");
+    expect(text).not.toContain("Config:");
   });
 });

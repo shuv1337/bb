@@ -20,6 +20,10 @@ type MachineRow = {
   status: "connected" | "disconnected";
 };
 
+type MachineLoad =
+  | { kind: "ok"; status: CompanionStatus }
+  | { kind: "error"; id: string; name: string; message: string };
+
 function isMachineRow(value: unknown): value is MachineRow {
   if (value === null || typeof value !== "object") return false;
   const id = Reflect.get(value, "id");
@@ -41,10 +45,15 @@ function StatusLine(props: { label: string; value: string }) {
   );
 }
 
+function companionValue(status: CompanionStatus): string {
+  if (status.state.status === "absent") return "not installed";
+  if (status.state.status === "unreachable") return "unreachable";
+  if (status.state.status === "incompatible") return "incompatible";
+  return status.package.version === null ? "unknown" : status.package.version;
+}
+
 function MachineStatus(props: { name: string; status: CompanionStatus }) {
   const status = props.status;
-  const version =
-    status.package.version === null ? "unknown" : status.package.version;
   const range = status.protocol.versions;
   const protocol =
     range === null
@@ -58,17 +67,18 @@ function MachineStatus(props: { name: string; status: CompanionStatus }) {
       : status.protocol.overlapsSupported
         ? "overlaps 1–1"
         : "outside 1–1";
+  const showProtocol =
+    status.state.status === "ready" || status.state.status === "incompatible";
+  const activeSpecs = status.pluginSpecs.filter((spec) => spec.state === "active");
+  const failedSpecs = status.pluginSpecs.filter((spec) => spec.state === "failed");
   return (
     <div className="space-y-1 border-t border-border pt-3">
       <p className="text-sm text-foreground">{props.name}</p>
-      <StatusLine
-        label="Companion"
-        value={status.detected ? version : "not installed"}
-      />
-      {status.reason !== null ? (
-        <p className="text-sm text-foreground">{status.reason}</p>
+      <StatusLine label="Companion" value={companionValue(status)} />
+      {status.state.status === "unreachable" || status.state.status === "incompatible" ? (
+        <p className="text-sm text-foreground">{status.state.message}</p>
       ) : null}
-      {status.detected ? (
+      {showProtocol && status.protocol.name !== null ? (
         <StatusLine label="Protocol" value={`${protocol}, ${overlap}`} />
       ) : null}
       {status.install.path !== null ? (
@@ -87,19 +97,32 @@ function MachineStatus(props: { name: string; status: CompanionStatus }) {
         />
       ) : null}
       {status.duplicates
-        ? status.pluginSpecs.map((spec) => (
+        ? activeSpecs.map((spec) => (
             <p key={`${spec.id ?? ""}:${spec.spec}`} className="text-sm text-foreground">
               {spec.spec}
             </p>
           ))
         : null}
-      {status.engine.installCommands.map((command) => (
-        <p key={command} className="text-sm text-foreground">
-          {command}
+      {failedSpecs.map((spec) => (
+        <p key={`failed:${spec.id ?? ""}:${spec.spec}`} className="text-sm text-foreground">
+          {spec.error === null ? `Failed ${spec.spec}` : `Failed ${spec.spec} (${spec.error})`}
         </p>
       ))}
-      {!status.detected && status.bbToolsRequired ? (
+      {status.state.status === "absent"
+        ? status.engine.installCommands.map((plan) => (
+            <div key={plan.command}>
+              <p className="text-sm text-foreground">{plan.command}</p>
+              {status.engine.installCommand === null ? (
+                <p className="text-sm text-muted-foreground">{plan.writes}</p>
+              ) : null}
+            </div>
+          ))
+        : null}
+      {status.state.status === "absent" && status.bbToolsRequired ? (
         <p className="text-sm text-foreground">Turns fail until the companion is installed.</p>
+      ) : null}
+      {status.state.status === "incompatible" ? (
+        <p className="text-sm text-foreground">Turns fail until the companion is compatible.</p>
       ) : null}
     </div>
   );
@@ -109,7 +132,7 @@ function CompanionStatusPanel() {
   const sdk = useSdk();
   const rpc = useRpc<typeof opencodeToolsRpcContract>();
   const [machines, setMachines] = useState<MachineRow[] | null>(null);
-  const [statuses, setStatuses] = useState<CompanionStatus[]>([]);
+  const [loads, setLoads] = useState<MachineLoad[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -120,23 +143,30 @@ function CompanionStatusPanel() {
         const rows = listed.filter(isMachineRow);
         setMachines(rows);
         const connected = rows.filter((row) => row.status === "connected");
-        void Promise.all(
+        void Promise.allSettled(
           connected.map((row) =>
             rpc.call("companionStatus", { machineId: row.id }),
           ),
-        ).then(
-          (next) => {
-            if (!active) return;
-            setStatuses(next);
-            setError(null);
-          },
-          (loadError: unknown) => {
-            if (!active) return;
-            setError(
-              loadError instanceof Error ? loadError.message : String(loadError),
-            );
-          },
-        );
+        ).then((settled) => {
+          if (!active) return;
+          setLoads(
+            settled.map((entry, index) => {
+              const row = connected[index];
+              if (entry.status === "fulfilled") {
+                return { kind: "ok", status: entry.value };
+              }
+              const reason = entry.reason;
+              return {
+                kind: "error",
+                id: row?.id ?? "unknown",
+                name: row?.name ?? "Machine",
+                message:
+                  reason instanceof Error ? reason.message : String(reason),
+              };
+            }),
+          );
+          setError(null);
+        });
       },
       (loadError: unknown) => {
         if (!active) return;
@@ -161,16 +191,23 @@ function CompanionStatusPanel() {
           {row.name} offline
         </p>
       ))}
-      {statuses.map((status) => (
-        <MachineStatus
-          key={status.machineId}
-          name={
-            machines?.find((row) => row.id === status.machineId)?.name ??
-            status.machineId
-          }
-          status={status}
-        />
-      ))}
+      {loads.map((load) =>
+        load.kind === "error" ? (
+          <div key={load.id} className="space-y-1 border-t border-border pt-3">
+            <p className="text-sm text-foreground">{load.name}</p>
+            <p className="text-sm text-foreground">{load.message}</p>
+          </div>
+        ) : (
+          <MachineStatus
+            key={load.status.machineId}
+            name={
+              machines?.find((row) => row.id === load.status.machineId)?.name ??
+              load.status.machineId
+            }
+            status={load.status}
+          />
+        ),
+      )}
     </div>
   );
 }
