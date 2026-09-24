@@ -126,6 +126,38 @@ export function failureMessage(error: unknown): string {
   return String(error);
 }
 
+const REDACTED = "[redacted]";
+
+export function redactCompanionSecrets<T>(value: T, secrets: readonly string[]): T {
+  return redactValue(value, secrets.filter((item) => item.length > 0)) as T;
+}
+
+function redactText(text: string, secrets: readonly string[]): string {
+  let out = text;
+  for (const secret of secrets) {
+    if (!out.includes(secret)) continue;
+    out = out.split(secret).join(REDACTED);
+  }
+  return out;
+}
+
+function redactValue(value: unknown, secrets: readonly string[]): unknown {
+  if (typeof value === "string") return redactText(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "capability" || key === "takeover") {
+        out[key] = REDACTED;
+        continue;
+      }
+      out[key] = redactValue(entry, secrets);
+    }
+    return out;
+  }
+  return value;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

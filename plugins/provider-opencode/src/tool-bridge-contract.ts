@@ -430,21 +430,68 @@ export function protocolRangesOverlap(
   return left.max >= right.min && left.min <= right.max;
 }
 
+export type BbToolsProtocolError = z.infer<typeof protocolErrorSchema>;
+
+export function parseBbToolsInput(
+  method: BbToolsMethodName,
+  input: unknown,
+): { ok: true } | BbToolsProtocolError {
+  if (method === "hello" || method === "status" || method === "detach") return { ok: true };
+  if (method === "attach") return asParsed(parseAttach(input));
+  if (method === "pending") return asParsed(parsePending(input));
+  if (method === "claim") return asParsed(parseKeyInput(input, "call is not pending"));
+  if (method === "result") return asParsed(parseResult(input));
+  if (method === "reject") return asParsed(parseKeyInput(input, "call is not pending"));
+  return asParsed(parseConfigure(input));
+}
+
+export function capturedRequestIssue(
+  method: string,
+  input: unknown,
+  fixtures: readonly BbToolsFixture[],
+): string | undefined {
+  if (!(method in METHOD_INPUTS)) return `unknown method ${method}`;
+  const parsed = METHOD_INPUTS[method as BbToolsMethodName].safeParse(input);
+  if (!parsed.success) return parsed.error.issues[0]?.message ?? "invalid request";
+  const allowed = new Set<string>();
+  for (const fixture of fixtures) {
+    if (fixture.method !== method || fixture.produces === "parse-error" || fixture.produces === "event") continue;
+    if (!isRecord(fixture.input)) continue;
+    for (const key of Object.keys(fixture.input)) allowed.add(key);
+  }
+  if (!isRecord(input)) return "request must be an object";
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) return `unexpected field ${key}`;
+  }
+  return undefined;
+}
+
 export function checkBbToolsFixture(fixture: BbToolsFixture): string | undefined {
   if (fixture.method === "control" || fixture.produces === "event") {
     const parsed = controlEventSchema.safeParse(fixture.event);
     return parsed.success ? undefined : "control";
   }
-  const inputSchema = METHOD_INPUTS[fixture.method];
-  const input = inputSchema.safeParse(fixture.input ?? {});
+  const parsed = parseBbToolsInput(fixture.method, fixture.input ?? {});
   if (fixture.produces === "parse-error") {
-    if (input.success) return "input should fail";
-    return checkError(fixture.method, fixture.error);
+    if (!("code" in parsed)) return "input should fail";
+    return exactError(fixture.method, parsed, fixture.error);
   }
+  if ("code" in parsed) return `input should parse: ${parsed.message}`;
+  const input = METHOD_INPUTS[fixture.method].safeParse(fixture.input ?? {});
   if (!input.success) return `input should parse: ${input.error.issues[0]?.message ?? "invalid"}`;
-  if (fixture.produces === "handler-error") return checkError(fixture.method, fixture.error);
+  if (fixture.produces === "handler-error") return exactError(fixture.method, fixture.error, fixture.error);
   const output = METHOD_OUTPUTS[fixture.method].safeParse(fixture.output);
   return output.success ? undefined : `${fixture.method} output`;
+}
+
+function exactError(method: BbToolsMethodName, actual: unknown, expected: unknown): string | undefined {
+  const shape = checkError(method, expected);
+  if (shape !== undefined) return shape;
+  const parsed = protocolErrorSchema.parse(expected);
+  const candidate = protocolErrorSchema.safeParse(actual);
+  if (!candidate.success) return "error shape";
+  if (JSON.stringify(candidate.data) !== JSON.stringify(parsed)) return "error mismatch";
+  return undefined;
 }
 
 function checkError(method: BbToolsMethodName, value: unknown): string | undefined {
@@ -453,4 +500,142 @@ function checkError(method: BbToolsMethodName, value: unknown): string | undefin
   const allowed = METHOD_ERRORS[method] as readonly string[];
   if (!allowed.includes(parsed.data.code)) return `unexpected ${parsed.data.code} for ${method}`;
   return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asParsed(value: BbToolsProtocolError | { ok: true }): { ok: true } | BbToolsProtocolError {
+  return value;
+}
+
+function protocolError(
+  code: BbToolsProtocolError["code"],
+  message: string,
+  data: BbToolsProtocolError["data"],
+): BbToolsProtocolError {
+  return protocolErrorSchema.parse({ code, message, data });
+}
+
+function structuralInvalid(
+  reason: string,
+  message: string,
+  extra: Record<string, unknown> = {},
+): BbToolsProtocolError {
+  return protocolError("invalid", message, { reason, tools: [], ...extra });
+}
+
+function catalogInvalid(
+  items: Array<{ tool?: string; reason: string; detail: string }>,
+): BbToolsProtocolError {
+  const first = items[0];
+  return protocolError("invalid", items.map((item) => item.detail).join("; "), {
+    ...(first?.tool === undefined ? {} : { tool: first.tool }),
+    reason: first?.reason ?? "schema",
+    tools: items.map((item) => ({
+      ...(item.tool === undefined ? {} : { tool: item.tool }),
+      reason: item.reason,
+      detail: item.detail,
+    })),
+  });
+}
+
+function parseAttach(input: unknown): BbToolsProtocolError | { ok: true } {
+  if (!isRecord(input) || typeof input.sessionID !== "string" || input.sessionID.length === 0) {
+    return structuralInvalid("session", "sessionID is required");
+  }
+  if (input.takeover !== undefined) {
+    if (!isRecord(input.takeover) || typeof input.takeover.capability !== "string" || input.takeover.capability.length === 0) {
+      return structuralInvalid("session", "takeover.capability must be a string");
+    }
+  }
+  const tools = parseTools(input.tools);
+  if ("code" in tools) return tools;
+  return { ok: true };
+}
+
+function parseTools(raw: unknown): BbToolsProtocolError | { ok: true } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return structuralInvalid("empty", "tools must be a non-empty array");
+  }
+  if (raw.length > BB_TOOLS_MAX_TOOLS) {
+    return structuralInvalid("too_many", `tools exceed the companion limit of ${BB_TOOLS_MAX_TOOLS}`, {
+      limit: BB_TOOLS_MAX_TOOLS,
+    });
+  }
+  const seen = new Set<string>();
+  const problems: Array<{ tool?: string; reason: string; detail: string }> = [];
+  for (const [index, item] of raw.entries()) {
+    const problem = inspectTool(item, index, seen);
+    if (problem !== undefined) problems.push(problem);
+  }
+  if (problems.length > 0) return catalogInvalid(problems);
+  return { ok: true };
+}
+
+function inspectTool(
+  item: unknown,
+  index: number,
+  seen: Set<string>,
+): { tool?: string; reason: string; detail: string } | undefined {
+  if (!isRecord(item)) return { reason: "schema", detail: `tools[${index}] must be an object` };
+  const { name, description, inputSchema } = item;
+  if (typeof name !== "string") return { reason: "name", detail: `tools[${index}].name is not a valid tool name` };
+  if (/^[A-Za-z0-9_-]+$/u.test(name) && name.length > BB_TOOLS_MAX_NAME_LENGTH) {
+    return { tool: name, reason: "overlong", detail: `tools[${index}].name exceeds ${BB_TOOLS_MAX_NAME_LENGTH} characters` };
+  }
+  if (!BB_TOOLS_NAME.test(name)) {
+    return { tool: name, reason: "name", detail: `tools[${index}].name is not a valid tool name` };
+  }
+  if (name === "execute" || name.startsWith("bbt_")) {
+    return { tool: name, reason: "reserved", detail: `tools[${index}].name "${name}" is reserved` };
+  }
+  if (seen.has(name)) return { tool: name, reason: "duplicate", detail: `tools[${index}].name "${name}" is duplicated` };
+  if (typeof description !== "string") {
+    return { tool: name, reason: "description", detail: `tools[${index}].description must be a string` };
+  }
+  if (!isRecord(inputSchema)) {
+    return { tool: name, reason: "schema", detail: `tools[${index}].inputSchema must be an object` };
+  }
+  seen.add(name);
+  return undefined;
+}
+
+function capabilityOf(input: unknown): string | undefined {
+  if (!isRecord(input) || typeof input.capability !== "string" || input.capability.length === 0) return undefined;
+  return input.capability;
+}
+
+function parsePending(input: unknown): BbToolsProtocolError | { ok: true } {
+  if (capabilityOf(input) === undefined) return protocolError("unbound", "unknown capability", {});
+  return { ok: true };
+}
+
+function parseConfigure(input: unknown): BbToolsProtocolError | { ok: true } {
+  if (capabilityOf(input) === undefined) return protocolError("unbound", "unknown capability", {});
+  return { ok: true };
+}
+
+function parseKeyInput(input: unknown, missing: string): BbToolsProtocolError | { ok: true } {
+  if (capabilityOf(input) === undefined) return protocolError("unbound", "unknown capability", {});
+  if (!isRecord(input) || typeof input.key !== "string" || input.key.length === 0) {
+    return protocolError("unavailable", missing, {});
+  }
+  return { ok: true };
+}
+
+function parseResult(input: unknown): BbToolsProtocolError | { ok: true } {
+  const key = parseKeyInput(input, "call is not claimed");
+  if ("code" in key) return key;
+  if (!Array.isArray(isRecord(input) ? input.contentItems : undefined)) {
+    return protocolError("unavailable", "contentItems are invalid", {});
+  }
+  for (const item of (input as { contentItems: unknown[] }).contentItems) {
+    if (!isRecord(item)) return protocolError("unavailable", "contentItems are invalid", {});
+    if (item.type === "inputText" && typeof item.text === "string") continue;
+    if (item.type === "inputImage" && typeof item.imageUrl === "string") continue;
+    return protocolError("unavailable", "contentItems are invalid", {});
+  }
+  return { ok: true };
 }
