@@ -1,0 +1,20 @@
+{
+  "case": "invalid-content",
+  "method": "result",
+  "produces": "parse-error",
+  "input": {
+    "capability": "cap",
+    "key": "k",
+    "success": true,
+    "contentItems": [
+      {
+        "type": "nope"
+      }
+    ]
+  },
+  "error": {
+    "code": "unavailable",
+    "message": "contentItems are invalid",
+    "data": {}
+  }
+}

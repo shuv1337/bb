@@ -1,0 +1,13 @@
+{
+  "case": "unbound",
+  "method": "configure",
+  "produces": "parse-error",
+  "input": {
+    "disallowedTools": []
+  },
+  "error": {
+    "code": "unbound",
+    "message": "unknown capability",
+    "data": {}
+  }
+}

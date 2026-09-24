@@ -1,0 +1,15 @@
+{
+  "method": "status",
+  "case": "bound",
+  "produces": "success",
+  "input": {
+    "capability": "cap"
+  },
+  "output": {
+    "bound": true,
+    "epoch": 1,
+    "generation": "gen",
+    "catalogDigest": "5640d2f559f39ac734aef78e9d5fbdd00b171ac66c022a2f0a59e97883731104",
+    "leaseExpiresAt": 1700000000000
+  }
+}

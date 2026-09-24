@@ -1,0 +1,13 @@
+{
+  "case": "unavailable",
+  "method": "reject",
+  "produces": "parse-error",
+  "input": {
+    "capability": "cap"
+  },
+  "error": {
+    "code": "unavailable",
+    "message": "call is not pending",
+    "data": {}
+  }
+}

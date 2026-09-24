@@ -1,0 +1,32 @@
+{
+  "case": "invalid-overlong",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "description": "x",
+        "inputSchema": {
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools[0].name exceeds 64 characters",
+    "data": {
+      "tool": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reason": "overlong",
+      "tools": [
+        {
+          "tool": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reason": "overlong",
+          "detail": "tools[0].name exceeds 64 characters"
+        }
+      ]
+    }
+  }
+}

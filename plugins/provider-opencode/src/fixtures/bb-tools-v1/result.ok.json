@@ -1,0 +1,17 @@
+{
+  "method": "result",
+  "case": "ok",
+  "produces": "success",
+  "input": {
+    "capability": "cap",
+    "key": "b1:ses_1:msg_1:call_1",
+    "success": true,
+    "contentItems": [
+      {
+        "type": "inputText",
+        "text": "echo: ok"
+      }
+    ]
+  },
+  "output": {}
+}

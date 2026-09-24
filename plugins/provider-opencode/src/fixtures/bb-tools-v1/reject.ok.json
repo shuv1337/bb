@@ -1,0 +1,11 @@
+{
+  "method": "reject",
+  "case": "ok",
+  "produces": "success",
+  "input": {
+    "capability": "cap",
+    "key": "k1",
+    "message": "bb tool origin could not be established; the call was not run"
+  },
+  "output": {}
+}

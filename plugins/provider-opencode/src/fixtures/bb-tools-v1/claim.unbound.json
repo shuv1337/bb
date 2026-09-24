@@ -1,0 +1,13 @@
+{
+  "case": "unbound",
+  "method": "claim",
+  "produces": "parse-error",
+  "input": {
+    "key": "k"
+  },
+  "error": {
+    "code": "unbound",
+    "message": "unknown capability",
+    "data": {}
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "case": "invalid-duplicate",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      },
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ]
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools[1].name \"bb_echo\" is duplicated",
+    "data": {
+      "tool": "bb_echo",
+      "reason": "duplicate",
+      "tools": [
+        {
+          "tool": "bb_echo",
+          "reason": "duplicate",
+          "detail": "tools[1].name \"bb_echo\" is duplicated"
+        }
+      ]
+    }
+  }
+}

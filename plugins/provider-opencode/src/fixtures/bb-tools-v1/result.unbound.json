@@ -1,0 +1,15 @@
+{
+  "case": "unbound",
+  "method": "result",
+  "produces": "parse-error",
+  "input": {
+    "key": "k",
+    "success": true,
+    "contentItems": []
+  },
+  "error": {
+    "code": "unbound",
+    "message": "unknown capability",
+    "data": {}
+  }
+}

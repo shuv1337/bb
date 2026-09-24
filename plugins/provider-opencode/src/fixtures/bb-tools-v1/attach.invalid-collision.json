@@ -1,0 +1,41 @@
+{
+  "method": "attach",
+  "case": "invalid-collision",
+  "produces": "handler-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "read",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ],
+    "disallowedTools": []
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools[0].name \"read\" collides with a native tool",
+    "data": {
+      "tool": "read",
+      "reason": "collision",
+      "tools": [
+        {
+          "tool": "read",
+          "reason": "collision",
+          "detail": "tools[0].name \"read\" collides with a native tool"
+        }
+      ]
+    }
+  }
+}

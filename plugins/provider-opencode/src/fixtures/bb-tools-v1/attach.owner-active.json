@@ -1,0 +1,33 @@
+{
+  "method": "attach",
+  "case": "owner-active",
+  "produces": "handler-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ],
+    "disallowedTools": []
+  },
+  "error": {
+    "code": "owner_active",
+    "message": "owner lease is active",
+    "data": {
+      "retryAfterMs": 12000
+    }
+  }
+}

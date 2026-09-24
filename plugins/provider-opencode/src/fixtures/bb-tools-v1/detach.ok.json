@@ -1,0 +1,9 @@
+{
+  "method": "detach",
+  "case": "ok",
+  "produces": "success",
+  "input": {
+    "capability": "cap"
+  },
+  "output": {}
+}

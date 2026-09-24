@@ -1,0 +1,30 @@
+{
+  "case": "invalid-schema",
+  "method": "attach",
+  "produces": "parse-error",
+  "input": {
+    "sessionID": "ses_1",
+    "tools": [
+      {
+        "name": "bb_echo",
+        "description": "Echo text.",
+        "inputSchema": "nope"
+      }
+    ]
+  },
+  "error": {
+    "code": "invalid",
+    "message": "tools[0].inputSchema must be an object",
+    "data": {
+      "tool": "bb_echo",
+      "reason": "schema",
+      "tools": [
+        {
+          "tool": "bb_echo",
+          "reason": "schema",
+          "detail": "tools[0].inputSchema must be an object"
+        }
+      ]
+    }
+  }
+}
