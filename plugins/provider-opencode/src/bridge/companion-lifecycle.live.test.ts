@@ -16,7 +16,6 @@ import {
   password,
   startLiveBridge,
   subscribeEngineEvents,
-  toolMessages,
   waitUntil,
   type Engine,
   type LiveBridge,
@@ -203,11 +202,12 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
   }, 180_000);
 
   it("does not close the turn when resync runs during a claimed call", async () => {
-    const { model, live, startThread, startTurn } = ctx;
+    const { model, engine, live, startThread, startTurn } = ctx;
     model.script.push(
       { kind: "tool", name: "bb_echo", args: { text: "resync" } },
       { kind: "text", text: "after resync" },
     );
+    const subscription = subscribeEngineEvents(engine);
     const providerThreadId = await startThread("thread-resync");
     await startTurn("thread-resync", providerThreadId, "call the echo tool and wait");
     const call = await claimedCall(live);
@@ -220,15 +220,51 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
       success: true,
       contentItems: [{ type: "inputText", text: "echo: resync" }],
     });
-    await waitUntil(() => seenByModel(model.requests, "echo: resync"), "result delivered after resync");
-    expect(
-      deltaKinds(live, "thread-resync")
+    let boundaryBeforeSuccess = false;
+    await waitUntil(() => {
+      const success = subscription.events.some(
+        (event) => event.type === "session.tool.success" && event.data?.id === call.params.callId,
+      );
+      const boundary = deltaKinds(live, "thread-resync")
         .slice(before)
-        .some((delta) => delta.kind === "turn.boundary" && delta.status === "completed" && !seenByModel(model.requests, "echo: resync")),
-    ).toBe(false);
-    expect(toolMessages(model.requests.find((request) => seenByModel([request], "echo: resync")) ?? { messages: [] }).join("\n")).toContain(
-      "echo: resync",
+        .some((delta) => delta.kind === "turn.boundary" && delta.status === "completed");
+      if (boundary && !success) boundaryBeforeSuccess = true;
+      return success;
+    }, "session.tool.success for the resynced call");
+    expect(boundaryBeforeSuccess).toBe(false);
+    await waitUntil(() => seenByModel(model.requests, "echo: resync"), "result delivered after resync");
+    await subscription.stop();
+  }, 180_000);
+
+  it("dispatches and cancels from pending polls when control events are ignored", async () => {
+    const { model, engine, live, startThread, startTurn } = ctx;
+    live.setIgnoreBbToolControl(true);
+    model.script.push({ kind: "tool", name: "bb_echo", args: { text: "polled" } });
+    const providerThreadId = await startThread("thread-poll");
+    await startTurn("thread-poll", providerThreadId, "call the echo tool and wait");
+    const call = await claimedCall(live);
+    expect(cancelledIds(live)).not.toContain(call.id);
+    const interrupted = await nativeInterrupt(engine, providerThreadId);
+    expect(interrupted).toMatchObject({ interrupted: true });
+    await waitUntil(() => cancelledIds(live).includes(call.id), "polled cancellation");
+    answerToolCall(live, call, {
+      success: true,
+      contentItems: [{ type: "inputText", text: LATE_REPLY }],
+    });
+    await waitIdle(engine, providerThreadId);
+    expect(seenByModel(model.requests, LATE_REPLY)).toBe(false);
+    expect(seenByModel(model.requests, "echo: polled")).toBe(false);
+    model.script.push(
+      { kind: "tool", name: "bb_echo", args: { text: "after-poll" } },
+      { kind: "text", text: "poll next done" },
     );
+    await startTurn("thread-poll", providerThreadId, "call the echo tool after a polled cancel");
+    const next = await claimedCall(live, call.id);
+    answerToolCall(live, next, {
+      success: true,
+      contentItems: [{ type: "inputText", text: "echo: after-poll" }],
+    });
+    await waitUntil(() => seenByModel(model.requests, "echo: after-poll"), "turn after polled cancel");
   }, 180_000);
 
   it("keeps event processing and a second session moving while a call is claimed", async () => {
@@ -330,6 +366,59 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion lifecycle", () =
       process.stderr.write(
         `\nLIVE takeover settlement: ${OUTCOME_UNKNOWN_REPLACED}\nLIVE old capability unbound on ${engineAppId}\n`,
       );
+    } finally {
+      await restarted.teardown();
+    }
+  }, 180_000);
+
+  it("does not redispatched a claimed call after the owning bridge is torn down", async () => {
+    const { model, engine, live, startThread, startTurn } = ctx;
+    model.script.push({ kind: "tool", name: "bb_echo", args: { text: "severed" } });
+    const providerThreadId = await startThread("thread-severed");
+    await startTurn("thread-severed", providerThreadId, "call the echo tool and wait");
+    const call = await claimedCall(live);
+    await waitUntil(
+      () => existsSync(join(engine.root, "bridge-data", "opencode-session-owners.json")),
+      "owners file",
+    );
+    await live.teardown();
+    await waitUntil(
+      () => seenByModel(model.requests, "bb tool outcome unknown"),
+      "uncertain settlement after the owner bridge stops",
+    );
+    const restarted = await startLiveBridge(engine);
+    try {
+      const resumed = await send(restarted, "thread/resume", {
+        threadId: "thread-severed",
+        cwd: engine.workspace,
+        providerThreadId,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+        dynamicTools: [echoTool],
+      });
+      expect(resumed.error).toBeUndefined();
+      expect(collectToolCalls(restarted).some((item) => item.params.callId === call.params.callId)).toBe(false);
+      await waitIdle(engine, providerThreadId);
+      model.script.push(
+        { kind: "tool", name: "bb_echo", args: { text: "after-sever" } },
+        { kind: "text", text: "sever done" },
+      );
+      const restartedTurn = await send(restarted, "turn/start", {
+        threadId: "thread-severed",
+        providerThreadId,
+        input: [{ type: "text", text: "call the echo tool after the old bridge stopped", mentions: [] }],
+        clientRequestId: "creq_23456789ae",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(restartedTurn.error).toBeUndefined();
+      const next = await claimedCall(restarted);
+      expect(next.params.callId).not.toBe(call.params.callId);
+      answerToolCall(restarted, next, {
+        success: true,
+        contentItems: [{ type: "inputText", text: "echo: after-sever" }],
+      });
+      await waitUntil(() => seenByModel(model.requests, "echo: after-sever"), "restarted bridge round trip");
+      expect(collectToolCalls(restarted).map((item) => item.params.callId)).not.toContain(call.params.callId);
     } finally {
       await restarted.teardown();
     }

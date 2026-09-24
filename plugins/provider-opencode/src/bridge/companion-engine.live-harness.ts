@@ -328,6 +328,7 @@ export interface LiveBridge {
   handleLine(line: string): void;
   injectResync(threadId: string): Promise<void>;
   capability(threadId: string): string | undefined;
+  setIgnoreBbToolControl(enabled: boolean): void;
   teardown(): Promise<void>;
 }
 
@@ -361,6 +362,9 @@ export async function startLiveBridge(engine: Engine): Promise<LiveBridge> {
     handleLine: bridge.handleLine,
     injectResync: (threadId) => bridge.injectResync(threadId),
     capability: (threadId) => bridge.bbToolCapability(threadId),
+    setIgnoreBbToolControl: (enabled) => {
+      bridge.setIgnoreBbToolControl(enabled);
+    },
     teardown: async () => {
       await bridge.closeAll();
       rpc.restore();

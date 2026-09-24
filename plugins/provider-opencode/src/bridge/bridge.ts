@@ -80,6 +80,8 @@ export const UNOPENED_DISPATCH_GRACE_MS = 250;
 export const BB_TOOL_CALL_CANCELLED = "bb tool call cancelled";
 export const BB_TOOL_OUTCOME_UNKNOWN =
   "bb tool outcome unknown: claimed call was cancelled before a result arrived";
+const BB_TOOL_POLL_MS = 500;
+const BB_TOOL_TEARDOWN_RPC_MS = 2_000;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const RESUBSCRIBE_BACKOFF_INITIAL_MS = 250;
 const RESUBSCRIBE_BACKOFF_MAX_MS = 8_000;
@@ -184,6 +186,7 @@ interface ThreadSession {
   settleWaiters: Set<(settled: boolean) => void>;
   turnOpen: boolean;
   liveProviderTurnId: string | undefined;
+  deferredResyncMessages: Parameters<ReturnType<typeof createOpenCodeDeltaTranslator>["reconcileAfterResync"]>[1] | undefined;
   pendingAccepts: Array<{
     clientRequestId: string;
     timer: ReturnType<typeof setTimeout> | null;
@@ -199,14 +202,19 @@ interface BbToolBinding {
   drainAgain: boolean;
   cancelled: Set<string>;
   seenOpen: Set<string>;
+  poll: ReturnType<typeof setTimeout> | undefined;
 }
 
+type BbReversePhase = "dispatched" | "responded" | "delivering" | "acknowledged" | "uncertain";
+
 interface PendingBbToolCall {
+  id: string;
   threadId: string;
   key: string;
-  dispatched: boolean;
-  flag: { abandoned: boolean; delivered: boolean };
-  resolve: (result: BbToolCallResult) => void;
+  phase: BbReversePhase;
+  result: BbToolCallResult | undefined;
+  companionDelivery: "pending" | "started";
+  resolve: () => void;
 }
 
 type BbToolCallResult = z.infer<typeof bbToolCallResultSchema>;
@@ -237,6 +245,14 @@ const bbToolPendingOutputSchema = z.object({
       state: z.enum(["pending", "claimed"]).optional(),
     }),
   ),
+  settled: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        outcome: z.enum(["cancelled", "settled"]),
+      }),
+    )
+    .optional(),
 });
 
 type BbPendingToolCall = z.infer<typeof bbToolPendingOutputSchema>["calls"][number];
@@ -289,6 +305,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   const pendingInteractions = new Map<string, PendingInteraction>();
   const pendingBbToolCalls = new Map<string, PendingBbToolCall>();
   let bbToolCallSerial = 0;
+  let ignoreBbToolControl = false;
   const replyingInteractions = new Set<string>();
   const owners = new Map<string, OwnerRecord>();
   let runtimePromise: Promise<OpenCodeRuntime> | null = null;
@@ -366,6 +383,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         if (delta.kind === "turn.open" && delta.parentRef === undefined) {
           session.turnOpen = true;
           session.liveProviderTurnId = delta.providerTurnId;
+          ensureBbToolPoll(session);
           for (const dispatch of session.dispatches) {
             dispatch.openedTurnId ??= delta.providerTurnId;
           }
@@ -461,7 +479,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     pending.timer = timer;
   }
 
-  function surfaceStreamFailure(session: ThreadSession, error: unknown): void {
+  async function surfaceStreamFailure(session: ThreadSession, error: unknown): Promise<void> {
     const message = failureMessage(error);
     const liveTurnId = liveTurnIdOf(session);
     const deltas: ThreadDelta[] = [];
@@ -507,7 +525,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         threadScoped: true,
       });
     }
-    sendDeltas(session.threadId, deltas);
+    await emitTurnDeltas(session, deltas);
     if (error instanceof OpenCodeUnauthenticatedError) {
       sendAuthRecovery(session.threadId);
     }
@@ -772,11 +790,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     }
     if (wrapped.kind === "resync") {
       const messages = await session.handle.context();
+      scheduleBbToolDrain(session);
+      ensureBbToolPoll(session);
       reconcileUnlessBbCallOpen(session, session.handle.id, messages);
       return;
     }
     const native: OpenCodeNativeEvent = wrapped.event;
     if (native.type === BB_TOOLS_CONTROL_EVENT) {
+      if (ignoreBbToolControl) return;
       const key = typeof native.data?.key === "string" ? native.data.key : undefined;
       if (native.data?.type === "pending" && key !== undefined) {
         session.bbTools?.seenOpen.add(key);
@@ -784,11 +805,21 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       if (native.data?.type === "cancelled" && key !== undefined) {
         session.bbTools?.cancelled.add(key);
         session.bbTools?.seenOpen.delete(key);
-        dropReverseCall(session, key);
-        void confirmCancelled(session, key);
+        cancelReverseCall(session, key);
       }
       scheduleBbToolDrain(session);
+      ensureBbToolPoll(session);
       return;
+    }
+    if (
+      native.type === "session.tool.success" ||
+      native.type === "session.tool.failed" ||
+      native.type === "session.execution.interrupted" ||
+      native.type === "session.execution.succeeded" ||
+      native.type === "session.execution.failed"
+    ) {
+      scheduleBbToolDrain(session);
+      ensureBbToolPoll(session);
     }
     if (
       wrapped.sessionID === session.handle.id &&
@@ -816,6 +847,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         const messages = await gapHandle.context();
         reconcileUnlessBbCallOpen(session, wrapped.sessionID, messages);
       }
+    }
+    if (closesOwnedTurn(session, translated.deltas)) {
+      await abandonForwardedCalls(session);
+      session.deferredResyncMessages = undefined;
     }
     sendDeltas(session.threadId, translated.deltas);
     if (translated.deltas.some(isUnauthorizedFailure)) {
@@ -937,7 +972,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           }
         } catch (error) {
           if (session.closed || session.abort.signal.aborted) return;
-          surfaceStreamFailure(session, error);
+          await surfaceStreamFailure(session, error);
           void detachSession(session);
           return;
         }
@@ -1043,10 +1078,60 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         drainAgain: false,
         cancelled: new Set(),
         seenOpen: new Set(),
+        poll: undefined,
       };
+      if (session.turnOpen || session.busy) ensureBbToolPoll(session);
     } catch (error) {
       warnDroppedTools(session, tools, failureMessage(error));
     }
+  }
+
+  function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("bb tool companion RPC timed out")), ms);
+      timer.unref?.();
+    });
+    work.catch(() => undefined);
+    return Promise.race([work, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  }
+
+  function isUnbound(error: unknown): boolean {
+    const message = failureMessage(error);
+    return message.includes("unbound") || message.includes("unknown capability");
+  }
+
+  function ensureBbToolPoll(session: ThreadSession): void {
+    const binding = session.bbTools;
+    if (binding === null || binding.poll !== undefined) return;
+    const tick = (): void => {
+      if (session.closed || session.bbTools !== binding) {
+        binding.poll = undefined;
+        return;
+      }
+      if (
+        !session.turnOpen &&
+        !session.busy &&
+        session.deferredResyncMessages === undefined &&
+        !hasOpenCompanionCalls(session)
+      ) {
+        binding.poll = undefined;
+        return;
+      }
+      scheduleBbToolDrain(session);
+      binding.poll = setTimeout(tick, BB_TOOL_POLL_MS);
+      binding.poll.unref?.();
+    };
+    binding.poll = setTimeout(tick, BB_TOOL_POLL_MS);
+    binding.poll.unref?.();
+  }
+
+  function stopBbToolPoll(binding: BbToolBinding): void {
+    if (binding.poll === undefined) return;
+    clearTimeout(binding.poll);
+    binding.poll = undefined;
   }
 
   function scheduleBbToolDrain(session: ThreadSession): void {
@@ -1061,27 +1146,76 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       try {
         do {
           binding.drainAgain = false;
-          const pending = bbToolPendingOutputSchema.parse(
-            await session.handle.rpc(BB_TOOLS_RPC, "pending", {
-              capability: binding.capability,
-            }),
-          );
-          for (const call of pending.calls) {
-            if (call.state === "claimed") continue;
-            if (binding.cancelled.has(call.key) || binding.inFlight.has(call.key)) continue;
-            binding.inFlight.add(call.key);
-            void runBbToolCall(session, binding, call).finally(() => {
-              binding.inFlight.delete(call.key);
-              binding.seenOpen.delete(call.key);
-            });
+          const snapshot = await readBbToolPending(session, binding, session.deferredResyncMessages !== undefined);
+          if (snapshot === "unbound") {
+            cancelOutstandingReverseCalls(session);
+            binding.inFlight.clear();
+            binding.seenOpen.clear();
+            releaseDeferredResync(session, true);
+            return;
           }
-        } while (binding.drainAgain && !session.closed);
+          if (snapshot === "failed") {
+            if (session.deferredResyncMessages !== undefined) {
+              binding.inFlight.clear();
+              binding.seenOpen.clear();
+              await abandonForwardedCalls(session);
+              releaseDeferredResync(session, true);
+            }
+            return;
+          }
+          reconcileBbToolSnapshot(session, binding, snapshot);
+          releaseDeferredResync(session, false);
+        } while (binding.drainAgain && !session.closed && session.bbTools === binding);
       } catch (error) {
         warn(`could not read pending bb tool calls for ${session.threadId}: ${failureMessage(error)}`);
       } finally {
         binding.draining = false;
+        if (binding.drainAgain && !session.closed && session.bbTools === binding) {
+          scheduleBbToolDrain(session);
+        }
       }
     })();
+  }
+
+  async function readBbToolPending(
+    session: ThreadSession,
+    binding: BbToolBinding,
+    bound: boolean,
+  ): Promise<z.infer<typeof bbToolPendingOutputSchema> | "unbound" | "failed"> {
+    const rpc = session.handle.rpc(BB_TOOLS_RPC, "pending", { capability: binding.capability });
+    try {
+      const output = await (bound ? withTimeout(rpc, BB_TOOL_TEARDOWN_RPC_MS) : rpc);
+      return bbToolPendingOutputSchema.parse(output);
+    } catch (error) {
+      if (isUnbound(error)) return "unbound";
+      warn(`could not read pending bb tool calls for ${session.threadId}: ${failureMessage(error)}`);
+      return "failed";
+    }
+  }
+
+  function reconcileBbToolSnapshot(
+    session: ThreadSession,
+    binding: BbToolBinding,
+    snapshot: z.infer<typeof bbToolPendingOutputSchema>,
+  ): void {
+    for (const notice of snapshot.settled ?? []) {
+      binding.seenOpen.delete(notice.key);
+      if (notice.outcome === "cancelled") cancelReverseCall(session, notice.key);
+    }
+    for (const call of snapshot.calls) {
+      if (call.state === "claimed") {
+        binding.seenOpen.add(call.key);
+        continue;
+      }
+      if (binding.cancelled.has(call.key) || binding.inFlight.has(call.key)) continue;
+      binding.seenOpen.add(call.key);
+      binding.inFlight.add(call.key);
+      void runBbToolCall(session, binding, call).finally(() => {
+        binding.inFlight.delete(call.key);
+        binding.seenOpen.delete(call.key);
+        releaseDeferredResync(session, false);
+      });
+    }
   }
 
   async function runBbToolCall(
@@ -1099,41 +1233,48 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       return;
     }
     if (binding.cancelled.has(call.key) || session.closed || session.bbTools !== binding) {
-      await deliverCompanionResult(session, binding, call.key, failureResult(BB_TOOL_OUTCOME_UNKNOWN));
+      await deliverCompanionResult(session, binding, call.key, failureResult(BB_TOOL_OUTCOME_UNKNOWN), {
+        bound: session.closed || session.bbTools !== binding,
+      });
       return;
     }
     const forwarded = await forwardBbToolCall(session, binding, call);
-    if (forwarded.delivered) return;
-    await deliverCompanionResult(session, binding, call.key, forwarded.result);
+    if (forwarded === undefined || forwarded.result === undefined) return;
+    if (forwarded.phase === "uncertain") {
+      await deliverChosen(session, binding, forwarded, true);
+      return;
+    }
+    if (forwarded.phase !== "responded" || !beginDelivery(forwarded)) return;
+    await deliverChosen(session, binding, forwarded, false);
+    forwarded.phase = "acknowledged";
+    pendingBbToolCalls.delete(forwarded.id);
+    releaseDeferredResync(session, false);
   }
 
   function forwardBbToolCall(
     session: ThreadSession,
     binding: BbToolBinding,
     call: BbPendingToolCall,
-  ): Promise<{ result: BbToolCallResult; delivered: boolean }> {
+  ): Promise<PendingBbToolCall | undefined> {
     if (binding.cancelled.has(call.key) || session.closed || session.bbTools !== binding) {
-      return Promise.resolve({
-        result: failureResult(BB_TOOL_OUTCOME_UNKNOWN),
-        delivered: false,
-      });
+      return Promise.resolve(undefined);
     }
     bbToolCallSerial += 1;
     const id = `oc-tool-${bbToolCallSerial}`;
-    const flag = { abandoned: false, delivered: false };
     return new Promise((resolve) => {
-      pendingBbToolCalls.set(id, {
+      const entry: PendingBbToolCall = {
+        id,
         threadId: session.threadId,
         key: call.key,
-        dispatched: true,
-        flag,
-        resolve: (result) => resolve({ result, delivered: flag.delivered }),
-      });
+        phase: "dispatched",
+        result: undefined,
+        companionDelivery: "pending",
+        resolve: () => resolve(entry),
+      };
+      pendingBbToolCalls.set(id, entry);
       if (binding.cancelled.has(call.key) || session.closed || session.bbTools !== binding) {
-        pendingBbToolCalls.delete(id);
-        flag.abandoned = true;
-        sendToolCallCancelled(id);
-        resolve({ result: failureResult(BB_TOOL_OUTCOME_UNKNOWN), delivered: false });
+        chooseCancel(entry);
+        resolve(entry);
         return;
       }
       send({
@@ -1156,24 +1297,41 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
   function handleBbToolCallResponse(response: NonNullable<ReturnType<typeof decodeBridgeJsonRpcResponse>>): void {
     const id = String(response.id);
     const pending = pendingBbToolCalls.get(id);
-    if (pending === undefined) return;
-    pendingBbToolCalls.delete(id);
+    if (pending === undefined || !chooseResult(pending)) return;
     if ("error" in response) {
-      pending.resolve({
+      pending.result = {
         success: false,
         contentItems: [{ type: "inputText", text: response.error.message ?? "bb tool call failed" }],
-      });
-      return;
-    }
-    const parsed = bbToolCallResultSchema.safeParse(response.result);
-    pending.resolve(
-      parsed.success
+      };
+    } else {
+      const parsed = bbToolCallResultSchema.safeParse(response.result);
+      pending.result = parsed.success
         ? parsed.data
         : {
             success: false,
             contentItems: [{ type: "inputText", text: "bb returned an invalid tool result" }],
-          },
-    );
+          };
+    }
+    pending.resolve();
+  }
+
+  function chooseResult(call: PendingBbToolCall): boolean {
+    if (call.phase !== "dispatched") return false;
+    call.phase = "responded";
+    return true;
+  }
+
+  function chooseCancel(call: PendingBbToolCall): boolean {
+    if (call.phase !== "dispatched") return false;
+    call.phase = "uncertain";
+    call.result = failureResult(BB_TOOL_OUTCOME_UNKNOWN);
+    return true;
+  }
+
+  function beginDelivery(call: PendingBbToolCall): boolean {
+    if (call.phase !== "responded") return false;
+    call.phase = "delivering";
+    return true;
   }
 
   function failureResult(text: string): BbToolCallResult {
@@ -1193,15 +1351,17 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     binding: BbToolBinding,
     key: string,
     result: BbToolCallResult,
+    options: { bound: boolean },
   ): Promise<void> {
-    if (session.bbTools !== binding) return;
+    if (session.bbTools !== binding && !options.bound) return;
+    const rpc = session.handle.rpc(BB_TOOLS_RPC, "result", {
+      capability: binding.capability,
+      key,
+      success: result.success,
+      contentItems: result.contentItems,
+    });
     try {
-      await session.handle.rpc(BB_TOOLS_RPC, "result", {
-        capability: binding.capability,
-        key,
-        success: result.success,
-        contentItems: result.contentItems,
-      });
+      await (options.bound ? withTimeout(rpc, BB_TOOL_TEARDOWN_RPC_MS) : rpc);
     } catch (error) {
       warn(`could not deliver bb tool result ${key}: ${failureMessage(error)}`);
     }
@@ -1212,57 +1372,94 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     if (binding === null) return false;
     if (binding.inFlight.size > 0 || binding.draining || binding.seenOpen.size > 0) return true;
     for (const call of pendingBbToolCalls.values()) {
-      if (call.threadId === session.threadId) return true;
+      if (call.threadId !== session.threadId) continue;
+      if (call.phase === "acknowledged" || call.phase === "uncertain") continue;
+      return true;
     }
     return false;
   }
 
-  function dropReverseCall(session: ThreadSession, key: string): void {
-    for (const [id, call] of pendingBbToolCalls) {
+  async function deliverChosen(
+    session: ThreadSession,
+    binding: BbToolBinding,
+    call: PendingBbToolCall,
+    bound: boolean,
+  ): Promise<void> {
+    if (call.result === undefined || call.companionDelivery !== "pending") return;
+    call.companionDelivery = "started";
+    await deliverCompanionResult(session, binding, call.key, call.result, { bound });
+  }
+
+  function cancelReverseCall(session: ThreadSession, key: string): void {
+    for (const call of pendingBbToolCalls.values()) {
       if (call.threadId !== session.threadId || call.key !== key) continue;
-      pendingBbToolCalls.delete(id);
-      call.flag.abandoned = true;
-      call.flag.delivered = true;
-      sendToolCallCancelled(id);
-      call.resolve(failureResult(BB_TOOL_OUTCOME_UNKNOWN));
+      if (!chooseCancel(call)) continue;
+      sendToolCallCancelled(call.id);
+      call.resolve();
+      const binding = session.bbTools;
+      if (binding !== null) void deliverChosen(session, binding, call, true);
     }
   }
 
-  async function confirmCancelled(session: ThreadSession, key: string): Promise<void> {
+  function cancelOutstandingReverseCalls(session: ThreadSession): void {
     const binding = session.bbTools;
-    if (binding === null) return;
-    try {
-      const pending = bbToolPendingOutputSchema.parse(
-        await session.handle.rpc(BB_TOOLS_RPC, "pending", { capability: binding.capability }),
-      );
-      const still = pending.calls.find((call) => call.key === key);
-      if (still !== undefined) binding.cancelled.add(key);
-    } catch (error) {
-      warn(`could not confirm cancelled bb tool call ${key}: ${failureMessage(error)}`);
+    if (binding !== null) {
+      for (const key of binding.inFlight) binding.cancelled.add(key);
+      for (const key of binding.seenOpen) binding.cancelled.add(key);
+    }
+    for (const call of [...pendingBbToolCalls.values()]) {
+      if (call.threadId !== session.threadId) continue;
+      cancelReverseCall(session, call.key);
     }
   }
 
-  async function abandonForwardedCalls(session: ThreadSession): Promise<boolean> {
+  async function abandonForwardedCalls(session: ThreadSession): Promise<void> {
     const binding = session.bbTools;
-    const hadOpen = (binding?.inFlight.size ?? 0) > 0 || (binding?.seenOpen.size ?? 0) > 0;
     if (binding !== null) {
       for (const key of binding.inFlight) binding.cancelled.add(key);
       for (const key of binding.seenOpen) binding.cancelled.add(key);
       binding.seenOpen.clear();
     }
-    const pending = [...pendingBbToolCalls.entries()].filter(([, call]) => call.threadId === session.threadId);
     const deliveries: Promise<void>[] = [];
-    for (const [id, call] of pending) {
-      pendingBbToolCalls.delete(id);
-      call.flag.abandoned = true;
-      call.flag.delivered = true;
-      sendToolCallCancelled(id);
-      const result = failureResult(call.dispatched ? BB_TOOL_OUTCOME_UNKNOWN : BB_TOOL_CALL_CANCELLED);
-      if (binding !== null) deliveries.push(deliverCompanionResult(session, binding, call.key, result));
-      call.resolve(result);
+    for (const call of [...pendingBbToolCalls.values()]) {
+      if (call.threadId !== session.threadId) continue;
+      if (!chooseCancel(call)) continue;
+      sendToolCallCancelled(call.id);
+      call.resolve();
+      if (binding !== null) deliveries.push(deliverChosen(session, binding, call, true));
     }
     await Promise.all(deliveries);
-    return hadOpen || pending.length > 0;
+    releaseDeferredResync(session, false);
+  }
+
+  function closesOwnedTurn(session: ThreadSession, deltas: readonly ThreadDelta[]): boolean {
+    return deltas.some((delta) => {
+      if (delta.kind !== "turn.boundary") return false;
+      if ("parentRef" in delta && delta.parentRef !== undefined) return false;
+      const turnId = "providerTurnId" in delta ? delta.providerTurnId : undefined;
+      return turnId === undefined || turnId === session.liveProviderTurnId;
+    });
+  }
+
+  async function emitTurnDeltas(session: ThreadSession, deltas: readonly ThreadDelta[]): Promise<void> {
+    if (closesOwnedTurn(session, deltas)) {
+      await abandonForwardedCalls(session);
+      session.deferredResyncMessages = undefined;
+    }
+    sendDeltas(session.threadId, deltas);
+  }
+
+  function releaseDeferredResync(session: ThreadSession, force: boolean): void {
+    if (session.deferredResyncMessages === undefined) return;
+    if (!force && hasOpenCompanionCalls(session)) return;
+    if (!force && (session.busy || session.turnOpen)) return;
+    const messages = session.deferredResyncMessages;
+    session.deferredResyncMessages = undefined;
+    if (session.turnOpen) {
+      sendDeltas(session.threadId, translator.settleTurn(session.handle.id, "failed"));
+      return;
+    }
+    sendDeltas(session.threadId, translator.reconcileAfterResync(session.handle.id, messages));
   }
 
   function reconcileUnlessBbCallOpen(
@@ -1271,9 +1468,12 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     messages: Parameters<typeof translator.reconcileAfterResync>[1],
   ): void {
     if (sessionID === session.handle.id && hasOpenCompanionCalls(session)) {
+      session.deferredResyncMessages = messages;
       warn(`skipping OpenCode resync reconcile for ${session.threadId}: bb tool call still open`);
+      ensureBbToolPoll(session);
       return;
     }
+    session.deferredResyncMessages = undefined;
     sendDeltas(session.threadId, translator.reconcileAfterResync(sessionID, messages));
   }
 
@@ -1291,7 +1491,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       });
     }
     await enqueue(existing, async () => {
-      sendDeltas(threadId, translator.settleTurn(existing.handle.id, "interrupted"));
+      await emitTurnDeltas(existing, translator.settleTurn(existing.handle.id, "interrupted"));
     }).catch(() => undefined);
     await detachSession(existing);
     return existing;
@@ -1339,6 +1539,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
       settleWaiters: new Set(),
       turnOpen: false,
       liveProviderTurnId: undefined,
+      deferredResyncMessages: undefined,
       pendingAccepts: [],
       dispatches: new Set(),
       bbTools: null,
@@ -1360,9 +1561,11 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     const bbTools = session.bbTools;
     session.bbTools = null;
     if (bbTools !== null) {
-      void session.handle
-        .rpc(BB_TOOLS_RPC, "detach", { capability: bbTools.capability })
-        .catch(() => undefined);
+      stopBbToolPoll(bbTools);
+      void withTimeout(
+        session.handle.rpc(BB_TOOLS_RPC, "detach", { capability: bbTools.capability }),
+        BB_TOOL_TEARDOWN_RPC_MS,
+      ).catch(() => undefined);
     }
     session.abort.abort();
     if (sessions.get(session.threadId) === session) {
@@ -1832,8 +2035,8 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
           const settled = await waitForSettlement(session);
           if (!settled && !session.closed) {
             await enqueue(session, async () => {
-              sendDeltas(
-                session.threadId,
+              await emitTurnDeltas(
+                session,
                 translator.settleTurn(session.handle.id, "interrupted"),
               );
             });
@@ -2064,6 +2267,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     },
   });
 
+  function setIgnoreBbToolControl(enabled: boolean): void {
+    ignoreBbToolControl = enabled;
+  }
+
   async function injectResync(threadId: string): Promise<void> {
     const session = sessions.get(threadId);
     if (session === undefined || session.closed) return;
@@ -2080,6 +2287,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     closeAll,
     injectResync,
     bbToolCapability,
+    setIgnoreBbToolControl,
     get closed() {
       return closed;
     },
