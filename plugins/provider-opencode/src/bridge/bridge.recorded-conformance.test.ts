@@ -24,6 +24,91 @@ const CELLS = [
 
 type Cell = (typeof CELLS)[number];
 
+const BB_ECHO = {
+  name: "bb_echo",
+  description: "Echo text back through bb.",
+  inputSchema: { type: "object", properties: { text: { type: "string" } } },
+  presentation: {
+    label: { pending: "Echoing", completed: "Echoed" },
+    icon: { glyph: "Workflow" },
+    tint: { light: "#abc", dark: "#123" },
+    suppress: true,
+  },
+} as const;
+
+function bbToolEvents(sessionId: string): Record<string, unknown>[] {
+  const durable = (seq: number, version = 1) => ({
+    aggregateID: sessionId,
+    seq,
+    version,
+  });
+  return [
+    {
+      type: "session.execution.started",
+      data: { sessionID: sessionId },
+      durable: durable(100),
+    },
+    {
+      type: "session.tool.input.started",
+      data: { sessionID: sessionId, id: "call_bb", name: "bb_echo" },
+      durable: durable(101),
+    },
+    {
+      type: "session.tool.called",
+      data: {
+        sessionID: sessionId,
+        id: "call_bb",
+        input: { text: "hi" },
+        executed: true,
+      },
+      durable: durable(102),
+    },
+    {
+      type: "session.tool.success",
+      data: {
+        sessionID: sessionId,
+        id: "call_bb",
+        content: [{ type: "text", text: "echo: hi" }],
+        executed: true,
+      },
+      durable: durable(103, 2),
+    },
+    {
+      type: "session.execution.succeeded",
+      data: { sessionID: sessionId },
+      durable: durable(104),
+    },
+    {
+      type: "session.execution.started",
+      data: { sessionID: sessionId },
+      durable: durable(105),
+    },
+    {
+      type: "session.tool.input.started",
+      data: { sessionID: sessionId, id: "call_bb_fail", name: "bb_echo" },
+      durable: durable(106),
+    },
+    {
+      type: "session.tool.failed",
+      data: {
+        sessionID: sessionId,
+        id: "call_bb_fail",
+        error: { type: "tool.execution", message: "bb tool failed" },
+        executed: false,
+      },
+      durable: durable(107, 2),
+    },
+    {
+      type: "session.execution.failed",
+      data: {
+        sessionID: sessionId,
+        error: { type: "tool.execution", message: "bb tool failed" },
+      },
+      durable: durable(108),
+    },
+  ];
+}
+
 const EXECUTION_OPTIONS = {
   permissionMode: "full",
   permissionScope: "full",
@@ -35,7 +120,6 @@ const TERMINAL_NATIVE_TYPES = new Set([
   "session.execution.succeeded",
   "session.execution.failed",
   "session.execution.interrupted",
-  "session.compaction.ended",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -409,13 +493,16 @@ it.each(CELLS)(
   async (cell) => {
     await withCell(cell, async (harness, owned, child) => {
       if (cell === "turn-tools") {
-        const started = await harness.startThread("thr_tools");
+        const started = await harness.startThread("thr_tools", {
+          dynamicTools: [BB_ECHO],
+        });
         const sessionId = providerThreadId(started);
-        const played = sliceBetween(
+        const native = sliceBetween(
           owned,
           "session.execution.started",
           "session.execution.succeeded",
         ).map((event) => rewrite(event, new Map([["SES_1", sessionId]])));
+        const played = [...native, ...bbToolEvents(sessionId)];
         await playAll(harness, played);
         const events = await checkCell(harness, cell, "thr_tools", sessionId, [
           played,
@@ -424,6 +511,18 @@ it.each(CELLS)(
         expect(events.some((event) => event.type === "item/completed")).toBe(
           true,
         );
+        const rows = harness.deltasOf("thr_tools").filter((delta) => {
+          if (delta.kind !== "item.open" && delta.kind !== "item.close") return false;
+          return isRecord(delta.item) && delta.item.tool === "bb_echo";
+        });
+        expect(rows.filter((delta) => delta.kind === "item.open")).toHaveLength(2);
+        expect(rows.filter((delta) => delta.kind === "item.close")).toHaveLength(2);
+        expect(rows.every((delta) => isRecord(delta.item) && delta.item.server === "bb")).toBe(true);
+        expect(rows[0]?.presentation).toEqual(BB_ECHO.presentation);
+        expect(rows.find((delta) => delta.status === "failed")).toMatchObject({
+          resultText: "bb tool failed",
+          item: { server: "bb", tool: "bb_echo", error: "bb tool failed" },
+        });
         return;
       }
 
@@ -642,10 +741,18 @@ it.each(CELLS)(
         });
         expect(resumed.error).toBeUndefined();
         expect(providerThreadId(resumed)).toBe(sessionId);
-        await playAll(harness, second);
+        const secondClosed = [
+          ...second,
+          {
+            type: "session.execution.succeeded",
+            data: { sessionID: sessionId },
+            durable: { aggregateID: sessionId, seq: 200, version: 1 },
+          },
+        ];
+        await playAll(harness, secondClosed);
         await checkCell(harness, cell, "thr_resume", sessionId, [
           first,
-          second,
+          secondClosed,
         ]);
         expectDurableOpen(harness, "thr_resume", first[0] ?? {});
         expectDurableOpen(harness, "thr_resume", second[0] ?? {});
@@ -654,12 +761,20 @@ it.each(CELLS)(
 
       const started = await harness.startThread("thr_compact");
       const sessionId = providerThreadId(started);
-      const played = sliceBetween(
+      const compact = sliceBetween(
         owned,
         "session.execution.started",
         "session.compaction.ended",
         1,
       ).map((event) => rewrite(event, new Map([["SES_1", sessionId]])));
+      const played = [
+        ...compact,
+        {
+          type: "session.execution.succeeded",
+          data: { sessionID: sessionId },
+          durable: { aggregateID: sessionId, seq: 200, version: 1 },
+        },
+      ];
       await playAll(harness, played);
       await checkCell(harness, cell, "thr_compact", sessionId, [played]);
       expectDurableOpen(harness, "thr_compact", played[0] ?? {});
