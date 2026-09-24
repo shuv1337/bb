@@ -641,18 +641,45 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     for (const waiter of [...session.settleWaiters]) waiter(true);
   }
 
-  function waitForSettlement(session: ThreadSession): Promise<boolean> {
+  function waitForSettlement(session: ThreadSession, timeoutMs = interruptSettlementTimeoutMs): Promise<boolean> {
     if (isSettled(session)) return Promise.resolve(true);
+    if (timeoutMs <= 0) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
       const finish = (settled: boolean): void => {
         clearTimeout(timer);
         session.settleWaiters.delete(finish);
         resolve(settled);
       };
-      const timer = setTimeout(() => finish(false), interruptSettlementTimeoutMs);
+      const timer = setTimeout(() => finish(false), timeoutMs);
       timer.unref?.();
       session.settleWaiters.add(finish);
     });
+  }
+
+  function boundInterrupt(handle: SessionHandle, timeoutMs: number): Promise<void> {
+    const work = handle.interrupt();
+    work.catch(() => undefined);
+    if (timeoutMs <= 0) {
+      return Promise.reject(new Error("OpenCode interrupt timed out"));
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("OpenCode interrupt timed out")), timeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([work, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  }
+
+  async function interruptWithin(handle: SessionHandle, timeoutMs: number): Promise<boolean> {
+    try {
+      await boundInterrupt(handle, timeoutMs);
+      return true;
+    } catch (error) {
+      warn(`could not interrupt OpenCode session ${handle.id}: ${failureMessage(error)}`);
+      return false;
+    }
   }
 
   function trackChildActivity(
@@ -1021,16 +1048,14 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
 
   async function confirmIdleBeforeMove(session: ThreadSession): Promise<boolean> {
     if (isSettled(session)) return true;
+    const deadline = Date.now() + interruptSettlementTimeoutMs;
+    const remaining = (): number => Math.max(0, deadline - Date.now());
+    const interrupted = await interruptWithin(session.handle, remaining());
+    if (!interrupted) return false;
+    const settled = await waitForSettlement(session, remaining());
+    if (!settled) return false;
     await session.tools.abandon();
-    try {
-      await session.handle.interrupt();
-    } catch (error) {
-      warn(
-        `could not interrupt OpenCode session ${session.handle.id} before move: ${failureMessage(error)}`,
-      );
-      return false;
-    }
-    return waitForSettlement(session);
+    return true;
   }
 
   async function retireSession(
@@ -1040,11 +1065,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     const existing = sessions.get(threadId);
     if (existing === undefined) return undefined;
     if (existing.handle.id !== nextHandleId && !isSettled(existing)) {
-      await existing.handle.interrupt().catch((error: unknown) => {
-        warn(
-          `could not interrupt replaced OpenCode session ${existing.handle.id}: ${failureMessage(error)}`,
-        );
-      });
+      await interruptWithin(existing.handle, interruptSettlementTimeoutMs);
     }
     await enqueue(existing, async () => {
       await emitTurnDeltas(existing, translator.settleTurn(existing.handle.id, "interrupted"));
@@ -1130,13 +1151,7 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
     });
     session.busyChildren.clear();
     await Promise.all(
-      busyChildren.map((child) =>
-        child.interrupt().catch((error: unknown) => {
-          warn(
-            `could not interrupt OpenCode child session ${child.id}: ${failureMessage(error)}`,
-          );
-        }),
-      ),
+      busyChildren.map((child) => interruptWithin(child, interruptSettlementTimeoutMs)),
     );
     translator.forget(session.handle.id);
     for (const childId of session.childHandles.keys()) {
@@ -1729,8 +1744,10 @@ export function createOpenCodeBridge(deps: OpenCodeBridgeDeps = {}) {
         }
         await session.tools.abandon();
         if (request.params.intent === "interrupt" && hasInterruptibleWork(session, request.params.activeTurnId)) {
-          await session.handle.interrupt();
-          const settled = await waitForSettlement(session);
+          const deadline = Date.now() + interruptSettlementTimeoutMs;
+          const remaining = (): number => Math.max(0, deadline - Date.now());
+          await interruptWithin(session.handle, remaining());
+          const settled = await waitForSettlement(session, remaining());
           if (!settled && !session.closed) {
             await enqueue(session, async () => {
               await emitTurnDeltas(

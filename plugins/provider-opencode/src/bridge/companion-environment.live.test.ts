@@ -65,11 +65,11 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion environment migr
     const dirB = join(engine.root, "while-running");
     mkdirSync(dirB, { recursive: true });
     model.script.push({ kind: "tool", name: "bb_echo", args: { text: "hold" } });
+    const subscription = subscribeEngineEvents(engine);
     const providerThreadId = await startThread("thread-env-active");
     await startTurn("thread-env-active", providerThreadId, "call the echo tool and hold");
     await waitUntil(() => collectToolCalls(live).length === 1, "claimed call before move");
     const held = live.toolCalls[0];
-    const subscription = subscribeEngineEvents(engine);
     const resumed = await request("thread/resume", {
       threadId: "thread-env-active",
       cwd: dirB,
@@ -79,13 +79,15 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion environment migr
       dynamicTools: [echoTool],
     });
     expect(resumed.error).toBeUndefined();
-    await waitUntil(
-      () => subscription.events.some((event) => event.type === "session.execution.interrupted"),
-      "native turn interrupted",
-    );
     const info = payloadOf(await engineFetch(engine, `/api/session/${providerThreadId}`));
-    process.stderr.write(`\nLIVE interrupted move: ${JSON.stringify(info.location ?? info)}\n`);
+    const nativeInterrupt = subscription.events.find(
+      (event) => event.type === "session.execution.interrupted" || event.type === "session.tool.failed",
+    );
+    process.stderr.write(
+      `\nLIVE interrupted move: ${JSON.stringify(info.location ?? info)} outcome=${String(info.outcome)} native=${JSON.stringify(nativeInterrupt)}\n`,
+    );
     expect(JSON.stringify(info.location ?? info)).toContain(JSON.stringify(dirB));
+    expect(JSON.stringify(nativeInterrupt)).toContain("Tool execution interrupted");
     expect(
       deltaKinds(live, "thread-env-active").some(
         (delta) => delta.kind === "turn.boundary" && delta.status === "interrupted",

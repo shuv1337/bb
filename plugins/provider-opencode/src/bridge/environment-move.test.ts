@@ -415,4 +415,66 @@ describe("environment directory migration", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("does not move when interrupt never resolves", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bb-oc-env-"));
+    const dirA = join(root, "a");
+    const dirB = join(root, "b");
+    const harness = await startOpenCodeBridgeHarness({
+      dataDir: join(root, "data"),
+      scriptTurns: true,
+      bridge: { interruptSettlementTimeoutMs: 40 },
+      wrapRuntime: (runtime) => {
+        const wrap = (handle: SessionHandle): SessionHandle => ({
+          ...handle,
+          interrupt: () => new Promise(() => undefined),
+          move: async (directory) => wrap(await handle.move(directory)),
+        });
+        return {
+          ...runtime,
+          createSession: async (input) => wrap(await runtime.createSession(input)),
+          openSession: async (id) => wrap(await runtime.openSession(id)),
+        };
+      },
+    });
+    try {
+      const started = await harness.request(90, "thread/start", {
+        threadId: "thr_hung_interrupt",
+        cwd: dirA,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      const id = providerThreadId(started);
+      const turn = await harness.request(91, "turn/start", {
+        threadId: "thr_hung_interrupt",
+        providerThreadId: id,
+        clientRequestId: "creq_23456789af",
+        input: [{ type: "text", text: "/hold", mentions: [] }],
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(turn.error).toBeUndefined();
+      await harness.waitFor(
+        () => harness.deltasOf("thr_hung_interrupt").some((delta) => delta.kind === "turn.open"),
+        "hung interrupt turn",
+      );
+      const startedAt = Date.now();
+      const resumed = await harness.request(92, "thread/resume", {
+        threadId: "thr_hung_interrupt",
+        cwd: dirB,
+        providerThreadId: id,
+        instructionMode: "append",
+        options: FULL_PERMISSION_OPTIONS,
+      });
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(resumed.error?.code).toBe(BRIDGE_JSON_RPC_ERRORS.SESSION_NOT_RESTORABLE);
+      expect(resumed.error?.message).toContain("active turn");
+      expect(resumed.result).toBeUndefined();
+      expect(harness.fake.calls.moves).toEqual([]);
+      const info = await (await harness.fake.openSession(id)).info();
+      expect(info.location.directory).toBe(dirA);
+    } finally {
+      await harness.teardown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
