@@ -261,3 +261,15 @@ From live captures against `@opencode/client@2.0.10` (shuvcode 2.0.8) and upstre
 ## Fake runtime
 
 `createFakeOpenCodeRuntime` is the in-memory double. Bridge unit tests use it; they do not mock `fetch`. HTTP tests use a local `http.Server`, never a global `fetch` mock.
+
+## Companion status
+
+`src/companion-status.ts` reads companion status for a machine. It does not use `SessionHandle.rpc` (that call is bound to a session Location). `src/companion-location-rpc.ts` opens its own `@opencode/client` from `resolveAttachedRegistration` and calls `client.rpc.call` plus `client.plugin.list` with no session and no directory, so the engine uses its default Location. Explicit `OPENCODE_SERVER_URL` mode uses the same calls and does not scan the filesystem for the companion.
+
+`hello` is sent as `{ client, protocol: { min: 1, max: 1 } }`. A companion that rejects that input is retried with `{}`. A milestone-1 hello fills package, protocol range, install path/digest, instances, richFailures, and limits. A 0b hello (`protocol`, `version`, `generation`, `features` only) leaves versions, package, install, and instances unknown; overlap is still computed from the legacy `version` number when that is the only version field. `rpc.unavailable` / `RPC is unavailable: bb.tools.v1` is "not installed". Any other hello failure is not treated as absence.
+
+When `instances > 1`, or the plugin list has more than one companion-shaped spec (`opencode-bb-tools`, `bb.tools`, `bb.tools.v1`, or a spec string containing `opencode-bb-tools`), status sets `duplicates` and includes those specs. Attachment failure on duplicates is bridge work, not this probe.
+
+The host entry method is `readCompanionStatus`. The server RPC is `companionStatus({ machineId })`. CLI: `bb opencode tools status --machine <id> [--json]`.
+
+`bbToolsRequired` (default false) is a provider setting. `parseOpenCodeProviderOptions` already copies it onto `AppliedSessionKnobs.bbToolsRequired`. The bridge does not read it yet. Intended behavior, once wired: if the flag is true and hello is absent, fail the turn with `bbToolsRequiredSetupMessage` before prompting. Do not emit the dropped-tools warning on that path. If the flag is false, keep native-only behavior and the absent-companion warning. An out-of-range companion already fails the turn regardless of the flag.

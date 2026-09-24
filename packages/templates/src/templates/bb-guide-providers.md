@@ -105,6 +105,14 @@ Native skills and slash commands prefer that service's `GET /api/skill` and
 native default agent with
 `bb plugin config provider-opencode set defaultAgent <name>` and a catalog
 variant with `bb plugin config provider-opencode set defaultVariant <id>`.
+Native bb tools need the separate OpenCode plugin `opencode-bb-tools`
+(https://github.com/shuv1337/opencode-bb-tools), installed with
+`opencode plugin add opencode-bb-tools` or
+`shuvcode plugin add opencode-bb-tools`. Read status with
+`bb opencode tools status --machine <id> [--json]`.
+`bb plugin config provider-opencode set bbToolsRequired true` fails the turn
+when that companion is absent; the default keeps native-only threads and a
+setup warning.
 Host daemon env: `OPENCODE_SERVER_URL`, `OPENCODE_SERVER_PASSWORD`,
 `OPENCODE_APP`. A registration whose URL is not on this host is never sent
 its password; set `OPENCODE_SERVER_URL` and `OPENCODE_SERVER_PASSWORD` to
