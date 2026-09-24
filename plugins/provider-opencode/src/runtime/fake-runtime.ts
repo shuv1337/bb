@@ -420,12 +420,6 @@ export function createFakeOpenCodeRuntime(
         assertOpen();
         return durable.get(id) ?? [];
       },
-      assistantMessages: async () => {
-        assertOpen();
-        return session.messages.flatMap((message) =>
-          message.type === "assistant" ? [{ id: message.id, completed: message.finish !== undefined }] : [],
-        );
-      },
       replyPermission: async (requestID, reply) => {
         assertOpen();
         calls.permissionReplies.push({ requestID, reply });

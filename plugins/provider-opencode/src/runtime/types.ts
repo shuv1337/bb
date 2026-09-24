@@ -243,7 +243,6 @@ export interface SessionHandle {
   fork(checkpointMessageId?: string): Promise<SessionHandle>;
   context(): Promise<readonly OpenCodeSessionMessage[]>;
   durableLog(): Promise<readonly OpenCodeNativeEvent[]>;
-  assistantMessages(): Promise<readonly { id: string; completed: boolean }[]>;
   replyPermission(
     requestID: string,
     reply: "once" | "always" | "reject",

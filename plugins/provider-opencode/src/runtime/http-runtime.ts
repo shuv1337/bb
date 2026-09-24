@@ -45,8 +45,12 @@ import type {
   SessionHandle,
 } from "./types.js";
 
-function parseDurableLogText(raw: string): OpenCodeNativeEvent[] {
+const DURABLE_LOG_PAGE = 4096;
+
+function parseDurableLogText(raw: string): { events: OpenCodeNativeEvent[]; syncedSeq: number | undefined; truncated: boolean } {
   const events: OpenCodeNativeEvent[] = [];
+  let syncedSeq: number | undefined;
+  let truncated = false;
   for (const block of raw.split(/\r?\n\r?\n/)) {
     const data = block
       .split(/\r?\n/)
@@ -54,12 +58,18 @@ function parseDurableLogText(raw: string): OpenCodeNativeEvent[] {
       .map((line) => line.slice(5).trim())
       .join("");
     if (data.length === 0) continue;
-    const parsed = JSON.parse(data) as OpenCodeNativeEvent;
-    if (parsed.type === "log.synced") break;
+    const parsed = JSON.parse(data) as OpenCodeNativeEvent & { seq?: number };
+    if (parsed.type === "log.synced") {
+      syncedSeq = typeof parsed.seq === "number" ? parsed.seq : undefined;
+      break;
+    }
     events.push(parsed);
-    if (events.length >= 4096) break;
+    if (events.length >= DURABLE_LOG_PAGE) {
+      truncated = true;
+      break;
+    }
   }
-  return events;
+  return { events, syncedSeq, truncated };
 }
 
 type Client = ReturnType<typeof OpenCode.make>;
@@ -465,45 +475,7 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     );
   }
 
-  private async readAssistantMessages(sessionID: string): Promise<Array<{ id: string; completed: boolean }>> {
-    const registration = this.registration;
-    if (registration === null) {
-      throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
-    }
-    const headers: Record<string, string> = {};
-    if (registration.password !== undefined) {
-      headers.authorization = basicAuthHeader(registration.password);
-    }
-    const out: Array<{ id: string; completed: boolean }> = [];
-    let cursor: string | undefined;
-    for (let page = 0; page < 5; page += 1) {
-      const url = new URL(`/api/session/${encodeURIComponent(sessionID)}/message`, registration.url);
-      url.searchParams.set("type", "assistant");
-      url.searchParams.set("limit", "200");
-      if (cursor === undefined) url.searchParams.set("order", "asc");
-      else url.searchParams.set("cursor", cursor);
-      const response = await this.fetchImpl(url, { headers });
-      if (!response.ok) {
-        throw new Error(`OpenCode session messages failed: ${response.status}`);
-      }
-      const body = (await response.json()) as {
-        data?: unknown;
-        cursor?: { next?: unknown };
-      };
-      const rows = Array.isArray(body.data) ? body.data : [];
-      for (const row of rows) {
-        if (row === null || typeof row !== "object") continue;
-        const record = row as { id?: unknown; type?: unknown; time?: { completed?: unknown } };
-        if (record.type !== "assistant" || typeof record.id !== "string") continue;
-        out.push({ id: record.id, completed: record.time?.completed !== undefined });
-      }
-      cursor = typeof body.cursor?.next === "string" ? body.cursor.next : undefined;
-      if (cursor === undefined || rows.length === 0) break;
-    }
-    return out;
-  }
-
-  private async readDurableLog(sessionID: string): Promise<OpenCodeNativeEvent[]> {
+  private async readDurableLogPage(sessionID: string, after: number): Promise<{ events: OpenCodeNativeEvent[]; syncedSeq: number | undefined; truncated: boolean }> {
     const registration = this.registration;
     if (registration === null) {
       throw new OpenCodeRuntimeNotReadyError("OpenCode runtime is not ready");
@@ -512,14 +484,24 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
     if (registration.password !== undefined) {
       headers.authorization = basicAuthHeader(registration.password);
     }
-    const response = await this.fetchImpl(
-      new URL(`/api/experimental/session/${encodeURIComponent(sessionID)}/log?after=0`, registration.url),
-      { headers },
-    );
+    const url = new URL(`/api/experimental/session/${encodeURIComponent(sessionID)}/log`, registration.url);
+    url.searchParams.set("after", String(after));
+    const response = await this.fetchImpl(url, { headers });
     if (!response.ok) {
       throw new Error(`OpenCode session log failed: ${response.status} ${await response.text()}`);
     }
     return parseDurableLogText(await response.text());
+  }
+
+  private async readDurableLog(sessionID: string): Promise<OpenCodeNativeEvent[]> {
+    const head = await this.readDurableLogPage(sessionID, 0);
+    const tailAfter =
+      head.syncedSeq !== undefined && (head.truncated || head.events.length === 0)
+        ? Math.max(0, head.syncedSeq - DURABLE_LOG_PAGE)
+        : 0;
+    if (tailAfter === 0) return head.events;
+    const tail = await this.readDurableLogPage(sessionID, tailAfter);
+    return tail.events.length > 0 ? tail.events : head.events;
   }
 
   private async patchSession(
@@ -673,7 +655,6 @@ export class HttpOpenCodeRuntime implements OpenCodeRuntime {
             .filter((message): message is OpenCodeSessionMessage => message !== null),
         ),
       durableLog: () => runtime.readDurableLog(id),
-      assistantMessages: () => runtime.readAssistantMessages(id),
       replyPermission: (requestID, reply) =>
         run(async (client) => {
           await client.permission.reply({

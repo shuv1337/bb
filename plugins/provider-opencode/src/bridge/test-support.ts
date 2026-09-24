@@ -53,6 +53,8 @@ export interface OpenCodeBridgeHarness {
   ): Promise<BridgeJsonRpcOutputMessage>;
   deltasOf(threadId: string): Record<string, unknown>[];
   waitFor(predicate: () => boolean, what: string): Promise<void>;
+  injectTurnDeltas(threadId: string, deltas: Record<string, unknown>[]): Promise<void>;
+  injectResync(threadId: string): Promise<void>;
   teardown(): Promise<void>;
 }
 
@@ -129,6 +131,8 @@ export async function startOpenCodeBridgeHarness(
       });
     },
     deltasOf,
+    injectTurnDeltas: (threadId, deltas) => bridge.injectTurnDeltas(threadId, deltas as never),
+    injectResync: (threadId) => bridge.injectResync(threadId),
     async waitFor(predicate, what) {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {

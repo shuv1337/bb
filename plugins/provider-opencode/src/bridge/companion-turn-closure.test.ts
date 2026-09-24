@@ -9,6 +9,7 @@ const tool = {
 };
 
 const TURN_ENDED = "bb turn ended; bb tools are unavailable to background subagents after their owning turn";
+const ORIGIN_UNKNOWN = "bb tool origin could not be established; the call was not run";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -327,12 +328,32 @@ it("leaves a replacement binding untouched when a boundary is still settling the
   }
 }, 15_000);
 
-it("holds an unmapped call until the assistant step event, then dispatches it on the live turn", async () => {
+it("does not let an aborted earlier execution borrow a later turn", async () => {
   const rejects: string[] = [];
   let offer = false;
   const opened = await openHarness({
     attaches: { count: 0 },
-    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_fast") : { calls: [], settled: [] }),
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_old") : { calls: [], settled: [] }),
+    durableLog: async () => [
+      {
+        type: "session.execution.started",
+        data: { sessionID: opened.providerThreadId },
+        durable: { seq: 1 },
+      },
+      {
+        type: "session.step.started",
+        data: { sessionID: opened.providerThreadId, assistantMessageID: "msg_old" },
+      },
+      {
+        type: "session.execution.interrupted",
+        data: { sessionID: opened.providerThreadId },
+      },
+      {
+        type: "session.execution.started",
+        data: { sessionID: opened.providerThreadId },
+        durable: { seq: 9 },
+      },
+    ],
     onReject: (input) => {
       if (typeof input.message === "string") rejects.push(input.message);
     },
@@ -341,31 +362,54 @@ it("holds an unmapped call until the assistant step event, then dispatches it on
     await opened.harness.fake.play({
       type: "session.execution.started",
       data: { sessionID: opened.providerThreadId },
-      durable: { seq: 4 },
+      durable: { seq: 9 },
     });
     await opened.harness.waitFor(
       () => opened.harness.deltasOf("thr_turn").some((delta) => delta.kind === "turn.open"),
-      "turn.open",
+      "later turn.open",
     );
     offer = true;
     await opened.harness.fake.play({
       type: "rpc.bb.tools.v1.control",
       data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await opened.harness.waitFor(() => rejects.length > 0, "old origin rejected");
+    expect(rejects).toEqual([TURN_ENDED]);
     expect(opened.harness.rpc.messages.some((message) => message.method === "item/tool/call")).toBe(false);
-    expect(rejects).toEqual([]);
+    expect(openTurnId(opened.harness)).toContain(":9");
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 15_000);
+
+it("rejects a call whose origin is not in the durable log instead of borrowing the live turn", async () => {
+  const rejects: string[] = [];
+  let offer = false;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_missing") : { calls: [], settled: [] }),
+    durableLog: async () => [
+      {
+        type: "session.execution.started",
+        data: { sessionID: opened.providerThreadId },
+        durable: { seq: 4 },
+      },
+    ],
+    onReject: (input) => {
+      if (typeof input.message === "string") rejects.push(input.message);
+    },
+  });
+  try {
+    await openExecution(opened.harness, opened.providerThreadId, "msg_other");
+    await opened.harness.injectResync("thr_turn");
+    offer = true;
     await opened.harness.fake.play({
-      type: "session.step.started",
-      data: { sessionID: opened.providerThreadId, assistantMessageID: "msg_fast" },
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
     });
-    await opened.harness.waitFor(
-      () => opened.harness.rpc.messages.some((message) => message.method === "item/tool/call"),
-      "reverse item/tool/call",
-    );
-    const call = opened.harness.rpc.messages.find((message) => message.method === "item/tool/call");
-    expect(call?.params).toMatchObject({ turnId: openTurnId(opened.harness), tool: "bb_echo" });
-    expect(rejects).toEqual([]);
+    await opened.harness.waitFor(() => rejects.length > 0, "unlinked origin rejected");
+    expect(rejects).toEqual([ORIGIN_UNKNOWN]);
+    expect(opened.harness.rpc.messages.some((message) => message.method === "item/tool/call")).toBe(false);
   } finally {
     await opened.harness.teardown();
   }
@@ -491,3 +535,88 @@ it("stops result delivery after a finite budget instead of retrying immediately"
     await opened.harness.teardown();
   }
 }, 20_000);
+
+it("finishes a hanging result delivery after the per-attempt timeout", async () => {
+  const payloads: Array<Record<string, unknown>> = [];
+  let offer = true;
+  const opened = await openHarness({
+    attaches: { count: 0 },
+    resultPayloads: payloads,
+    pending: () => (offer ? pendingCall(opened.providerThreadId, "msg_hang") : { calls: [], settled: [] }),
+    onResult: () => new Promise(() => undefined),
+  });
+  try {
+    await openExecution(opened.harness, opened.providerThreadId, "msg_hang");
+    await opened.harness.fake.play({
+      type: "rpc.bb.tools.v1.control",
+      data: { type: "pending", sessionID: opened.providerThreadId, key: "k1" },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.rpc.messages.some((message) => message.method === "item/tool/call"),
+      "reverse item/tool/call",
+    );
+    const reverse = opened.harness.rpc.messages.find((message) => message.method === "item/tool/call");
+    opened.harness.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: reverse?.id,
+        result: { success: true, contentItems: [{ type: "inputText", text: "echo: ok" }] },
+      }),
+    );
+    const deadline = Date.now() + 25_000;
+    while (payloads.filter((payload) => payload.success === false).length < 1) {
+      if (Date.now() > deadline) throw new Error(`hanging delivery did not finish: ${payloads.length}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(payloads.filter((payload) => payload.success === true)).toHaveLength(5);
+    expect(payloads.filter((payload) => payload.success === false)).toHaveLength(1);
+    const settledAt = payloads.length;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(payloads).toHaveLength(settledAt);
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 40_000);
+
+it("drops a stale boundary for turn N once turn N+1 is live and closes each opened turn once", async () => {
+  const opened = await openHarness({ attaches: { count: 0 } });
+  try {
+    const first = await openExecution(opened.harness, opened.providerThreadId, "msg_n");
+    await opened.harness.fake.play({
+      type: "session.execution.succeeded",
+      data: { sessionID: opened.providerThreadId },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.deltasOf("thr_turn").some((delta) => delta.kind === "turn.boundary"),
+      "turn N boundary",
+    );
+    await opened.harness.fake.play({
+      type: "session.execution.started",
+      data: { sessionID: opened.providerThreadId },
+      durable: { seq: 9 },
+    });
+    await opened.harness.waitFor(
+      () => opened.harness.deltasOf("thr_turn").filter((delta) => delta.kind === "turn.open").length >= 2,
+      "turn N+1 open",
+    );
+    const later = opened.harness.deltasOf("thr_turn").filter((delta) => delta.kind === "turn.open").at(-1);
+    const before = opened.harness.deltasOf("thr_turn").filter((delta) => delta.kind === "turn.boundary");
+    await opened.harness.injectTurnDeltas("thr_turn", [
+      { kind: "turn.boundary", providerTurnId: first, status: "completed" },
+    ]);
+    const boundaries = opened.harness.deltasOf("thr_turn").filter((delta) => delta.kind === "turn.boundary");
+    expect(before.filter((delta) => delta.providerTurnId === first)).toHaveLength(1);
+    expect(boundaries.filter((delta) => delta.providerTurnId === first)).toHaveLength(1);
+    expect(boundaries.filter((delta) => delta.providerTurnId === later?.providerTurnId)).toEqual(
+      before.filter((delta) => delta.providerTurnId === later?.providerTurnId),
+    );
+    expect(
+      opened.harness.warnings.some(
+        (message) => message.includes(`dropping stale turn boundary ${first}`) || message.includes(`publishing late turn boundary ${first}`),
+      ),
+    ).toBe(true);
+    expect(opened.harness.warnings.some((message) => message.includes(String(later?.providerTurnId)))).toBe(true);
+  } finally {
+    await opened.harness.teardown();
+  }
+}, 15_000);

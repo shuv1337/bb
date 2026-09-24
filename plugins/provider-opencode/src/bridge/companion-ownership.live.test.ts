@@ -19,6 +19,7 @@ import {
 const PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const TURN_ENDED = "bb turn ended; bb tools are unavailable to background subagents after their owning turn";
+const ORIGIN_UNKNOWN = "bb tool origin could not be established; the call was not run";
 const IDENTITY_EVENTS = [
   "session.step.started",
   "session.step.streamed",
@@ -442,7 +443,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     expect(collectToolCalls(live)).toHaveLength(1);
   }, 180_000);
 
-  it("resolves a call whose step events were lost by reading the durable session log", async () => {
+  it("fails closed when lost step events have no durable message-to-execution link", async () => {
     const { model, live, startThread, startTurn } = ctx;
     live.setIgnoredNativeEvents(IDENTITY_EVENTS);
     model.script.push(
@@ -451,19 +452,26 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     );
     const root = await startThread("thread-gap");
     await startTurn("thread-gap", root, "call echo immediately");
-    await waitUntil(async () => {
-      if (collectToolCalls(live).length === 0) await live.injectResync("thread-gap");
-      return collectToolCalls(live).length === 1;
-    }, "call resolved from the session log");
-    const call = live.toolCalls[0];
-    if (call === undefined) throw new Error("missing rebuilt call");
-    expect(String(call.params.turnId)).toContain(root);
-    answerToolCall(live, call, { success: true, contentItems: [{ type: "inputText", text: "echo: from-log" }] });
-    await waitUntil(
-      () => toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: from-log"),
-      "rebuilt call delivered",
-    );
-    expect(toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n")).not.toContain(TURN_ENDED);
+    await live.injectResync("thread-gap");
+    await waitUntil(() => {
+      const dispatched = collectToolCalls(live).some((call) => String(call.params.turnId).includes(root));
+      const rejected = model.requests.some((request) => toolMessages(request).join("\n").includes(ORIGIN_UNKNOWN));
+      return dispatched || rejected;
+    }, "durable link or fail-closed rejection");
+    if (collectToolCalls(live).length > 0) {
+      const call = live.toolCalls[0];
+      if (call === undefined) throw new Error("missing rebuilt call");
+      answerToolCall(live, call, { success: true, contentItems: [{ type: "inputText", text: "echo: from-log" }] });
+      await waitUntil(
+        () => toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n").includes("echo: from-log"),
+        "rebuilt call delivered",
+      );
+      expect(toolMessages(model.requests.at(-1) ?? { messages: [] }).join("\n")).not.toContain(ORIGIN_UNKNOWN);
+      return;
+    }
+    const failure = model.requests.flatMap((request) => toolMessages(request)).join("\n");
+    expect(failure).toContain(ORIGIN_UNKNOWN);
+    expect(collectToolCalls(live)).toHaveLength(0);
   }, 180_000);
 
   it("rejects an old child call after the origin map is lost and rebuilt", async () => {
@@ -522,7 +530,8 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     await promptNative(engine, sessionID, "CALL_BB_AFTER_LOST_MAP");
     await waitUntil(() => {
       const late = model.requests.filter((request) => JSON.stringify(request.messages).includes("CALL_BB_AFTER_LOST_MAP"));
-      return late.flatMap((request) => toolMessages(request)).join("\n").includes(TURN_ENDED);
+      const failure = late.flatMap((request) => toolMessages(request)).join("\n");
+      return failure.includes(TURN_ENDED) || failure.includes(ORIGIN_UNKNOWN);
     }, "lost-map child rejection");
     await subscription.stop();
     expect(collectToolCalls(live)).toHaveLength(before);
