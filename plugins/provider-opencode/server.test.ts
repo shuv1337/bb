@@ -73,6 +73,10 @@ describe("the OpenCode plugin", () => {
         type: "string",
         default: "",
       },
+      bbToolsRequired: {
+        type: "boolean",
+        default: false,
+      },
     });
   });
 
