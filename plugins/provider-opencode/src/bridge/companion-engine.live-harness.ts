@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { createInterface } from "node:readline";
 import {
   experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness,
@@ -182,6 +182,7 @@ function engineEnv(root: string): NodeJS.ProcessEnv {
     OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_MODELS_PATH: join(root, "models.json"),
     OPENCODE_DISABLE_AUTOUPDATE: "1",
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
   };
 }
 
@@ -627,8 +628,11 @@ function isolatePlugins(root: string, companionCopy: string, requested: readonly
 }
 
 function keepEngineRoot(root: string): void {
-  const kept = join("/tmp/shuvcode/kept-roots", basename(root));
-  mkdirSync(join("/tmp/shuvcode/kept-roots"), { recursive: true });
+  const sandbox = tmpdir();
+  const userTmp = basename(sandbox).startsWith("bb-vt-") ? dirname(sandbox) : sandbox;
+  const keptRoot = process.env.BB_OPENCODE_LIVE_KEEP_DIR ?? join(userTmp, "bb-oc-kept-roots");
+  const kept = join(keptRoot, basename(root));
+  mkdirSync(keptRoot, { recursive: true });
   cpSync(root, kept, { recursive: true });
 }
 

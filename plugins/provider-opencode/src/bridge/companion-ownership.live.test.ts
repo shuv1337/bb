@@ -190,11 +190,11 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
       false,
     );
     await waitUntil(
-      () => model.requests.filter((item) => JSON.stringify(item.messages).includes("unrelated")).length >= 3,
+      () => model.requests.filter((item) => JSON.stringify(item.messages).includes("unrelated call bb_echo")).length >= 3,
       "unrelated forced calls to finish",
     );
     const seen = model.requests
-      .filter((item) => JSON.stringify(item.messages).includes("unrelated"))
+      .filter((item) => JSON.stringify(item.messages).includes("unrelated call bb_echo"))
       .flatMap((item) => toolMessages(item));
     process.stderr.write(`\nLIVE unrelated tools: ${JSON.stringify(toolNames(request ?? { messages: [] }))}\n`);
     const failures = seen.join("\n");
@@ -664,7 +664,7 @@ describe.skipIf(engineBinary === undefined)("OpenCode companion ownership", () =
     };
     model.respond = (request) => {
       const blob = JSON.stringify(request.messages);
-      if (blob.includes("bb fork turn") && !blob.includes("fresh")) {
+      if (blob.includes("bb fork turn") && !request.messages.some((message) => message.role === "tool")) {
         return { kind: "tool", name: "bb_forked", args: { note: "fresh" } };
       }
       if (blob.includes("native fork turn")) return { kind: "text", text: "native fork done" };
