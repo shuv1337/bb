@@ -198,7 +198,7 @@ describe("public provider installation routes", () => {
         "Codex",
         "Claude Code",
         "Pi",
-        "OpenCode",
+        "OpenCode v2",
         "Cursor",
       ]);
       expect(body.opencode?.installed).toBe(false);
@@ -257,11 +257,16 @@ describe("public provider installation routes", () => {
 
       expect(response.status).toBe(200);
       const body = (await readJson(response)) as ProviderCliStatusResponse;
-      expect(Object.keys(body)).toEqual(["codex", "pi", "opencode", "acp-cursor"]);
+      expect(Object.keys(body)).toEqual([
+        "codex",
+        "pi",
+        "opencode",
+        "acp-cursor",
+      ]);
       expect(Object.values(body).map((status) => status.displayName)).toEqual([
         "Codex",
         "Pi",
-        "OpenCode",
+        "OpenCode v2",
         "Cursor",
       ]);
       expect(warn).toHaveBeenCalledWith(

@@ -199,7 +199,7 @@ describe("machine Git environment", () => {
     await exec("git", ["add", "."], { cwd: source, env });
     await exec("git", ["commit", "-m", "seed"], { cwd: source, env });
     await exec("git", ["clone", "--bare", source, bare], { env });
-    const helper = `#!/usr/bin/env node
+    const helper = `#!${process.execPath}
 const assert = require("node:assert");
 const { execFileSync, spawnSync } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");

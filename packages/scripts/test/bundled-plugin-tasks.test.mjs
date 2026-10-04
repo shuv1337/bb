@@ -6,6 +6,7 @@ import { BUNDLED_PLUGINS } from "../../../apps/server/src/services/plugins/built
 const root = resolve(import.meta.dirname, "../../..");
 const turboSource = readFileSync(resolve(root, "turbo.json"), "utf8");
 const turbo = JSON.parse(turboSource.replace(/^\s*\/\/.*$/gm, ""));
+const STANDALONE_INSTALLABLE_PLUGINS = new Set(["provider-opencode"]);
 
 describe("bundled plugin task graph", () => {
   it("prepares every registered plugin before assembly with separate output ownership", () => {
@@ -13,6 +14,16 @@ describe("bundled plugin task graph", () => {
       const manifest = JSON.parse(
         readFileSync(resolve(root, "plugins", name, "package.json"), "utf8"),
       );
+      if (STANDALONE_INSTALLABLE_PLUGINS.has(name)) {
+        expect(manifest.scripts["prepare:bundled"]).toBe(
+          "node ../../packages/plugin-build/dist/cli.js prepare-bundled",
+        );
+        expect(manifest.devDependencies?.["@bb/plugin-build"]).toBeUndefined();
+        const task = turbo.tasks[`${manifest.name}#prepare:bundled`];
+        expect(task.dependsOn).toEqual(["topo", "@bb/plugin-build#build"]);
+        expect(task.outputs).toEqual([".bundled-runtime/**"]);
+        return manifest.name;
+      }
       expect(manifest.scripts["prepare:bundled"]).toBe(
         "bb-plugin-build prepare-bundled",
       );
