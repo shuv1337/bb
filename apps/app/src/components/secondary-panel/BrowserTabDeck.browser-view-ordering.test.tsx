@@ -15,8 +15,12 @@ import {
   createNoopDesktopBrowserApi,
 } from "@/test/bb-desktop-test-utils";
 import { POINTER_COARSE_QUERY } from "@bb/shared-ui/hooks/use-pointer-coarse";
-import { BrowserTabDeck, BrowserTabLifecycleObserver } from "./BrowserTabDeck";
-import { resetBrowserViewPersistence } from "./browserViewVisibilityCoordinator";
+import { BrowserTabDeck } from "./BrowserTabDeck";
+import { BrowserTabLifecycleObserver } from "./BrowserTabLifecycleObserver";
+import {
+  allowBrowserViewRecreation,
+  resetBrowserViewPersistence,
+} from "./browserViewVisibilityCoordinator";
 
 type BrowserCall =
   | { type: "attach"; request: BbDesktopBrowserAttachRequest }
@@ -250,6 +254,7 @@ describe("BrowserTabDeck native browser first-show ordering", () => {
         ...makeBrowserTab("native-tab", "https://example.com"),
         desktopTarget: { ...desktopTarget, [field]: "elsewhere" },
       };
+      allowBrowserViewRecreation(tab.id, tab.desktopTarget);
       const deck = (browserTab: BrowserFixedPanelTab) => (
         <BrowserTabDeck
           browserTabs={[browserTab]}
@@ -273,6 +278,43 @@ describe("BrowserTabDeck native browser first-show ordering", () => {
       expect(attachments[0]?.existingOnly).toBe(true);
     },
   );
+
+  it("recreates an explicitly reopened page once when its owning desktop activates it", async () => {
+    const { api, attachments } = createRecordingBrowserApi();
+    const desktopTarget = {
+      hostId: "host-1",
+      instanceId: "instance-1",
+      generation: "generation-1",
+    };
+    api.getTarget = async () => desktopTarget;
+    installDesktopBrowser(api);
+    const tab = {
+      ...makeBrowserTab("reopened-native-tab", "https://latest.example"),
+      desktopTarget,
+    };
+    allowBrowserViewRecreation(tab.id, desktopTarget);
+    const deck = (activeBrowserTabId: string | null) => (
+      <BrowserTabDeck
+        browserTabs={[tab]}
+        activeBrowserTabId={activeBrowserTabId}
+        environmentId="env-1"
+        canShowNativeBrowserView
+        threadId="thread-1"
+        onUpdate={() => {}}
+      />
+    );
+    const view = render(deck(null));
+    await act(async () => {});
+    expect(attachments).toEqual([]);
+    view.rerender(deck(tab.id));
+    await waitFor(() => expect(attachments).toHaveLength(1));
+    expect(attachments[0]?.existingOnly).toBeUndefined();
+    expect(attachments[0]?.url).toBe("https://latest.example");
+    view.rerender(deck(null));
+    view.rerender(deck(tab.id));
+    await waitFor(() => expect(attachments).toHaveLength(2));
+    expect(attachments[1]?.existingOnly).toBe(true);
+  });
 
   it("attaches a URL-bearing tab hidden and shows only after attach plus compact drawer readiness", async () => {
     const {

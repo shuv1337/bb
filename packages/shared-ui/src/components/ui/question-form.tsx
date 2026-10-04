@@ -2,11 +2,11 @@ import type {
   Question,
   QuestionOption,
   QuestionAnswer,
-} from "@bb/shared-ui/question-form-state";
+} from "./question-form-state";
 import {
   useQuestionFormHost,
   type QuestionShortcut,
-} from "@bb/shared-ui/question-form-host";
+} from "./question-form-host";
 import {
   useCallback,
   useEffect,
@@ -17,10 +17,10 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from "react";
-import { Button } from "@bb/shared-ui/button";
-import { Icon } from "@bb/shared-ui/icon";
-import { usePointerCoarse } from "@bb/shared-ui/hooks/use-pointer-coarse";
-import { cn } from "@bb/shared-ui/lib/utils";
+import { Button } from "./button";
+import { Icon } from "./icon";
+import { usePointerCoarse } from "./hooks/use-pointer-coarse";
+import { cn } from "../../lib/utils";
 import {
   answerStateFor,
   buildQuestionAnswers,
@@ -29,7 +29,7 @@ import {
   resolveQuestionShortcutChoice,
   type QuestionAnswerState,
   type QuestionFormState,
-} from "@bb/shared-ui/question-form-state";
+} from "./question-form-state";
 
 const OTHER_OPTION_LABEL = "Other…";
 const FREE_TEXT_MIN_HEIGHT = 84;
@@ -238,9 +238,11 @@ function QuestionInputBlock({
   return (
     <fieldset disabled={disabled} className="min-w-0">
       <legend className="sr-only">{question.prompt}</legend>
-      <div className="text-sm font-semibold text-foreground">
-        {question.prompt}
-      </div>
+      {question.prompt ? (
+        <div className="text-sm font-semibold text-foreground">
+          {question.prompt}
+        </div>
+      ) : null}
       <div className="mt-2 space-y-0.5">
         {options.map((option: QuestionOption, index) => {
           const checked = state.selected.includes(option.value);
@@ -429,7 +431,7 @@ export function QuestionForm({
         event.preventDefault();
         handleAdvance();
       }}
-      className="flex max-h-[calc(100dvh-6rem)] min-h-0 flex-col text-xs text-muted-foreground"
+      className="flex min-h-0 flex-col text-xs text-muted-foreground"
     >
       {totalQuestions > 1 ? (
         <QuestionTabs
@@ -439,7 +441,7 @@ export function QuestionForm({
           questions={questions}
         />
       ) : null}
-      <div className="min-h-0 touch-pan-y overflow-y-auto overscroll-contain">
+      <div>
         <QuestionInputBlock
           disabled={disabled}
           question={currentQuestion}

@@ -1,3 +1,4 @@
+import { mobileAppDownloads } from "@bb/domain";
 import type {
   MachineEnvironmentReplace,
   MachineEnvironmentSet,
@@ -7,12 +8,15 @@ import type {
   AppKeybindingOverrides,
   AppSettings,
   AppSettingsUpdate,
+  ExperimentUpdates,
   Experiments,
   UiPreferenceKey,
   UiPreferenceValue,
 } from "@bb/domain";
 import type { ProviderUsageResponse } from "@bb/host-daemon-contract";
 import type {
+  SetAiServiceSelectionRequest,
+  SystemAiServicesResponse,
   SystemAppUpdateAcknowledgeRequest,
   SystemAppUpdateApplyRequest,
   SystemAppUpdateQuery,
@@ -20,6 +24,7 @@ import type {
   SystemAttentionResponse,
   SystemConfigReloadResponse,
   SystemConfigResponse,
+  SystemMobileAppReleasesResponse,
   SystemExecutionOptionsQuery,
   SystemExecutionOptionsResponse,
   SystemCliSkillsStatusResponse,
@@ -31,6 +36,8 @@ import type {
   SystemVersionQuery,
   SystemVersionResponse,
   SystemVoiceTranscriptionResponse,
+  TestAiServiceRequest,
+  TestAiServiceResponse,
   UiPreferenceResponse,
   UiPreferencesResponse,
 } from "@bb/server-contract";
@@ -79,6 +86,14 @@ export interface SystemVoiceTranscriptionArgs {
 
 export type SystemAttentionResult = SystemAttentionResponse;
 export type SystemConfigResult = SystemConfigResponse;
+export type SystemAiServicesResult = SystemAiServicesResponse;
+export type SystemSetAiServiceSelectionArgs = SetAiServiceSelectionRequest;
+export type SystemTestAiServiceArgs = TestAiServiceRequest;
+export type SystemTestAiServiceResult = TestAiServiceResponse;
+
+export interface SystemAiServicesArgs {
+  signal?: AbortSignal;
+}
 export type SystemExecutionOptionsResult = SystemExecutionOptionsResponse;
 export type SystemReloadConfigResult = SystemConfigReloadResponse;
 export type SystemInstallCliSkillsArgs = SystemInstallCliSkillsRequest;
@@ -137,6 +152,7 @@ export interface SystemArea {
   replaceMachineEnvironment(
     input: MachineEnvironmentReplace,
   ): Promise<MachineEnvironmentList>;
+  aiServices(args?: SystemAiServicesArgs): Promise<SystemAiServicesResult>;
   attention(args?: SystemAttentionArgs): Promise<SystemAttentionResult>;
   config(args?: SystemConfigArgs): Promise<SystemConfigResult>;
   executionOptions(
@@ -149,11 +165,21 @@ export interface SystemArea {
     args: SystemInstallCliSkillsArgs,
   ): Promise<SystemInstallCliSkillsResult>;
   reloadConfig(): Promise<SystemReloadConfigResult>;
+  setAiServiceSelection(
+    args: SystemSetAiServiceSelectionArgs,
+  ): Promise<SystemAiServicesResult>;
+  testAiService(
+    args: SystemTestAiServiceArgs,
+  ): Promise<SystemTestAiServiceResult>;
   transcribeVoice(
     args: SystemVoiceTranscriptionArgs,
   ): Promise<SystemVoiceTranscriptionResult>;
   uiPreferences: SystemUiPreferencesArea;
-  updateExperiments(args: Experiments): Promise<SystemUpdateExperimentsResult>;
+  mobileAppDownloads(): typeof mobileAppDownloads;
+  mobileAppReleases(): Promise<SystemMobileAppReleasesResponse>;
+  updateExperiments(
+    args: ExperimentUpdates,
+  ): Promise<SystemUpdateExperimentsResult>;
   updateGeneralSettings(
     args: AppSettingsUpdate,
   ): Promise<SystemUpdateGeneralSettingsResult>;
@@ -252,6 +278,24 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
         ),
       );
     },
+    async aiServices(input) {
+      return transport.readJson(
+        transport.api.v1.system["ai-services"].$get(
+          {},
+          ...signalRequestArgs(input?.signal),
+        ),
+      );
+    },
+    async setAiServiceSelection(input) {
+      return transport.readJson(
+        transport.api.v1.system["ai-services"].selection.$put({ json: input }),
+      );
+    },
+    async testAiService(input) {
+      return transport.readJson(
+        transport.api.v1.system["ai-services"].test.$post({ json: input }),
+      );
+    },
     async config(input) {
       return transport.readJson(
         transport.api.v1.system.config.$get(
@@ -302,6 +346,14 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
       return systemVoiceTranscriptionResponseSchema.parse(
         await response.json(),
       );
+    },
+    async mobileAppReleases() {
+      return transport.readJson(
+        transport.api.v1.system["mobile-app-releases"].$get(),
+      );
+    },
+    mobileAppDownloads() {
+      return { ...mobileAppDownloads };
     },
     async updateExperiments(input) {
       return transport.readJson(

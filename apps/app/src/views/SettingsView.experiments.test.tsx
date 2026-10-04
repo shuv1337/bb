@@ -14,9 +14,7 @@ function renderSection(
       disabled={false}
       experiments={{
         changelogPreview: false,
-        mobileApp: false,
         serverMove: false,
-        sidebarProgressiveDisclosure: false,
       }}
       onExperimentChange={onExperimentChange}
     />,
@@ -29,19 +27,5 @@ describe("ExperimentsSettingsSection", () => {
     renderSection(onChange);
     fireEvent.click(screen.getByLabelText("Changelog preview"));
     expect(onChange).toHaveBeenCalledWith("changelogPreview", true);
-  });
-
-  it("reports mobile app changes", () => {
-    const onChange = vi.fn();
-    renderSection(onChange);
-    fireEvent.click(screen.getByLabelText("Mobile app"));
-    expect(onChange).toHaveBeenCalledWith("mobileApp", true);
-  });
-
-  it("reports sidebar progressive disclosure changes", () => {
-    const onChange = vi.fn();
-    renderSection(onChange);
-    fireEvent.click(screen.getByLabelText("Sidebar progressive disclosure"));
-    expect(onChange).toHaveBeenCalledWith("sidebarProgressiveDisclosure", true);
   });
 });

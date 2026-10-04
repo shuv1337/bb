@@ -1,4 +1,12 @@
-import { memo, useCallback, useMemo, useRef } from "react";
+import {
+  memo,
+  useCallback,
+  useMemo,
+  useRef,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
+import { generatePath } from "react-router-dom";
 import type { TimelineUserConversationRow } from "@bb/server-contract";
 import type {
   PromptTextMention,
@@ -9,6 +17,8 @@ import type {
 import type { TimelineTitle, TimelineTitleSegment } from "@bb/thread-view";
 import { type IconName } from "@bb/shared-ui/icon";
 import { MarkdownPreview } from "@/components/ui/markdown-preview.js";
+import { RouteAnchor } from "@/components/ui/app-route-anchor.js";
+import { AUTOMATION_DETAIL_ROUTE_PATH } from "@/lib/route-paths";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
 import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-message-link-routing";
 import { cn } from "@bb/shared-ui/lib/utils";
@@ -24,20 +34,17 @@ import {
 } from "./ConversationMessageMentions.js";
 import { ExpandableTimelineRow } from "./ExpandableTimelineRow.js";
 import { NESTED_TIMELINE_GROUP_LINE_CLASS_NAME } from "./timeline-nested-group-line.js";
-import type {
-  TimelineTitleActionResolver,
-  TimelineTitleLinkResolver,
-} from "./TimelineTitleView.js";
+import type { TimelineTitleActionResolver } from "./TimelineTitleView.js";
 import type {
   ThreadTimelineLinkHandler,
   ThreadTimelineLocalFileLinkHandler,
 } from "./types.js";
 import { turnRequestLabel } from "@bb/client-core";
 import { TurnRequestLabel } from "./TurnRequestLabel.js";
+import { formatShortMessageTime } from "./MessageActionBar.js";
 import { useOverflowMeasurement } from "./conversation-message-overflow.js";
 import { PromptMentionPill } from "./ConversationMessageMentions.js";
 import { useThreadTitleDisplayText } from "@/components/thread/ThreadTitleMentions.js";
-import { getThreadRoutePath } from "@/lib/route-paths";
 import {
   boundedMarkdownPreview,
   closeUnterminatedMarkdownCodeSpan,
@@ -45,15 +52,20 @@ import {
   GENERATED_MESSAGE_COLLAPSED_PREVIEW_CHAR_CAP,
 } from "@bb/client-core";
 
+interface AutomationLink {
+  automationId: string;
+  projectId: string;
+}
+
 interface GeneratedConversationMessageProps {
   attachmentItems: ConversationAttachmentItems;
+  automationLink: AutomationLink | null;
   originKind: ThreadOriginKind | null;
   mentions: readonly PromptTextMention[];
   onOpenLink?: ThreadTimelineLinkHandler;
   onOpenLocalFileLink?: ThreadTimelineLocalFileLinkHandler;
   projectId?: string;
   resolveMentionLink?: PromptMentionLinkResolver;
-  resolveSegmentLinkHref?: TimelineTitleLinkResolver;
   onTitleAction?: TimelineTitleActionResolver;
   sourceKind: GeneratedConversationSourceKind;
   sourceName: string;
@@ -64,11 +76,12 @@ interface GeneratedConversationMessageProps {
   systemMessageSubject: SystemMessageSubject | null;
   text: string;
   threadId?: string;
+  timestamp: number;
   turnRequest: TimelineUserConversationRow["turnRequest"];
   workspaceRootPath?: string;
 }
 
-type GeneratedConversationSourceKind = "agent" | "system";
+type GeneratedConversationSourceKind = "agent" | "automation" | "system";
 
 interface GeneratedConversationBodyTextArgs {
   initiator: TimelineUserConversationRow["initiator"];
@@ -290,7 +303,9 @@ export function generatedConversationTitle({
             truncate: true,
           }),
         ]
-      : systemMessageTitleSegments(systemMessageKind, systemMessageSubject);
+      : sourceKind === "automation"
+        ? [verbSegment("Automation")]
+        : systemMessageTitleSegments(systemMessageKind, systemMessageSubject);
 
   return {
     action: sideChatAction,
@@ -309,6 +324,8 @@ function generatedConversationEmptyText(
   switch (sourceKind) {
     case "agent":
       return "Sent an agent message";
+    case "automation":
+      return "Ran an automation";
     case "system":
       return "Sent a BB system message";
   }
@@ -348,6 +365,8 @@ function generatedConversationIconName(
   switch (sourceKind) {
     case "agent":
       return "MessageSquare";
+    case "automation":
+      return "Repeat";
     case "system":
       return systemMessageIconName(systemMessageKind);
   }
@@ -355,7 +374,6 @@ function generatedConversationIconName(
 
 interface GeneratedAgentSourceTitleProps {
   onTitleAction?: TimelineTitleActionResolver;
-  resolveSegmentLinkHref?: TimelineTitleLinkResolver;
   sourceIsPluginSideChat: boolean;
   sourceName: string;
   sourceProjectId: string | null;
@@ -365,7 +383,6 @@ interface GeneratedAgentSourceTitleProps {
 
 function GeneratedAgentSourceTitle({
   onTitleAction,
-  resolveSegmentLinkHref,
   sourceIsPluginSideChat,
   sourceName,
   sourceProjectId,
@@ -375,18 +392,6 @@ function GeneratedAgentSourceTitle({
   const sourceDisplayName = useThreadTitleDisplayText(sourceName);
   const sourceTitleAction =
     title.action && onTitleAction ? onTitleAction(title.action) : null;
-  const sourceLinkHref =
-    sourceThreadId !== null && !sourceIsPluginSideChat
-      ? sourceProjectId !== null
-        ? getThreadRoutePath({
-            projectId: sourceProjectId,
-            threadId: sourceThreadId,
-          })
-        : (resolveSegmentLinkHref?.({
-            kind: "thread",
-            threadId: sourceThreadId,
-          }) ?? null)
-      : null;
   const leadIn = title.segments[0]?.text ?? "Message from";
 
   return (
@@ -410,9 +415,65 @@ function GeneratedAgentSourceTitle({
             label: sourceDisplayName,
           }}
           serializedText={`@thread:${sourceThreadId}`}
-          linkHref={sourceLinkHref ?? undefined}
+          interactive={!sourceIsPluginSideChat || sourceTitleAction !== null}
           onActivate={sourceTitleAction ?? undefined}
         />
+      )}
+    </span>
+  );
+}
+
+interface GeneratedAutomationTitleProps {
+  automationLink: AutomationLink | null;
+  requestLabel: string | null;
+  timestamp: number;
+}
+
+function stopRowToggle(event: MouseEvent<HTMLAnchorElement>): void {
+  event.stopPropagation();
+}
+
+function stopRowToggleKey(event: KeyboardEvent<HTMLAnchorElement>): void {
+  if (event.key === "Enter" || event.key === " ") {
+    event.stopPropagation();
+  }
+}
+
+function GeneratedAutomationTitle({
+  automationLink,
+  requestLabel,
+  timestamp,
+}: GeneratedAutomationTitleProps) {
+  const sentAt = new Date(timestamp);
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1 whitespace-nowrap text-sm leading-5">
+      {automationLink === null ? (
+        <span className="shrink-0">Automation</span>
+      ) : (
+        <RouteAnchor
+          href={generatePath(AUTOMATION_DETAIL_ROUTE_PATH, automationLink)}
+          className="shrink-0 underline-offset-2 hover:underline focus-visible:underline focus-visible:outline-none"
+          onClick={stopRowToggle}
+          onKeyDown={stopRowToggleKey}
+        >
+          Automation
+        </RouteAnchor>
+      )}
+      <span aria-hidden="true" className="shrink-0 text-subtle-foreground">
+        ·
+      </span>
+      <time
+        className="shrink-0 text-subtle-foreground"
+        dateTime={sentAt.toISOString()}
+        title={sentAt.toLocaleString(undefined, {
+          dateStyle: "full",
+          timeStyle: "long",
+        })}
+      >
+        {formatShortMessageTime(timestamp, new Date())}
+      </time>
+      {requestLabel === null ? null : (
+        <span className="shrink-0">{requestLabel}</span>
       )}
     </span>
   );
@@ -444,13 +505,13 @@ const COLLAPSED_MARKDOWN_PREVIEW_CLASS = cn(
 export const GeneratedConversationMessage = memo(
   function GeneratedConversationMessage({
     attachmentItems,
+    automationLink,
     originKind,
     mentions,
     onOpenLink,
     onOpenLocalFileLink,
     projectId,
     resolveMentionLink,
-    resolveSegmentLinkHref,
     onTitleAction,
     sourceKind,
     sourceName,
@@ -461,6 +522,7 @@ export const GeneratedConversationMessage = memo(
     systemMessageSubject,
     text,
     threadId,
+    timestamp,
     turnRequest,
     workspaceRootPath,
   }: GeneratedConversationMessageProps) {
@@ -476,6 +538,11 @@ export const GeneratedConversationMessage = memo(
       [mentions, messageText.length, trimStartLength],
     );
     const requestLabel = turnRequestLabel(turnRequest);
+    const titleRequestLabel =
+      sourceKind === "automation" && turnRequest.status !== "accepted"
+        ? requestLabel
+        : null;
+    const bodyRequestLabel = titleRequestLabel === null ? requestLabel : null;
     const linkRouting = useMemo<MarkdownLinkRouting | undefined>(
       () =>
         buildMarkdownMessageLinkRouting({
@@ -511,12 +578,17 @@ export const GeneratedConversationMessage = memo(
       sourceKind === "agent" ? (
         <GeneratedAgentSourceTitle
           onTitleAction={onTitleAction}
-          resolveSegmentLinkHref={resolveSegmentLinkHref}
           sourceIsPluginSideChat={sourceIsPluginSideChat}
           sourceName={sourceName}
           sourceProjectId={sourceProjectId}
           sourceThreadId={sourceThreadId}
           title={title}
+        />
+      ) : sourceKind === "automation" ? (
+        <GeneratedAutomationTitle
+          automationLink={automationLink}
+          requestLabel={titleRequestLabel}
+          timestamp={timestamp}
         />
       ) : undefined;
     const leadingIcon = generatedConversationIconName(
@@ -528,7 +600,7 @@ export const GeneratedConversationMessage = memo(
     const hasExpandedOnlyContent =
       attachmentItems.filePaths.length > 0 ||
       attachmentItems.imageItems.length > 0 ||
-      requestLabel !== null;
+      bodyRequestLabel !== null;
     const collapsedPreviewSource =
       generatedConversationCollapsedPreview(messageText);
     const collapsedPreviewTextRef = useRef<HTMLElement | null>(null);
@@ -572,6 +644,7 @@ export const GeneratedConversationMessage = memo(
             <div ref={setCollapsedPreviewTextRef} className="min-w-0 truncate">
               {collapsedPreviewSource.parseAsMarkdown ? (
                 <MarkdownPreview
+                  allowHtml
                   content={collapsedPreviewMarkdown}
                   imagePolicy={
                     suppressGeneratedAgentImages ? "alt-text" : "render"
@@ -579,13 +652,11 @@ export const GeneratedConversationMessage = memo(
                   linkRouting={linkRouting}
                   promptMentions={{
                     mentions: collapsedPreviewBody.mentions,
-                    resolveLinkHref: resolveSegmentLinkHref,
                     resolveMentionLink,
                   }}
                   threadMentions={{
                     mentions: collapsedPreviewBody.mentions,
                     preserveSoftBreaks: true,
-                    resolveLinkHref: resolveSegmentLinkHref,
                   }}
                   className={COLLAPSED_MARKDOWN_PREVIEW_CLASS}
                 />
@@ -612,6 +683,7 @@ export const GeneratedConversationMessage = memo(
           <div className="pl-2 text-sm leading-relaxed text-foreground">
             {messageText ? (
               <MarkdownPreview
+                allowHtml
                 content={messageText}
                 imagePolicy={
                   suppressGeneratedAgentImages ? "alt-text" : "render"
@@ -619,13 +691,11 @@ export const GeneratedConversationMessage = memo(
                 linkRouting={linkRouting}
                 promptMentions={{
                   mentions: messageMentions,
-                  resolveLinkHref: resolveSegmentLinkHref,
                   resolveMentionLink,
                 }}
                 threadMentions={{
                   mentions: messageMentions,
                   preserveSoftBreaks: true,
-                  resolveLinkHref: resolveSegmentLinkHref,
                 }}
               />
             ) : (
@@ -640,7 +710,7 @@ export const GeneratedConversationMessage = memo(
               onOpenLocalFileLink={onOpenLocalFileLink}
               projectId={projectId}
             />
-            {requestLabel ? (
+            {bodyRequestLabel ? (
               <div className="mt-1 flex items-center justify-start gap-2">
                 <TurnRequestLabel turnRequest={turnRequest} />
               </div>
@@ -656,11 +726,10 @@ export const GeneratedConversationMessage = memo(
         messageMentions,
         onOpenLocalFileLink,
         projectId,
-        resolveSegmentLinkHref,
         resolveMentionLink,
         sourceKind,
         suppressGeneratedAgentImages,
-        requestLabel,
+        bodyRequestLabel,
         turnRequest,
       ],
     );
@@ -672,7 +741,6 @@ export const GeneratedConversationMessage = memo(
         collapsedPreview={collapsedPreview}
         expandable={expandable}
         leadingIcon={leadingIcon}
-        resolveSegmentLinkHref={resolveSegmentLinkHref}
         onTitleAction={onTitleAction}
         renderBody={renderBody}
       />

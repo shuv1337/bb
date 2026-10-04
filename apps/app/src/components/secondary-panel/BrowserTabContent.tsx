@@ -14,6 +14,7 @@ import type {
   BbDesktopBrowserControl,
   BbDesktopBrowserFindInPageRequest,
   BbDesktopBrowserState,
+  BbDesktopBrowserTarget,
   BbDesktopBrowserViewportBounds,
   BbDesktopBrowserViewBounds,
 } from "@bb/desktop-contract";
@@ -46,6 +47,7 @@ import {
 import { BrowserNewTabScreen } from "./BrowserNewTabScreen";
 import {
   registerBrowserView,
+  takeBrowserViewRecreation,
   type BrowserViewVisibilityCoordinator,
 } from "./browserViewVisibilityCoordinator";
 import { SECONDARY_PANEL_TOP_CHROME_BACKGROUND_CLASS } from "./panelChromeClasses";
@@ -60,7 +62,7 @@ import { PluginBrowserToolbarActions } from "@/components/plugin/PluginBrowserTo
 
 interface BrowserTabContentProps {
   tabId: string;
-  existingOnly?: true;
+  desktopTarget?: BbDesktopBrowserTarget;
   initialUrl: string;
   addressFocusRequest: BrowserAddressFocusRequest | null;
   onAddressFocusRequestConsumed?: (request: BrowserAddressFocusRequest) => void;
@@ -200,8 +202,6 @@ function BrowserChrome({
   const addressValue = isEditing ? addressDraft : currentUrl;
   return (
     <div
-      data-testid="browser-tab-nav-bar"
-      data-state="expanded"
       role="region"
       aria-label="Browser navigation"
       tabIndex={-1}
@@ -211,7 +211,6 @@ function BrowserChrome({
       )}
     >
       <div
-        data-testid="browser-tab-nav-controls"
         className={cn(
           "absolute inset-x-0 top-0 flex h-11 translate-y-0 items-center gap-1 py-1.5 pl-2 pr-4 opacity-100 max-md:pointer-coarse:h-[52px]",
         )}
@@ -383,7 +382,7 @@ function BrowserPageLoadError({
 
 export function BrowserTabContent({
   tabId,
-  existingOnly,
+  desktopTarget,
   initialUrl,
   addressFocusRequest,
   onAddressFocusRequestConsumed,
@@ -539,10 +538,13 @@ export function BrowserTabContent({
     const initialBounds = syncInitialBounds();
     const mountUrl = initialUrlRef.current;
     registerBrowserView({ environmentId, tabId, threadId });
+    const existingOnly =
+      desktopTarget !== undefined &&
+      !takeBrowserViewRecreation(tabId, desktopTarget);
     desktopBrowser.attach({
       tabId,
       threadId,
-      ...(existingOnly === true ? { existingOnly } : {}),
+      ...(existingOnly ? { existingOnly: true } : {}),
       url: mountUrl,
       bounds: initialBounds,
       visible: false,
@@ -610,7 +612,7 @@ export function BrowserTabContent({
     visibilityCoordinator,
     tabId,
     threadId,
-    existingOnly,
+    desktopTarget,
   ]);
 
   useEffect(() => {

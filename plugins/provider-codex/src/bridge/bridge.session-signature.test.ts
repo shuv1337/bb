@@ -27,11 +27,12 @@ const autoDenySessionOptions = {
 let harness: ReturnType<typeof createBridgeJsonRpcTestHarness>;
 let workspaceDir: string;
 let requestLogPath: string;
+let scriptPath: string;
 
 beforeEach(() => {
   workspaceDir = mkdtempSync(join(tmpdir(), "bb-codex-signature-ws-"));
   requestLogPath = join(workspaceDir, "requests.jsonl");
-  const scriptPath = join(workspaceDir, "script.json");
+  scriptPath = join(workspaceDir, "script.json");
   writeFileSync(scriptPath, JSON.stringify({ requestLogPath }));
   stubFakeCodexAppServer(scriptPath);
   harness = createBridgeJsonRpcTestHarness(handleLine);
@@ -173,3 +174,51 @@ it.each(["start", "resume", "fork"] as const)(
   },
   30_000,
 );
+
+it.each([
+  { before: FULL_ACCESS_SESSION_OPTIONS, after: autoAskSessionOptions, sandbox: "workspaceWrite", beforeResponse: false },
+  { before: FULL_ACCESS_SESSION_OPTIONS, after: autoAskSessionOptions, sandbox: "workspaceWrite", beforeResponse: true },
+  { before: autoAskSessionOptions, after: FULL_ACCESS_SESSION_OPTIONS, sandbox: "dangerFullAccess", beforeResponse: false },
+])("applies $sandbox before steering (start response pending: $beforeResponse)", async ({ before, after, sandbox, beforeResponse }) => {
+  writeFileSync(scriptPath, JSON.stringify({ requestLogPath, startResponseDelayMs: beforeResponse ? 2000 : 0 }));
+  harness.sendRequest(1, "thread/start", {
+    threadId: THREAD_ID,
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: before,
+  });
+  const started = await harness.waitForResponse(1);
+  const { providerThreadId } = z.object({ providerThreadId: z.string() }).parse(started.result);
+  harness.sendRequest(2, "turn/start", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    clientRequestId: "creq_permstart2",
+    input: [{ type: "text", text: "/wait-for-interrupt", mentions: [] }],
+    options: before,
+  });
+  if (beforeResponse) {
+    await vi.waitFor(() => expect(harness.messages).toContainEqual(expect.objectContaining({
+      method: "thread/delta",
+      params: expect.objectContaining({ deltas: expect.arrayContaining([expect.objectContaining({ kind: "turn.open" })]) }),
+    })));
+    expect(harness.messages.some((message) => message.id === 2)).toBe(false);
+  } else {
+    expect((await harness.waitForResponse(2)).error).toBeUndefined();
+  }
+  harness.sendRequest(3, "turn/steer", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    expectedTurnId: "turn-fx-1",
+    clientRequestId: "creq_permsteer2",
+    input: [{ type: "text", text: "Continue with the new permissions", mentions: [] }],
+    options: after,
+  });
+  expect((await harness.waitForResponse(3)).error).toBeUndefined();
+  const requests = recordedRequests();
+  expect(requests.filter((entry) => entry.method === "turn/steer")).toEqual([]);
+  expect(requests.filter((entry) => entry.method === "turn/interrupt")).toHaveLength(1);
+  expect(requests.filter((entry) => entry.method === "turn/start").at(-1)?.params).toMatchObject({
+    threadId: providerThreadId,
+    sandboxPolicy: { type: sandbox },
+  });
+}, 30_000);

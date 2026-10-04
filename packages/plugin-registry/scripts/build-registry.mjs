@@ -45,8 +45,8 @@ function resolveLocal(specifier, importerRel) {
   if (specifier.startsWith("@/")) {
     base = specifier.slice(2);
   } else if (specifier.startsWith(".")) {
-    base = path.normalize(
-      path.join(path.dirname(importerRel), specifier),
+    base = path.posix.normalize(
+      path.posix.join(path.posix.dirname(importerRel), specifier),
     );
   } else {
     return null;
@@ -85,9 +85,7 @@ function importSpecifiersOf(content) {
 /** npm package name of a bare specifier ("@scope/pkg/sub" → "@scope/pkg"). */
 function npmPackageOf(specifier) {
   const parts = specifier.split("/");
-  return specifier.startsWith("@")
-    ? parts.slice(0, 2).join("/")
-    : parts[0];
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
 }
 
 /**
@@ -99,10 +97,18 @@ const RUNTIME_PROVIDED = new Set(["react", "react-dom", "@get-bb/plugin-sdk"]);
 /** Item name from an app-src-relative file path. */
 function itemNameFor(relPath) {
   const base = path.basename(relPath).replace(/\.(tsx?|jsx?)$/, "");
+  const componentGroup = componentGroupOf(relPath);
   // camelCase hooks (useBrowserDimmingModal) → kebab-case item names.
-  return base
+  return [...componentGroup, base]
+    .join("-")
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
     .toLowerCase();
+}
+
+function componentGroupOf(relPath) {
+  if (!relPath.startsWith("components/ui/")) return [];
+  const segments = path.posix.dirname(relPath).split("/").slice(2);
+  return segments[0] === "hooks" ? [] : segments;
 }
 
 /** shadcn item type + install target for an app-src-relative path. */
@@ -112,7 +118,7 @@ function classify(relPath) {
     return { type: "registry:hook", target: `components/ui/hooks/${base}` };
   }
   if (relPath.startsWith("components/ui/")) {
-    return { type: "registry:ui", target: `components/ui/${base}` };
+    return { type: "registry:ui", target: relPath };
   }
   if (relPath.startsWith("lib/")) {
     return { type: "registry:lib", target: `lib/${base}` };
@@ -184,8 +190,7 @@ while (queue.length > 0) {
 const generatedFiles = new Map(); // filename → content string
 const indexEntries = [];
 for (const [itemName, relPath] of [...fileByItem.entries()].sort()) {
-  const { content, dependencies, registryDependencies } =
-    itemMeta.get(relPath);
+  const { content, dependencies, registryDependencies } = itemMeta.get(relPath);
   const { type, target } = classify(relPath);
   const item = {
     $schema: "https://ui.shadcn.com/schema/registry-item.json",
@@ -251,7 +256,9 @@ for (const [name, content] of generatedFiles) {
     : null;
   if (existing !== content) {
     stale = true;
-    staleReasons.push(existing === null ? `missing r/${name}` : `changed r/${name}`);
+    staleReasons.push(
+      existing === null ? `missing r/${name}` : `changed r/${name}`,
+    );
   }
 }
 
@@ -269,7 +276,9 @@ if (check) {
   for (const [name, content] of generatedFiles) {
     await writeFile(path.join(outDir, name), content);
   }
-  console.log(`wrote ${generatedFiles.size} files to r/ (${fileByItem.size} items)`);
+  console.log(
+    `wrote ${generatedFiles.size} files to r/ (${fileByItem.size} items)`,
+  );
 } else {
   console.log(`plugin registry up to date (${fileByItem.size} items)`);
 }

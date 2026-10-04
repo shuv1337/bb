@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -6,6 +7,7 @@ import {
   MARKETPLACE_V2_FIXTURE,
 } from "./marketplace-v2.fixture.js";
 import {
+  MarketplaceRenderTimeProvider,
   PublicMarketplaceAuthorPage,
   PublicMarketplaceDetailPage,
   PublicMarketplacePage,
@@ -31,7 +33,7 @@ describe("public marketplace route rendering", () => {
     expect(html).toContain("Featured");
     expect(html).toContain("Popular");
     expect(html).toContain("marketplace-shelf-notable");
-    expect(html).toContain("marketplace-new-chip");
+    expect(html).not.toContain("marketplace-new-chip");
     expect(html).toContain("https://github.com/get-bb.png?size=32");
     expect(html).toContain("https://getbb.app/marketplace/v1/icons");
     expect(html).toContain('aria-label="Category: All categories"');
@@ -45,7 +47,6 @@ describe("public marketplace route rendering", () => {
     expect(html).toContain(
       '<span>More plugins</span><span class="marketplace-count">1</span>',
     );
-    expect(html).not.toContain("marketplace-category-pill");
     expect(html).not.toContain("marketplace-category-filters");
     expect(html).toContain("mask-image");
     expect(html).toContain("marketplace-svg-icon");
@@ -82,7 +83,6 @@ describe("public marketplace route rendering", () => {
     expect(html).toContain(
       '<span class="marketplace-card-category">Code &amp; Reviews</span>',
     );
-    expect(html).not.toContain("marketplace-category-pill");
     expect(html).toContain("Review Companion");
     expect(html).not.toContain("Prompt Library");
     expect(html).not.toContain("New &amp; notable");
@@ -244,6 +244,40 @@ describe("public marketplace route rendering", () => {
     expect(html).toContain("Featured");
     expect(html).toContain("Popular");
     expect(html).toContain("Review Companion");
+  });
+
+  it("badges new plugins from the route render time on cards only", () => {
+    const entry = MARKETPLACE_V2_FIXTURE.plugins.find(
+      (candidate) => candidate.id === "review-companion",
+    )!;
+    const render = (renderedAt: string, node: ReactNode) =>
+      renderToStaticMarkup(
+        <MarketplaceRenderTimeProvider renderedAt={Date.parse(renderedAt)}>
+          {node}
+        </MarketplaceRenderTimeProvider>,
+      );
+    const page = (
+      <PublicMarketplacePage
+        manifest={MARKETPLACE_V2_FIXTURE}
+        stats={MARKETPLACE_STATS_FIXTURE}
+        state={{ category: "code-and-reviews" }}
+        onStateChange={() => {}}
+      />
+    );
+    expect(render("2026-08-25T00:00:00Z", page)).toContain(
+      'marketplace-card-installs is-new">New',
+    );
+    expect(render("2026-10-25T00:00:00Z", page)).not.toContain("is-new");
+    expect(
+      render(
+        "2026-08-25T00:00:00Z",
+        <PublicMarketplaceDetailPage
+          manifest={MARKETPLACE_V2_FIXTURE}
+          entry={entry}
+          stats={MARKETPLACE_STATS_FIXTURE}
+        />,
+      ),
+    ).not.toContain("marketplace-detail-installs");
   });
 
   it("renders the unavailable route", () => {

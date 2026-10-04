@@ -23,11 +23,6 @@
       "types": "./src/host-daemon-entrypoint.ts",
       "default": "./src/host-daemon-entrypoint.ts"
     },
-    "./inference-model": {
-      "source": "./src/inference-model.ts",
-      "types": "./src/inference-model.ts",
-      "default": "./src/inference-model.ts"
-    },
     "./log-level": {
       "source": "./src/log-level.ts",
       "types": "./src/log-level.ts",
@@ -146,13 +141,15 @@
   },
   "scripts": {
     "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "lint": "oxlint src",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@bb/domain": "workspace:*",
+    "@bb/process-utils": "workspace:*",
     "fs-native-extensions": "1.5.0",
-    "zod": "4.3.6"
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@bb/tsconfig": "workspace:*",

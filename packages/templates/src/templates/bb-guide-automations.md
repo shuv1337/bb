@@ -13,9 +13,14 @@ bb automation show <automationId> --project <id>
 bb automation create --project <id> --name <name> <schedule> <execution>
 bb automation update <automationId> --project <id> [changes]
 bb automation pause|resume <automationId> --project <id>
-bb automation run <automationId> --project <id>
+bb automation run <automationId> --project <id> [--retry-run <runId>]
 bb automation runs <automationId> --project <id> [--limit <count>]
 bb automation delete <automationId> --project <id> --yes
+
+Agent runs use hidden turn input and an Automations timeline marker. View prompt
+shows the recorded prompt. Retry (or --retry-run) repeats a failed or stopped
+run in its thread using that recorded execution; an unrelated running run must
+finish first. Legacy Automation chips retain their existing display.
 
 Schedules:
 
@@ -27,7 +32,7 @@ Agent execution:
 
 --prompt <text> --provider <id> --model <model>
 [--reasoning <none|low|medium|high|xhigh|ultracode|max|ultra>]
-[--service-tier <default|fast>]
+[--service-tier <tier>]
 [--permission-mode <accept-edits|auto|full>]
 [--environment <environment-id|path> | --new-environment worktree]
 [--base-branch <branch>] [--target-thread <thread-id>]
@@ -60,8 +65,9 @@ exit code and sanitized first non-empty stderr line in the `Detail` column.
 replacement supplies `--prompt`, `--provider`, and `--model`; a script
 replacement supplies a complete script source. Partial updates to an existing
 agent preserve omitted fields and accept `--prompt`, `--provider`, `--model`,
-`--reasoning`, `--service-tier default|fast|none`, `--permission-mode`, or one
-target option. `--working-directory` alone changes only an existing script's
+`--reasoning`, `--service-tier <tier>`, `--clear-service-tier`, `--permission-mode`, or one
+target option. `--clear-service-tier` and `--service-tier` cannot be combined;
+`none` is a literal tier id. `--working-directory` alone changes only an existing script's
 directory policy; a script replacement preserves it when the flag is omitted.
 Pass provider, model, reasoning, service tier, and permission together when
 switching providers.

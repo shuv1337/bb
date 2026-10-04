@@ -2,7 +2,6 @@ import { useCallback } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Thread } from "@bb/domain";
 import type {
-  ReorderPinnedThreadRequest,
   ThreadArchiveAllResponse,
   ThreadResponse,
   UpdateThreadRequest,
@@ -10,8 +9,6 @@ import type {
 import { sdk } from "@/lib/sdk";
 import type { LifecycleErrorOperation } from "@/lib/lifecycle-errors";
 import {
-  applyReorderPinnedThreadResult,
-  applyThreadMetadataBatchResult,
   applyThreadPinStateResult,
   applyThreadReadStateResult,
   applyThreadUpdateResult,
@@ -20,17 +17,12 @@ import {
   beginPinThreadTransaction,
   beginThreadReadStateTransaction,
   beginThreadMetadataTransaction,
-  beginThreadMetadataBatchTransaction,
-  beginReorderPinnedThreadTransaction,
   beginUnarchiveThreadTransaction,
   beginUnpinAndMoveThreadTransaction,
   beginUnpinThreadTransaction,
-  invalidateThreadMetadataBatch,
   rollbackArchiveThreadsTransaction,
   rollbackDeleteThreadTransaction,
-  rollbackReorderPinnedThreadTransaction,
   rollbackThreadListMutationTransaction,
-  rollbackThreadMetadataBatchTransaction,
   rollbackThreadReadStateTransaction,
   type ThreadReadStateTransaction,
   settleArchiveThreadsTransaction,
@@ -39,10 +31,7 @@ import {
   settleThreadReadStateTransaction,
   type ArchiveThreadsTransaction,
   type DeleteThreadTransaction,
-  type PinnedThreadOrderTransaction,
   type ThreadListMutationTransaction,
-  type ThreadMetadataBatchTransaction,
-  type ThreadMetadataUpdate,
 } from "../cache-owners/thread-state-cache-owner";
 
 interface ThreadMutationRequest {
@@ -50,8 +39,6 @@ interface ThreadMutationRequest {
 }
 
 type UpdateThreadMutationRequest = ThreadMutationRequest & UpdateThreadRequest;
-type ReorderPinnedThreadMutationRequest = ThreadMutationRequest &
-  ReorderPinnedThreadRequest;
 type UnpinAndMoveThreadMutationRequest = ThreadMutationRequest & {
   sectionId: string | null;
 };
@@ -69,6 +56,13 @@ interface UpdateThreadMutationOptions {
 
 interface ArchiveThreadAndChildrenMutationRequest {
   id: string;
+  childThreadsConfirmed: boolean;
+}
+
+export class ArchiveThreadConfirmationRequired extends Error {
+  constructor(readonly childThreadCount: number) {
+    super("Archiving child threads requires confirmation");
+  }
 }
 
 interface DeleteThreadMutationRequest {
@@ -130,60 +124,6 @@ export function useUpdateThread(options?: UpdateThreadMutationOptions) {
     },
     onSuccess: (thread) => {
       applyThreadUpdateResult({ queryClient, thread });
-    },
-  });
-}
-
-export function useUpdateThreads(options?: UpdateThreadMutationOptions) {
-  const queryClient = useQueryClient();
-
-  return useMutation<
-    ThreadResponse[],
-    Error,
-    readonly ThreadMetadataUpdate[],
-    ThreadMetadataBatchTransaction | undefined
-  >({
-    meta: {
-      errorMessage: options?.errorMessage ?? "Failed to update threads.",
-      showErrorToast: options?.showErrorToast ?? true,
-      ...(options?.lifecycleOperation
-        ? { lifecycleOperation: options.lifecycleOperation }
-        : {}),
-    },
-    mutationFn: async (updates) => {
-      const results = await Promise.allSettled(
-        updates.map(({ threadId, ...request }) =>
-          sdk.threads.update({ threadId, ...request }),
-        ),
-      );
-      const failures = results.filter(
-        (result): result is PromiseRejectedResult =>
-          result.status === "rejected",
-      );
-      if (failures.length > 0) {
-        throw new AggregateError(
-          failures.map((failure) => failure.reason),
-          "Failed to update threads.",
-        );
-      }
-      return results.map((result) => {
-        if (result.status === "rejected") throw result.reason;
-        return result.value;
-      });
-    },
-    onMutate: (updates) =>
-      updates.length === 0
-        ? undefined
-        : beginThreadMetadataBatchTransaction({ queryClient, updates }),
-    onError: (_error, updates, transaction) => {
-      rollbackThreadMetadataBatchTransaction({ queryClient, transaction });
-      invalidateThreadMetadataBatch({
-        queryClient,
-        threadIds: updates.map((update) => update.threadId),
-      });
-    },
-    onSuccess: (threads) => {
-      applyThreadMetadataBatchResult({ queryClient, threads });
     },
   });
 }
@@ -314,38 +254,6 @@ export function useMoveThreadToSection() {
   );
 }
 
-export function useReorderPinnedThread() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    meta: {
-      errorMessage: "Failed to reorder pinned threads.",
-      showErrorToast: false,
-    },
-    mutationFn: ({
-      id,
-      previousThreadId,
-      nextThreadId,
-    }: ReorderPinnedThreadMutationRequest) =>
-      sdk.threads.reorderPinned({
-        threadId: id,
-        previousThreadId,
-        nextThreadId,
-      }),
-    onMutate: async (request): Promise<PinnedThreadOrderTransaction> =>
-      beginReorderPinnedThreadTransaction({ queryClient, request }),
-    onError: (_error, _variables, context) => {
-      rollbackReorderPinnedThreadTransaction({
-        queryClient,
-        transaction: context,
-      });
-    },
-    onSuccess: (orderedRoots) => {
-      applyReorderPinnedThreadResult({ orderedRoots, queryClient });
-    },
-  });
-}
-
 export function useArchiveThreadAndChildren() {
   const queryClient = useQueryClient();
 
@@ -355,10 +263,20 @@ export function useArchiveThreadAndChildren() {
       lifecycleOperation: "archive_thread",
       showErrorToast: false,
     },
-    mutationFn: ({
+    mutationFn: async ({
       id,
-    }: ArchiveThreadAndChildrenMutationRequest): Promise<ThreadArchiveAllResponse> =>
-      sdk.threads.archiveAll({ threadId: id }),
+      childThreadsConfirmed,
+    }: ArchiveThreadAndChildrenMutationRequest): Promise<ThreadArchiveAllResponse> => {
+      if (!childThreadsConfirmed) {
+        const summary = await sdk.threads.childSummary({ threadId: id });
+        if (summary.unarchivedDescendantCount > 0) {
+          throw new ArchiveThreadConfirmationRequired(
+            summary.unarchivedDescendantCount,
+          );
+        }
+      }
+      return sdk.threads.archiveAll({ threadId: id });
+    },
     onMutate: async ({ id }): Promise<ArchiveThreadsTransaction> =>
       beginArchiveThreadAndChildrenTransaction({
         queryClient,
@@ -402,6 +320,21 @@ export function useUnarchiveThread() {
         queryClient,
         threadId: variables.id,
       });
+    },
+  });
+}
+
+export function useRestoreThreadEnvironment() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    meta: {
+      errorMessage: "Failed to restore workspace.",
+    },
+    mutationFn: ({ id }: ThreadMutationRequest): Promise<ThreadResponse> =>
+      sdk.threads.restoreEnvironment({ threadId: id }),
+    onSuccess: (thread) => {
+      applyThreadUpdateResult({ queryClient, thread });
     },
   });
 }

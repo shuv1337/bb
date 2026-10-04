@@ -1,3 +1,4 @@
+import type { PluginTimelineEventSeed } from "@bb/domain";
 import {
   getEnvironment,
   getThread,
@@ -77,6 +78,7 @@ import {
   type PromptWithGroups,
 } from "./deferred-first-turn-context.js";
 import type { TelemetryEvent } from "../system/telemetry.js";
+import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 
 type SendThreadMessageMode = SendMessageRequest["mode"];
 type TextPromptInput = Extract<PromptInput, { type: "text" }>;
@@ -143,6 +145,7 @@ interface SendThreadMessageQueueRequest {
 }
 
 interface AppendAndQueueSendThreadMessageArgs {
+  experimental_timelineEvent?: PluginTimelineEventSeed;
   /** Retry provenance; absent for an original dispatch. */
   retryOf?: TurnRequestRetryMarker;
   beforeAppendInTransaction?: SendThreadMessageTransactionPreflight;
@@ -168,7 +171,9 @@ export function ensureThreadIsNotAwaitingUserInteraction(
   deps: Pick<AppDeps, "pendingInteractions">,
   threadId: string,
 ): void {
-  if (!deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(threadId)) {
+  if (
+    !deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(threadId)
+  ) {
     return;
   }
 
@@ -394,6 +399,7 @@ export function captureUserMessageSentTelemetry(
 }
 
 function appendAndQueueSendThreadMessageInTransaction({
+  experimental_timelineEvent,
   retryOf,
   beforeAppendInTransaction,
   db,
@@ -411,6 +417,7 @@ function appendAndQueueSendThreadMessageInTransaction({
   let activeThread: Thread | null = null;
   const request = db.transaction(
     (tx) => {
+      assertThreadHostAcceptsWork(tx, thread);
       beforeAppendInTransaction?.({ tx });
       const appended =
         appendPreparedClientTurnRequestedEventWithNotificationInTransaction(
@@ -419,6 +426,7 @@ function appendAndQueueSendThreadMessageInTransaction({
             threadId: thread.id,
             environmentId,
             type: "client/turn/requested",
+            experimental_timelineEvent,
             ...(retryOf !== undefined ? { retryOf } : {}),
             input,
             ...(inputGroups !== undefined ? { inputGroups } : {}),
@@ -586,6 +594,7 @@ async function sendThreadMessageWithoutContextClear(
 
   if (
     await dispatchTurnDuringReprovision({
+      experimental_timelineEvent: payload.experimental_timelineEvent,
       beforeRequestAppendInTransaction: beforeAppendInTransaction,
       deps,
       environment,
@@ -662,6 +671,7 @@ async function sendThreadMessageWithoutContextClear(
         }
       : await prepareReadyThreadTurnCommand(deps, commandArgs);
     const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
+      experimental_timelineEvent: args.payload.experimental_timelineEvent,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
       beforeAppendInTransaction: ({ tx }) => {
         beforeAppendInTransaction({ tx });
@@ -758,6 +768,7 @@ async function sendThreadMessageWithoutContextClear(
     requestId,
   });
   const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
+    experimental_timelineEvent: args.payload.experimental_timelineEvent,
     ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
     beforeAppendInTransaction,
     db: deps.db,

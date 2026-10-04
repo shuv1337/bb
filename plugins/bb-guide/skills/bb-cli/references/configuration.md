@@ -25,6 +25,12 @@
 - Read `references/app-settings.md` for every general key, experiment, default,
   and effect.
 - Use `bb settings show` and `bb settings ai-services` for current values.
+- Use `bb settings ai-services set <thread-title|commit-message|voice>
+<automatic|off|service-id>` to choose which plugin AI service writes titles,
+  commit messages, or voice transcripts, and `bb settings ai-services test
+<thread-title|commit-message>` to try the current choice. Add
+  `--plugin <plugin-id>` to `set` when two plugins register the same service
+  id.
 - Use `bb settings general <key> <value>` or
   `bb settings experiment <key> <value>` for updates.
 - Use `bb settings keyboard list`, `set`, and `reset` for shortcut overrides.
@@ -33,6 +39,15 @@
 - Use `bb settings version [--force]` for release information.
 - Use `bb settings reload` to reload BB-managed configuration.
 - These commands support `--json`.
+
+BB accepts request hosts that are `localhost`, IP addresses (including LAN and
+Tailscale IPs), or the hostname in `BB_APP_URL`. For a custom DNS name or reverse
+proxy, set `npx bb-app config set BB_APP_URL https://bb.example.com` before
+connecting, including from the CLI or SDK. A matching `Host` and `Origin`, or
+`X-Forwarded-Host`, cannot authorize an unconfigured DNS name. A proxy can
+preserve the configured host or forward to localhost. BB Connect rewrites
+requests to the local server address and needs no additional configuration.
+`BB_SERVER_BIND_HOST=0.0.0.0` remains supported for direct remote access.
 
 ## Agent Instructions
 
@@ -177,7 +192,7 @@ move through search, enabled actions, and recent items in displayed order.
 Search results replace actions and recents while searching. Enter activates
 the focused item.
 Chat splits use `pane.focus.left` / `right` / `up` / `down` with
-`Command+Shift+ArrowLeft` / `ArrowRight` / `ArrowUp` / `ArrowDown` on macOS. These move
+`Command+Control+Shift+ArrowLeft` / `ArrowRight` / `ArrowUp` / `ArrowDown` on macOS. These move
 spatially to the adjacent chat pane, including stacked splits, and stop at the
 layout edge. The initially unassigned `pane.focus.previous` / `pane.focus.next`
 commands still cycle in reading order. On Windows/Linux, these arrow navigation
@@ -185,6 +200,17 @@ commands start unassigned to preserve native Control-arrow editing shortcuts.
 Rebind any of these commands in Settings → Keyboard, via
 `bb settings keyboard set <command> <shortcut|disabled>`, or SDK
 `system.updateKeyboardSettings`; read bindings with `system.config`.
+Use `bb settings keyboard reset <command>` to adopt the current default.
+Overrides can specify `platform: "mac"`, `"windows"`, or `"linux"`; omission applies
+on all platforms. A platform-specific override takes precedence over a general one,
+including when disabled. UI edits and clears apply only to the current platform;
+UI resets remove overrides for the current platform so web and desktop each use
+their own defaults. Shared overrides become explicit bindings on the other platforms
+to preserve their behavior. Explicit overrides remain resettable even when they match
+a default shortcut.
+CLI `set` and `reset` accept `--platform mac|windows|linux`; scoped operations retain
+other platforms. Unscoped `set` updates the general override; unscoped `reset`
+clears all scopes for the selected command (or every command if omitted).
 
 Plugin commands use `plugin:<plugin-id>/<command-id>` as their stable binding
 ID. For example: `bb settings keyboard set plugin:example/open-issue Mod+Shift+I`.

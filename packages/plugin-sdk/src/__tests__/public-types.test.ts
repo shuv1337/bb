@@ -41,9 +41,11 @@ const EXPECTED_BACKEND_ROOT_TYPE_EXPORTS = [
   "MessageDispatchHookContext",
   "MessageDispatchHookDecision",
   "PluginAgents",
+  "PluginAiCompleteOptions",
   "PluginAiServiceDeclaration",
-  "PluginAiServiceKind",
+  "PluginAiServiceStatus",
   "PluginAiServices",
+  "PluginAiTranscribeOptions",
   "PluginAgentConfiguration",
   "PluginAgentConfigurationContext",
   "PluginAgentToolContentPart",
@@ -145,6 +147,9 @@ const EXPECTED_BACKEND_ROOT_VALUE_EXPORTS = [
 ] as const;
 
 const EXPECTED_RPC_ROOT_TYPE_EXPORTS = [
+  "ExperimentalPluginRpcCaller",
+  "ExperimentalPluginRpcHandlerContext",
+  "ExperimentalPluginRpcHandlersWithContext",
   "PluginRpcCallArgs",
   "PluginRpcContract",
   "PluginRpcError",

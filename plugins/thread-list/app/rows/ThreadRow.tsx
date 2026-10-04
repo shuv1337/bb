@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useAtomValue } from "jotai";
 import { Icon } from "@/components/ui/icon";
 import {
   Tooltip,
@@ -33,6 +34,8 @@ import {
 import {
   experimental_useSidebarThreadActions,
   experimental_useSidebarThreadSplit,
+  experimental_useProviders,
+  experimental_ProviderIcon as ProviderIcon,
   ThreadTitle,
   useSidebarSplitLayout,
   useSidebarThreadDraft,
@@ -42,7 +45,15 @@ import {
   type PluginSidebarThreadRowStatus,
 } from "@get-bb/plugin-sdk/app";
 import type { SidebarThread } from "../model/sidebar-thread.js";
+import {
+  NO_THREAD_IDS,
+  useThreadsHaveDraft,
+} from "../list/sidebarDraftPresence.js";
 import { useSidebarProjectName } from "../model/use-sidebar-data.js";
+import {
+  sidebarShowProviderIconsAtom,
+  threadRowActionsAtom,
+} from "../preferences/atoms.js";
 import { AppCommandShortcutPill } from "../ui/AppCommandShortcutPill.js";
 import { SidebarStickyTier } from "../ui/sidebar.js";
 import {
@@ -72,12 +83,17 @@ import type {
   ThreadRowNestDrop,
 } from "./sidebarThreadRowDroppable.js";
 import type { SidebarSortableDragBindings } from "./sortableMotion.js";
+import { SidebarThreadDragChip } from "../dnd/sidebarThreadDragChip.js";
 import { SplitPaneMiniMap } from "./SplitPaneMiniMap.js";
 import {
   ThreadActionsContextMenu,
   ThreadActionsMenu,
   ThreadArchiveQuickAction,
+  canMoveThreadToSection,
+  ThreadRowQuickActions,
+  visibleThreadRowActions,
 } from "./ThreadActionsMenu.js";
+import { useThreadSectionMove } from "./ThreadSectionMoveProvider.js";
 import {
   ThreadStatusGlyph,
   resolveThreadStatus,
@@ -125,7 +141,6 @@ export type ThreadRowOptions =
     });
 
 interface ThreadRowProps {
-  projectId: string;
   thread: SidebarThread;
   crossProjectId: string | null;
   isActive: boolean;
@@ -163,6 +178,12 @@ export const REORDER_PLACEMENT_CLASS: Record<SidebarReorderPlacement, string> =
     after:
       "after:pointer-events-none after:absolute after:inset-x-1 after:-bottom-px after:h-0.5 after:rounded-full after:bg-sidebar-ring after:content-['']",
   };
+
+function getHoverActionsInsetStyle(actionCount: number): CSSProperties {
+  return {
+    "--bb-sidebar-hover-actions-inset": `calc(var(--spacing) * ${7.5 * actionCount})`,
+  } as CSSProperties;
+}
 
 function getThreadRowStyle(depth: number): CSSProperties {
   return {
@@ -224,9 +245,10 @@ export function CollapsedThreadStatusGlyph({
   activity,
   pluginStatus = null,
 }: CollapsedThreadStatusGlyphProps) {
+  const hasUnsubmittedDraft = useThreadsHaveDraft(activity.threadIds);
   const statusProps: ThreadListIndicatorState = {
     hasPendingInteraction: activity.pending,
-    hasUnsubmittedDraft: activity.hasUnsubmittedDraft,
+    hasUnsubmittedDraft,
     hasUnreadError: activity.unreadError,
     hasUnreadSuccess: activity.unread,
     isBackgroundAgentActive: activity.backgroundAgent,
@@ -302,7 +324,6 @@ function useThreadSplitMiniMap(
 }
 
 function ThreadRowComponent({
-  projectId,
   thread,
   crossProjectId,
   isActive,
@@ -312,6 +333,11 @@ function ThreadRowComponent({
   const [isDropdownActionsOpen, setIsDropdownActionsOpen] = useState(false);
   const [isContextActionsOpen, setIsContextActionsOpen] = useState(false);
   const actions = experimental_useSidebarThreadActions();
+  const showProviderIcons = useAtomValue(sidebarShowProviderIconsAtom);
+  const { providers } = experimental_useProviders();
+  const provider = showProviderIcons
+    ? providers.find((candidate) => candidate.id === thread.providerId)
+    : undefined;
   const shortcut = useSidebarThreadShortcut(thread.id);
   const pluginThreadRowStatus = useSidebarThreadRowStatus(thread.id);
   const { hasUnsubmittedDraft: hasComposerDraft } = useSidebarThreadDraft(
@@ -358,6 +384,14 @@ function ThreadRowComponent({
   const openInSplit = useCallback(() => {
     actions.open(thread.id, { split: true });
   }, [actions, thread.id]);
+  const sectionMove = useThreadSectionMove();
+  const rowActionIds = visibleThreadRowActions(
+    useAtomValue(threadRowActionsAtom),
+    {
+      split: splitAvailable,
+      move: canMoveThreadToSection(sectionMove, thread),
+    },
+  );
   const parentOptions = options.kind === "parent" ? options : null;
   const isParentRow = parentOptions !== null;
   const isParentCollapsed = parentOptions?.isCollapsed ?? false;
@@ -365,14 +399,18 @@ function ThreadRowComponent({
   const childActivity =
     parentOptions?.childActivity ?? NO_COLLAPSED_CHILD_ACTIVITY;
   const hasChildren = childCount > 0;
+  const reserveActionSpace =
+    crossProjectLabel !== null || (isParentRow && hasChildren);
   const hasHiddenChildren = isParentRow && isParentCollapsed && hasChildren;
+  const hiddenChildrenHaveDraft = useThreadsHaveDraft(
+    hasHiddenChildren ? childActivity.threadIds : NO_THREAD_IDS,
+  );
   const trailingIndicatorState: ThreadListIndicatorState = {
     hasPendingInteraction:
       threadStatus.hasPendingInteraction ||
       (hasHiddenChildren && childActivity.pending),
     hasUnsubmittedDraft:
-      threadStatus.hasUnsubmittedDraft ||
-      (hasHiddenChildren && childActivity.hasUnsubmittedDraft),
+      threadStatus.hasUnsubmittedDraft || hiddenChildrenHaveDraft,
     hasUnreadError:
       threadStatus.hasUnreadError ||
       (hasHiddenChildren && childActivity.unreadError),
@@ -420,6 +458,7 @@ function ThreadRowComponent({
     rowDragBindings?.setActivatorNodeRef,
     options.nestDrop?.setNodeRef,
   );
+  const isActionsOpen = isDropdownActionsOpen || isContextActionsOpen;
   const rowClassName = cn(
     SIDEBAR_HOVER_ACTIONS_ROW_CLASS,
     "group/thread-row cursor-pointer",
@@ -436,13 +475,13 @@ function ThreadRowComponent({
     !showActive &&
       "has-[[data-state=open]]:bg-sidebar-accent has-[[data-sidebar-rename-anchor]:focus-visible]:bg-sidebar-accent",
     rowDragBindings && !rowDragBindings.disabled && "select-none",
+    !isActionsOpen && "data-[sidebar-touch-armed=true]:!bg-transparent",
     nestTargetState && NEST_TARGET_STATE_CLASS[nestTargetState],
     reorderPlacement && REORDER_PLACEMENT_CLASS[reorderPlacement],
   );
   const rowStyle = getThreadRowStyle(options.depth);
   const parentGuideLeft =
     options.depth > 0 ? getSidebarThreadGroupLineLeft(options.depth - 1) : null;
-  const isActionsOpen = isDropdownActionsOpen || isContextActionsOpen;
   const handleRowClickCapture = useCallback<ThreadRowClickCaptureHandler>(
     (event) => {
       if (!options.consumeClickSuppression?.()) {
@@ -475,55 +514,25 @@ function ThreadRowComponent({
           style={{ left: parentGuideLeft }}
         />
       ) : null}
-      {crossProjectLabel !== null ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span
-              data-sidebar-thread-cross-project=""
-              role="img"
-              aria-label={crossProjectLabel}
-              className={cn(
-                "z-[31] flex size-5 shrink-0 items-center justify-center rounded-sm bg-sidebar text-muted-foreground",
-                parentGuideLeft === null
-                  ? "relative"
-                  : "absolute top-1/2 -translate-x-1/2 -translate-y-1/2",
-                !showActive && "group-hover/thread-row:bg-sidebar-accent",
-                !showActive && isActionsOpen && "bg-sidebar-accent",
-                !showActive &&
-                  isOpenInSplit &&
-                  SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
-              )}
-              style={{
-                left: parentGuideLeft ?? undefined,
-                backgroundImage: showActive
-                  ? "linear-gradient(var(--state-active), var(--state-active))"
-                  : undefined,
-              }}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                rowLinkRef.current?.click();
-              }}
-            >
-              <Icon name="FolderExport" className="size-3.5" aria-hidden />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="top">{crossProjectLabel}</TooltipContent>
-        </Tooltip>
-      ) : null}
       <span
         className={cn(
           "relative flex min-w-0 flex-1 items-center gap-1.5 self-stretch",
+          !isActionsOpen &&
+            "group-data-[sidebar-touch-armed=true]/thread-row:hidden",
           !shortcut &&
             !isEditing &&
-            (parentOptions && hasChildren
-              ? "pr-7.5 max-md:pointer-coarse:pr-0"
+            (reserveActionSpace
+              ? "pr-(--bb-sidebar-hover-actions-inset) max-md:pointer-coarse:pr-0"
               : SIDEBAR_HOVER_ACTIONS_INSET_CLASS),
+        )}
+        style={getHoverActionsInsetStyle(
+          thread.archivedAt !== null ? 1 : rowActionIds.length,
         )}
       >
         <a
           ref={rowLinkRef}
           href={thread.href}
+          draggable={false}
           data-sidebar-thread-shortcut-target=""
           data-sidebar-thread-id={thread.id}
           data-sidebar-rename-anchor=""
@@ -554,16 +563,45 @@ function ThreadRowComponent({
         <span
           className={cn(
             "pointer-events-none relative flex min-w-0 items-center self-stretch",
-            (!parentOptions || !hasChildren || isEditing) && "flex-1",
+            ((crossProjectLabel === null && (!parentOptions || !hasChildren)) ||
+              isEditing) &&
+              "flex-1",
           )}
         >
+          {provider ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  data-sidebar-thread-provider={provider.id}
+                  role="img"
+                  aria-label={provider.displayName}
+                  className="pointer-events-auto relative z-[31] flex size-4 shrink-0 items-center justify-center mr-1.5 text-muted-foreground"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    rowLinkRef.current?.click();
+                  }}
+                >
+                  <ProviderIcon
+                    providerKind="agent"
+                    provider={provider}
+                    className="size-4"
+                  />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top">{provider.displayName}</TooltipContent>
+            </Tooltip>
+          ) : null}
           {isEditing ? (
             <span className="pointer-events-auto relative z-10 min-w-0 flex-1 overflow-visible">
               {editor}
             </span>
           ) : (
             <span
-              className="bb-thread-title"
+              className={cn(
+                "bb-thread-title",
+                crossProjectLabel !== null && "min-w-0 truncate",
+              )}
               title={labelTitle}
               onDoubleClick={startTitleEditing}
             >
@@ -571,6 +609,26 @@ function ThreadRowComponent({
             </span>
           )}
         </span>
+        {crossProjectLabel !== null ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                data-sidebar-thread-cross-project=""
+                role="img"
+                aria-label={crossProjectLabel}
+                className="relative z-[31] flex size-5 shrink-0 items-center justify-center text-muted-foreground"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  rowLinkRef.current?.click();
+                }}
+              >
+                <Icon name="FolderExport" className="size-3.5" aria-hidden />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">{crossProjectLabel}</TooltipContent>
+          </Tooltip>
+        ) : null}
         {parentOptions && hasChildren ? (
           <SidebarChildToggleChevron
             disabled={isEditing}
@@ -583,10 +641,19 @@ function ThreadRowComponent({
           />
         ) : null}
       </span>
+      {rowDragBindings && !rowDragBindings.disabled && !isActionsOpen ? (
+        <SidebarThreadDragChip
+          title={labelTitle}
+          visualOnly
+          className="hidden group-data-[sidebar-touch-armed=true]/thread-row:flex"
+        />
+      ) : null}
       <span
         data-sidebar-thread-trailing=""
         className={cn(
           "flex shrink-0 items-center gap-0.5",
+          !isActionsOpen &&
+            "group-data-[sidebar-touch-armed=true]/thread-row:hidden",
           isEditing && "hidden",
         )}
       >
@@ -672,9 +739,14 @@ function ThreadRowComponent({
               >
                 <SidebarRowControls
                   primaryAction={
-                    <ThreadArchiveQuickAction
+                    <ThreadRowQuickActions
+                      actionIds={rowActionIds}
+                      actions={actions}
                       thread={thread}
                       className={SIDEBAR_CONTROL_BUTTON_CLASS}
+                      onOpenInSplit={openInSplit}
+                      onRename={startEditing}
+                      onMenuOpenChange={setIsDropdownActionsOpen}
                     />
                   }
                 >
@@ -720,6 +792,7 @@ function ThreadRowComponent({
       onRename={rename.startEditingFromMenu}
       onCloseAutoFocus={rename.onCloseAutoFocus}
       disabled={isEditing}
+      dragging={rowDragBindings?.isDragging ?? false}
     >
       {row}
     </ThreadActionsContextMenu>

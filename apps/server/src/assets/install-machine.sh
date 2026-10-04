@@ -28,6 +28,8 @@ lifecycle_action=
 requested_data_dir=
 adopt=no
 adopted_identity=
+reconnect=no
+recorded_data_dir=
 
 CURL_CONNECT_TIMEOUT_SECONDS=10
 PACKAGE_DOWNLOAD_TIMEOUT_SECONDS=300
@@ -269,7 +271,7 @@ run_lifecycle() {
         systemctl "$systemd_scope" start "$service_name"
       fi
     elif ! owned_pid; then
-      BB_APP_NPM_PREFIX="$data_dir/npm" BB_DATA_DIR="$data_dir" nohup "$data_dir/npm/bin/bb-app" host-daemon --auto-update --host-daemon-port "$host_daemon_port" --server-url "$server_url" >"$data_dir/install-daemon.log" 2>&1 &
+      BB_APP_NPM_PREFIX="$data_dir/npm" BB_DATA_DIR="$data_dir" nohup "$data_dir/npm/bin/bb-app" host-daemon --auto-update --supervise --host-daemon-port "$host_daemon_port" --server-url "$server_url" >"$data_dir/install-daemon.log" 2>&1 &
       daemon_pid=$!
       (umask 077 && printf '%s\n' "$daemon_pid" >"$pid_file")
     fi
@@ -365,6 +367,8 @@ else
       process.stdout.write(url.href.replace(/\/$/u, ""));
     } catch { process.exit(2); }
   ' "$bootstrap_env") || usage
+  reconnect=$(node -e 'process.stdout.write(JSON.parse(process.env[process.argv[1]]).reconnect === true ? "yes" : "no")' "$bootstrap_env")
+  recorded_data_dir=$(node -e 'const dir = JSON.parse(process.env[process.argv[1]]).dataDir; process.stdout.write(typeof dir === "string" ? dir : "")' "$bootstrap_env")
   bootstrap_payload=$(node -e 'process.stdout.write(process.env[process.argv[1]])' "$bootstrap_env")
   unset "$bootstrap_env"
 fi
@@ -413,6 +417,36 @@ fi
 if [ -n "$lifecycle_action" ]; then
   run_lifecycle
   exit 0
+fi
+
+systemd_host=no
+if [ "$platform" = linux ] &&
+   [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]')" = systemd ] &&
+   ! systemd-detect-virt --container --quiet >/dev/null 2>&1; then
+  systemd_host=yes
+fi
+systemd_scope=--user
+if [ "$systemd_host" = yes ] && [ "$(id -u)" = 0 ]; then
+  systemd_scope=--system
+fi
+if [ "${BB_INSTALL_SKIP_SERVICE:-0}" != 1 ] && [ "$platform" = linux ] &&
+   [ "$systemd_scope" = --user ] && ! systemctl --user show-environment >/dev/null 2>&1; then
+  user_runtime_dir=$(loginctl show-user "$(id -u)" --property=RuntimePath --value 2>/dev/null || true)
+  case "$user_runtime_dir" in
+    /*)
+      XDG_RUNTIME_DIR=$user_runtime_dir
+      export XDG_RUNTIME_DIR
+      unset DBUS_SESSION_BUS_ADDRESS
+      ;;
+  esac
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    if [ "$systemd_host" = yes ]; then
+      fail_step "The systemd user bus is unavailable; the bb host-daemon service was not installed."
+      detail "Run the installer from a systemd user session, then retry. To run without a persistent service, set BB_INSTALL_SKIP_SERVICE=1; the daemon will not start after a reboot." >&2
+      exit 1
+    fi
+    BB_INSTALL_SKIP_SERVICE=1
+  fi
 fi
 
 if [ "$adopt" = yes ]; then
@@ -476,7 +510,35 @@ legacy_service_slug=$(printf '%s' "$server_host" | tr '.' '-')
 if [ "$adopt" = yes ]; then
   data_dir=$adopted_data_dir
 else
-  data_dir=${BB_DATA_DIR:-"$HOME/.bb-machines/$server_host"}
+  data_dir=${BB_DATA_DIR:-${recorded_data_dir:-"$HOME/.bb-machines/$server_host"}}
+  installed_host_id=$(node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const read = (name) => {
+      try { return fs.readFileSync(path.join(process.argv[1], name), "utf8"); }
+      catch { return ""; }
+    };
+    let hostId = read("host-id").trim();
+    if (!hostId) {
+      try { hostId = JSON.parse(read("auth.json")).hostId; }
+      catch {}
+    }
+    process.stdout.write(typeof hostId === "string" ? hostId : "");
+  ' "$data_dir")
+  if [ -n "$installed_host_id" ] && [ "$installed_host_id" != "$host_id" ]; then
+    fail_step "$data_dir on this computer belongs to machine $installed_host_id, not $host_id."
+    if [ "$reconnect" = yes ]; then
+      detail "Run this command on the computer where machine $host_id runs." >&2
+    else
+      detail "To add another machine on this computer, rerun the command with BB_DATA_DIR set to a new directory." >&2
+    fi
+    exit 1
+  fi
+  if [ "$reconnect" = yes ] && [ "$installed_host_id" != "$host_id" ]; then
+    fail_step "Machine $host_id is not installed in $data_dir on this computer."
+    detail "Run this command on the computer where machine $host_id runs." >&2
+    exit 1
+  fi
 fi
 mkdir -p "$HOME/.local/bin"
 if [ ! -e "$HOME/.local/bin/bb" ] && [ ! -L "$HOME/.local/bin/bb" ]; then
@@ -706,6 +768,22 @@ package_digest=$(node -e '
   } catch {}
 ' "$package_headers")
 
+if [ "$package_status" -ge 400 ] && [ "$package_status" -le 599 ]; then
+  package_error=$(node -e '
+    const fs = require("node:fs");
+    try {
+      if (fs.statSync(process.argv[1]).size > 16384) process.exit(0);
+      const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      if (body && typeof body.message === "string") {
+        process.stdout.write(body.message.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 2000));
+      }
+    } catch {}
+  ' "$package_file")
+  if [ -n "$package_error" ]; then
+    detail "Server: $package_error" >&2
+  fi
+fi
+
 bb_app=
 bb_app_npm_prefix=
 if [ "$package_status" = 304 ] && [ -n "$installed_artifact_digest" ]; then
@@ -871,24 +949,48 @@ if [ "$already_joined" = no ]; then
   complete_step "Joined successfully"
 fi
 
-systemd_scope=--user
-if [ "$platform" = linux ] && [ "$(id -u)" = 0 ] &&
-   [ "$(ps -p 1 -o comm= | tr -d '[:space:]')" = systemd ] &&
-   ! systemd-detect-virt --container --quiet >/dev/null 2>&1; then
-  systemd_scope=--system
-fi
-if [ "$platform" = linux ] &&
-   [ "$systemd_scope" = --user ] && ! systemctl --user show-environment >/dev/null 2>&1; then
-  BB_INSTALL_SKIP_SERVICE=1
-fi
+stop_recorded_daemon() {
+  recorded_pid=
+  recorded_command=
+  if [ -f "$data_dir/install-daemon.pid" ]; then recorded_pid=$(sed -n '1p' "$data_dir/install-daemon.pid"); fi
+  case "$recorded_pid" in
+    ''|*[!0-9]*|0|1) ;;
+    *) recorded_command=$(ps -p "$recorded_pid" -o command= 2>/dev/null || true) ;;
+  esac
+  case " $recorded_command " in
+    *" host-daemon "*" --host-daemon-port $host_daemon_port "*) ;;
+    *)
+      fail_step "A bb host daemon that this installer did not start is running on port $host_daemon_port."
+      detail "Stop it, then run this command again so the daemon uses the new credentials." >&2
+      exit 1
+      ;;
+  esac
+  active_step "Stopping the host daemon so it uses the new credentials"
+  kill "$recorded_pid" 2>/dev/null || true
+  stop_attempts=0
+  while kill -0 "$recorded_pid" 2>/dev/null || daemon_status_matches "$host_daemon_port" no; do
+    stop_attempts=$((stop_attempts + 1))
+    if [ "$stop_attempts" -ge "$DAEMON_WAIT_ATTEMPTS" ]; then
+      fail_step "The bb host daemon did not stop."
+      exit 1
+    fi
+    sleep 1
+  done
+  rm -f "$data_dir/install-daemon.pid"
+  complete_step "Stopped the host daemon"
+}
 
 if [ "${BB_INSTALL_SKIP_SERVICE:-0}" = 1 ]; then
+  if [ "$reconnect" = yes ] && [ -z "$join_pid" ] && daemon_status_matches "$host_daemon_port" no; then
+    stop_recorded_daemon
+  fi
   if [ -z "$join_pid" ] && ! daemon_status_matches "$host_daemon_port" no; then
     daemon_log="$data_dir/install-daemon.log"
     active_step "Starting the host daemon"
     detail "Host daemon output is logged to $daemon_log"
     BB_APP_NPM_PREFIX="$bb_app_npm_prefix" BB_DATA_DIR="$data_dir" nohup "$bb_app" host-daemon \
       --auto-update \
+      --supervise \
       --host-daemon-port "$host_daemon_port" \
       --server-url "$server_url" >"$daemon_log" 2>&1 &
     join_pid=$!
@@ -903,9 +1005,9 @@ if [ "${BB_INSTALL_SKIP_SERVICE:-0}" = 1 ]; then
     complete_step "Host daemon connected"
   fi
   if [ -n "$join_pid" ]; then
-    warning_step "Service installation skipped; daemon PID $join_pid is still running."
+    warning_step "Service installation skipped; temporary join daemon PID $join_pid is still running and will not restart if it exits or after a reboot."
   else
-    warning_step "Service installation skipped; the daemon is already running."
+    warning_step "Service installation skipped; the daemon is already running but will not start after a reboot."
   fi
   exit 0
 fi
@@ -941,13 +1043,32 @@ if [ "$platform" = darwin ]; then
   escaped_bb_app_npm_prefix=$(xml_escape "$bb_app_npm_prefix")
   escaped_server=$(xml_escape "$server_url")
   escaped_data_dir=$(xml_escape "$data_dir")
-  legacy_service_file="$service_dir/app.getbb.host-daemon.$legacy_service_slug.plist"
-  if [ -f "$legacy_service_file" ] && \
-     grep -F -- '<string>--host-daemon-port</string>' "$legacy_service_file" >/dev/null 2>&1 && \
-     grep -F -- "<string>$host_daemon_port</string>" "$legacy_service_file" >/dev/null 2>&1 && \
-     grep -F -- "<key>BB_DATA_DIR</key><string>$escaped_data_dir</string>" "$legacy_service_file" >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)" "$legacy_service_file" >/dev/null 2>&1 || true
-    rm -f "$legacy_service_file"
+  for existing_service_file in "$service_dir"/app.getbb.host-daemon.*.plist; do
+    [ -e "$existing_service_file" ] || continue
+    [ "$existing_service_file" != "$service_file" ] || continue
+    if grep -F -- "<key>BB_DATA_DIR</key><string>$escaped_data_dir</string>" "$existing_service_file" >/dev/null 2>&1; then
+      if [ -L "$existing_service_file" ]; then
+        fail_step "Refusing to replace a symlinked bb launch agent: $existing_service_file"
+        exit 1
+      fi
+      existing_service_label=${existing_service_file##*/}
+      existing_service_label=${existing_service_label%.plist}
+      if ! grep -F -- "<key>Label</key><string>$existing_service_label</string>" "$existing_service_file" >/dev/null 2>&1; then
+        fail_step "Refusing to replace a bb launch agent with an unexpected label: $existing_service_file"
+        exit 1
+      fi
+      launchctl bootout "gui/$(id -u)" "$existing_service_file" >/dev/null 2>&1 || true
+      if launchctl print "gui/$(id -u)/$existing_service_label" >/dev/null 2>&1; then
+        fail_step "Could not stop the existing bb launch agent $existing_service_label."
+        detail "The agent file was kept at $existing_service_file." >&2
+        exit 1
+      fi
+      rm -f "$existing_service_file"
+    fi
+  done
+  if [ -L "$service_file" ]; then
+    fail_step "Refusing to replace a symlinked bb launch agent: $service_file"
+    exit 1
   fi
   cat >"$service_file" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -986,7 +1107,10 @@ EOF
   fi
   if ! wait_for_daemon_connection "the launch agent"; then
     fail_step "The bb host-daemon launch agent started but did not connect to $server_url."
-    detail "See $data_dir/logs/launchd.log for the daemon error." >&2
+    if [ -d "$data_dir/daemon.lock.lock" ]; then
+      detail "Another daemon may be using $data_dir. Check for another bb launch agent using this data directory." >&2
+    fi
+    detail "See $data_dir/logs/host-daemon-stdio.log for the startup error and $data_dir/logs/launchd.log for launch agent output." >&2
     exit 1
   fi
   complete_step "Installed and started the launch agent"

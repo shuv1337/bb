@@ -1,3 +1,4 @@
+import type { PluginTimelineEventSeed } from "@bb/domain";
 import type {
   PromptInput,
   ResolvedThreadExecutionOptions,
@@ -26,6 +27,7 @@ export interface ReadyThreadEnvironment extends EnvironmentRow {
 }
 
 interface DispatchTurnDuringReprovisionArgs {
+  experimental_timelineEvent?: PluginTimelineEventSeed;
   beforeRequestAppendInTransaction?: (args: { tx: DbTransaction }) => void;
   deps: LoggedPendingInteractionWorkSessionDeps;
   environment: EnvironmentRow;
@@ -66,9 +68,11 @@ export async function dispatchTurnDuringReprovision(
   if (
     environmentProviderId !== null &&
     environmentProviderSelection !== null &&
-    args.environment.status !== "provisioning"
+    args.environment.status !== "provisioning" &&
+    args.environment.status !== "destroyed"
   ) {
     requestThreadTargetReprovision(args.deps, {
+      experimental_timelineEvent: args.experimental_timelineEvent,
       beforeRequestAppendInTransaction: ({ tx }) => {
         args.beforeRequestAppendInTransaction?.({ tx });
         const prepared = applyLoggedThreadLifecycleEventInTransaction(

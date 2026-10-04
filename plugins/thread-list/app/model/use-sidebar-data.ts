@@ -1,6 +1,10 @@
-import { useMemo } from "react";
-import { useAtomValue } from "jotai";
+import { useEffect, useMemo } from "react";
+import { useAtomValue, useSetAtom } from "jotai";
 import { sidebarThreadLifecyclesAtom } from "../preferences/atoms.js";
+import {
+  resolveSectionName,
+  sectionNameOverridesAtom,
+} from "./section-name-overrides.js";
 import {
   experimental_useSidebarThreads,
   type PluginSidebarProject,
@@ -66,16 +70,18 @@ function sameProjectShape(
 }
 
 const EMPTY_THREADS: SidebarThread[] = [];
+const EMPTY_HOSTS: readonly SidebarHost[] = [];
 
 export function buildSidebarData(
   status: PluginSidebarThreadsState["status"],
   threads: readonly PluginSidebarThread[],
   projects: readonly PluginSidebarProject[],
   sections: readonly PluginSidebarSection[],
+  hosts: readonly SidebarHost[] = [],
   previous: SidebarData | null = null,
 ): SidebarData {
   const threadsByProjectId = new Map<string, SidebarThread[]>();
-  const hostsById = new Map<string, SidebarHost>();
+  const hostsById = new Map(hosts.map((host) => [host.id, host]));
   for (const thread of threads) {
     const bucket = threadsByProjectId.get(thread.projectId);
     if (bucket === undefined) {
@@ -134,6 +140,7 @@ interface SidebarDataCacheEntry {
   threads: readonly PluginSidebarThread[];
   projects: readonly PluginSidebarProject[];
   sections: readonly PluginSidebarSection[];
+  hosts: readonly SidebarHost[];
   data: SidebarData;
 }
 
@@ -141,12 +148,14 @@ let sidebarDataCache: SidebarDataCacheEntry | null = null;
 
 export function getSidebarData(state: PluginSidebarThreadsState): SidebarData {
   const cached = sidebarDataCache;
+  const hosts = state.experimental_hosts ?? EMPTY_HOSTS;
   if (
     cached !== null &&
     cached.status === state.status &&
     cached.threads === state.threads &&
     cached.projects === state.projects &&
-    cached.sections === state.sections
+    cached.sections === state.sections &&
+    cached.hosts === hosts
   ) {
     return cached.data;
   }
@@ -155,6 +164,7 @@ export function getSidebarData(state: PluginSidebarThreadsState): SidebarData {
     state.threads,
     state.projects,
     state.sections,
+    hosts,
     cached?.data ?? null,
   );
   sidebarDataCache = {
@@ -162,6 +172,7 @@ export function getSidebarData(state: PluginSidebarThreadsState): SidebarData {
     threads: state.threads,
     projects: state.projects,
     sections: state.sections,
+    hosts,
     data,
   };
   return data;
@@ -182,15 +193,48 @@ export function useSidebarProjectName(
 
 export function useSidebarData() {
   const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
+  const sectionNameOverrides = useAtomValue(sectionNameOverridesAtom);
+  const setSectionNameOverrides = useSetAtom(sectionNameOverridesAtom);
   const state = experimental_useSidebarThreads({
     experimental_lifecycles: lifecycles,
   });
+  useEffect(() => {
+    const settledIds = state.sections
+      .filter((section) => {
+        const override = sectionNameOverrides.get(section.id);
+        return override && override.previousName !== section.name;
+      })
+      .map((section) => section.id);
+    if (settledIds.length === 0) return;
+    setSectionNameOverrides((current) => {
+      const next = new Map(current);
+      for (const id of settledIds) next.delete(id);
+      return next;
+    });
+  }, [state.sections, sectionNameOverrides, setSectionNameOverrides]);
   return useMemo(
-    () => ({
-      ...getSidebarData(state),
-      archived: state.experimental_archived,
-    }),
-    [state],
+    () => {
+      const sections = state.sections.map((section) => {
+        const name = resolveSectionName(
+          section.id,
+          section.name,
+          sectionNameOverrides,
+        );
+        return name === section.name ? section : { ...section, name };
+      });
+      return {
+        ...getSidebarData({
+          ...state,
+          sections: sections.every(
+            (section, index) => section === state.sections[index],
+          )
+            ? state.sections
+            : sections,
+        }),
+        archived: state.experimental_archived,
+      };
+    },
+    [state, sectionNameOverrides],
   );
 }
 

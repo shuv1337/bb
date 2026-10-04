@@ -326,6 +326,9 @@ export const installedPlugins = sqliteTable("plugins", {
   rootDir: text("root_dir").notNull(),
   version: text("version").notNull(),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  enabledFollowsDefault: integer("enabled_follows_default", { mode: "boolean" })
+    .notNull()
+    .default(false),
   removedAt: integer("removed_at"),
   installedAt: integer("installed_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
@@ -563,7 +566,9 @@ export const environments = sqliteTable(
       table.path,
     ),
     index("environments_host_path_lookup_idx").on(table.hostId, table.path),
-    uniqueIndex("environments_owner_thread_idx").on(table.ownerThreadId),
+    uniqueIndex("environments_owner_thread_idx")
+      .on(table.ownerThreadId)
+      .where(sql`${table.ownerThreadId} IS NOT NULL`),
     index("environments_claim_idx").on(table.hostId, table.claimPath),
     index("environments_project_idx").on(table.projectId),
     index("environments_status_idx").on(table.status),
@@ -571,6 +576,11 @@ export const environments = sqliteTable(
       table.environmentProviderId,
       table.environmentProviderInstanceKey,
     ),
+    index("environments_provider_lifecycle_idx")
+      .on(table.environmentProviderId)
+      .where(
+        sql`${table.status} <> 'destroyed' OR ${table.teardownStatus} IS NOT 'removed'`,
+      ),
   ],
 );
 
@@ -949,6 +959,11 @@ export const promptHistoryEntries = sqliteTable(
       table.requestSequence,
       table.id,
     ),
+    index("prompt_history_entries_created_idx").on(
+      table.createdAt,
+      table.requestSequence,
+      table.id,
+    ),
     index("prompt_history_entries_thread_scope_created_idx").on(
       table.threadId,
       table.scope,
@@ -1048,6 +1063,7 @@ export const queuedThreadMessages = sqliteTable(
     retryOfTurnRequestId: text("retry_of_turn_request_id"),
     retryAttempt: integer("retry_attempt"),
     retryReason: text("retry_reason"),
+    timelineEventJson: text("timeline_event_json"),
     claimedAt: integer("claimed_at"),
     claimToken: text("claim_token"),
     sortKey: text("sort_key").notNull(),
@@ -1318,4 +1334,33 @@ export const projectAttachmentBackfills = sqliteTable(
     attemptedAt: integer("attempted_at").notNull(),
     error: text("error"),
   },
+);
+
+export const pluginTimelineEvents = sqliteTable(
+  "plugin_timeline_events",
+  {
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    pluginId: text("plugin_id").notNull(),
+    id: text("id").notNull(),
+    requestEventId: text("request_event_id")
+      .notNull()
+      .references(() => events.id, { onDelete: "cascade" }),
+    requestId: text("request_id").notNull(),
+    requestSequence: integer("request_sequence").notNull(),
+    rendererId: text("renderer_id").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    presentationJson: text("presentation_json").notNull(),
+    status: text("status"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.threadId, table.pluginId, table.id] }),
+    index("plugin_timeline_events_request_idx").on(
+      table.threadId,
+      table.requestSequence,
+    ),
+  ],
 );

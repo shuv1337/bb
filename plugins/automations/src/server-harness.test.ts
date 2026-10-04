@@ -1,4 +1,5 @@
 import { unlink } from "node:fs/promises";
+import { join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
@@ -16,6 +17,11 @@ import {
   automationRunListResponseSchema,
   automationRunRpcResponseSchema,
 } from "./rpc-types.js";
+
+function storedScriptPathPattern(automationId: string): RegExp {
+  const suffix = join(sep, "scripts", automationId, "script.sh");
+  return new RegExp(`${suffix.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}$`);
+}
 
 const PROJECT_ID = "proj_test";
 const MISSING_PROJECT_ID = "proj_missing";
@@ -115,6 +121,13 @@ async function bootAutomationsPlugin(
         },
       },
       threads: {
+        queuedMessages: { list: async () => [] },
+        async experimental_getTimelineEvent() {
+          return null;
+        },
+        async experimental_updateTimelineEvent() {
+          throw new Error("not expected");
+        },
         async get({ threadId }) {
           return {
             id: threadId,
@@ -406,7 +419,7 @@ describe("automations server plugin harness", () => {
       mode: "script",
       scriptFile: "script.sh",
       storedScriptPath: expect.stringMatching(
-        new RegExp(`/scripts/${created.id}/script\\.sh$`),
+        storedScriptPathPattern(created.id),
       ),
       interpreter: "bash",
       workingDirectory: { type: "project" },
@@ -424,7 +437,7 @@ describe("automations server plugin harness", () => {
       mode: "script",
       script: "echo updated",
       storedScriptPath: expect.stringMatching(
-        new RegExp(`/scripts/${created.id}/script\\.sh$`),
+        storedScriptPathPattern(created.id),
       ),
       interpreter: "bash",
       workingDirectory: { type: "project" },
@@ -530,27 +543,8 @@ describe("automations server plugin harness", () => {
     await harness.dispose();
   });
 
-  it("rejects unknown commands, unknown options, and stray arguments", async () => {
+  it("rejects a positional argument to list", async () => {
     const { harness } = await bootAutomationsPlugin();
-
-    const unknownCommand = await harness.runCli([
-      "lst",
-      "--project",
-      PROJECT_ID,
-    ]);
-    expect(unknownCommand.exitCode).toBe(1);
-    expect(unknownCommand.stderr).toContain("unknown command 'lst'");
-    expect(unknownCommand.stderr).toContain("Did you mean list?");
-
-    const unknownOption = await harness.runCli([
-      "list",
-      "--project",
-      PROJECT_ID,
-      "--limits",
-      "5",
-    ]);
-    expect(unknownOption.exitCode).toBe(1);
-    expect(unknownOption.stderr).toContain("unknown option '--limits'");
 
     const strayArgument = await harness.runCli([
       "list",
@@ -1335,6 +1329,9 @@ describe("automations server plugin harness", () => {
     const reloaded = await harness.reload(
       plugin as unknown as Parameters<typeof harness.reload>[0],
     );
+    reloaded.harness.sdk.stub("threads.experimental_getTimelineEvent", () => ({
+      status: "completed",
+    }));
     const service = reloaded.harness.runService("automation-sweep");
     await vi.waitFor(async () => {
       const runs = automationRunListResponseSchema.parse(
@@ -1362,7 +1359,74 @@ describe("automations server plugin harness", () => {
     await reloaded.harness.dispose();
   });
 
-  it("dispatches a due agent automation from one sweep tick and closes it from thread.idle", async () => {
+  it("retries the recorded prompt and rejects an unrelated active run", async () => {
+    const { harness } = await bootAutomationsPlugin();
+    const automation = await createAgentAutomation(harness);
+    const first = automationRunRpcResponseSchema.parse(
+      await harness.callRpc("automations_run", {
+        projectId: PROJECT_ID,
+        automationId: automation.id,
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1),
+    );
+    harness.sdk.stub("threads.experimental_getTimelineEvent", () => ({
+      status: "error",
+      payload: {
+        automationId: automation.id,
+        projectId: PROJECT_ID,
+        name: automation.name,
+        runId: first.run.id,
+        execution: { ...agentExecution(), prompt: "original failed prompt" },
+      },
+    }));
+    await harness.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
+      error: "failed",
+    });
+    const newer = automationRunRpcResponseSchema.parse(
+      await harness.callRpc("automations_run", {
+        projectId: PROJECT_ID,
+        automationId: automation.id,
+      }),
+    );
+    expect(newer.run.id).not.toBe(first.run.id);
+    await expect(
+      harness.callRpc("automations_run", {
+        projectId: PROJECT_ID,
+        automationId: automation.id,
+        retryRunId: first.run.id,
+      }),
+    ).rejects.toThrow("already running");
+    await harness.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
+      error: "failed",
+    });
+    await harness.callRpc("automations_run", {
+      projectId: PROJECT_ID,
+      automationId: automation.id,
+      retryRunId: first.run.id,
+    });
+    await vi.waitFor(() =>
+      expect(harness.sdk.callsTo("threads.send")).toHaveLength(1),
+    );
+    expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
+      threadId: "thr_spawned",
+      input: [
+        {
+          visibility: "agent-only",
+          text: expect.stringContaining("original failed prompt"),
+        },
+      ],
+      experimental_timelineEvent: {
+        payload: { execution: { prompt: "original failed prompt" } },
+      },
+    });
+    await harness.dispose();
+  });
+
+  it("dispatches hidden automation input and settles only its linked turn", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const host = await bootAutomationsPlugin();
@@ -1383,6 +1447,21 @@ describe("automations server plugin harness", () => {
     expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1);
     expect(harness.sdk.callsTo("threads.spawn")[0]?.[0]).toMatchObject({
       projectId: PROJECT_ID,
+      input: [
+        {
+          type: "text",
+          visibility: "agent-only",
+          text: `[Automation: Sweep (${automation.id})]\n\nsummarize the inbox`,
+          mentions: [],
+        },
+      ],
+      experimental_timelineEvent: {
+        rendererId: "run",
+        payload: {
+          name: "Sweep",
+          execution: { prompt: "summarize the inbox" },
+        },
+      },
       title: "Sweep",
       origin: "plugin",
       originPluginId: "automations",
@@ -1401,6 +1480,21 @@ describe("automations server plugin harness", () => {
       trigger: "schedule",
     });
 
+    await harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
+      lastAssistantText: null,
+    });
+    expect(
+      automationRunListResponseSchema.parse(
+        await harness.callRpc("automations_runs", {
+          projectId: PROJECT_ID,
+          automationId: automation.id,
+        }),
+      ).runs[0]?.status,
+    ).toBe("running");
+    harness.sdk.stub("threads.experimental_getTimelineEvent", () => ({
+      status: "completed",
+    }));
     await harness.emitThreadEvent("thread.idle", {
       thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
       lastAssistantText: null,

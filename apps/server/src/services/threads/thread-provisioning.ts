@@ -1,3 +1,5 @@
+import type { PluginTimelineEventSeed } from "@bb/domain";
+import { insertPluginTimelineEvent } from "@bb/db";
 import { getNonDestroyedHostByLaunchKey } from "@bb/db";
 import { sweepProviderMachine } from "../machines/provider-orchestration.js";
 import { cancelProviderEnvironmentCreation } from "../environments/environment-engine.js";
@@ -19,6 +21,7 @@ import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import {
   appendClientTurnEvent,
   appendPreparedClientTurnRequestedEventWithNotificationInTransaction,
+  appendThreadProvisioningEventInTransaction,
   buildCwdBranchEntries,
   createClientTurnRequestId,
 } from "./thread-events.js";
@@ -47,11 +50,13 @@ import {
   saveThreadProvisionContext,
   readThreadProvisionContext,
 } from "./thread-startup-store.js";
-import { applyLoggedThreadLifecycleEvent } from "./lifecycle-outcome.js";
+import { applyLoggedThreadLifecycleEventInTransaction } from "./lifecycle-outcome.js";
+import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { recordAcceptedPromptHistoryEntry } from "../prompt-history.js";
 
 interface RequestThreadProvisionArgs {
+  experimental_timelineEvent?: PluginTimelineEventSeed;
   environmentIntent: ThreadProvisionEnvironmentIntent;
   execution: ResolvedThreadExecutionOptions;
   fork: ThreadForkDescriptor | null;
@@ -63,6 +68,7 @@ interface RequestThreadProvisionArgs {
 }
 
 interface RequestThreadTargetReprovisionArgs {
+  experimental_timelineEvent?: PluginTimelineEventSeed;
   beforeRequestAppendInTransaction?: (args: { tx: DbTransaction }) => void;
   environment: EnvironmentRow;
   execution: ResolvedThreadExecutionOptions;
@@ -72,6 +78,15 @@ interface RequestThreadTargetReprovisionArgs {
   senderThreadId: string | null;
   systemMessageKind?: SystemMessageKind;
   systemMessageSubject?: SystemMessageSubject | null;
+  provider: {
+    environmentProviderId: string;
+    selection: EnvironmentProviderSelection;
+  };
+  thread: Thread;
+}
+
+interface RequestThreadEnvironmentRestoreArgs {
+  environment: EnvironmentRow;
   provider: {
     environmentProviderId: string;
     selection: EnvironmentProviderSelection;
@@ -120,6 +135,60 @@ function getCurrentProvisioningFailureThread(
   }
 
   return currentThread;
+}
+
+interface SettleSeededThreadProvisioningArgs {
+  context: ThreadProvisionContext;
+  environmentId: string;
+  threadId: string;
+}
+
+function settleSeededThreadProvisioning(
+  deps: ThreadProvisioningDeps,
+  args: SettleSeededThreadProvisioningArgs,
+): void {
+  const settled = deps.db.transaction(
+    (tx) => {
+      const current = getThreadProvisionContext(tx, args.threadId);
+      const outcome = applyLoggedThreadLifecycleEventInTransaction(
+        { db: tx, logger: deps.logger },
+        { threadId: args.threadId, event: { type: "run.succeeded" } },
+      );
+      const completedProvisioning =
+        outcome.applied &&
+        current !== null &&
+        current.state.provisioningId === args.context.state.provisioningId &&
+        current.state.provisionEventSequence !== null;
+      if (completedProvisioning) {
+        appendThreadProvisioningEventInTransaction(tx, {
+          threadId: args.threadId,
+          environmentId: args.environmentId,
+          provisioningId: current.state.provisioningId,
+          status: "completed",
+          entries: [],
+        });
+      }
+      return { completedProvisioning, outcome };
+    },
+    { behavior: "immediate" },
+  );
+  if (!settled.outcome.applied) {
+    deps.logger.warn(
+      { threadId: args.threadId },
+      "Seed-without-run thread was no longer starting; idle settle skipped",
+    );
+    return;
+  }
+  deps.hub.notifyThread(
+    args.threadId,
+    ["status-changed"],
+    buildThreadStatusChangeMetadata(deps, settled.outcome.thread),
+  );
+  if (settled.completedProvisioning) {
+    deps.hub.notifyThread(args.threadId, ["events-appended"], {
+      eventTypes: ["system/thread-provisioning"],
+    });
+  }
 }
 
 async function startThreadIfEnvironmentReady(
@@ -180,17 +249,17 @@ async function startThreadIfEnvironmentReady(
     args.context.request.seedWithoutRun &&
     args.context.request.fork === null
   ) {
-    const outcome = applyLoggedThreadLifecycleEvent(deps, {
+    settleSeededThreadProvisioning(deps, {
+      context: args.context,
+      environmentId: args.environment.id,
       threadId: args.thread.id,
-      event: { type: "run.succeeded" },
     });
-    if (!outcome.applied) {
-      deps.logger.warn(
-        { threadId: args.thread.id },
-        "Seed-without-run thread was no longer starting; idle settle skipped",
-      );
-    }
     return;
+  }
+
+  const execution = args.context.request.execution;
+  if (execution === null) {
+    throw new Error("Thread provisioning that starts a run has no execution");
   }
 
   await requestThreadStart(deps, {
@@ -207,7 +276,7 @@ async function startThreadIfEnvironmentReady(
       ? { inputGroups: args.context.request.inputGroups }
       : {}),
     requestId: args.context.request.clientRequestId,
-    execution: args.context.request.execution,
+    execution,
     permissionEscalation: resolvePermissionEscalation({
       initiator: "user",
     }),
@@ -240,6 +309,14 @@ export function requestThreadProvision(
       source: "spawn",
       target,
     });
+    if (args.experimental_timelineEvent) {
+      insertPluginTimelineEvent(deps.db, {
+        threadId: args.thread.id,
+        requestId: request.requestId,
+        requestSequence: request.sequence,
+        seed: args.experimental_timelineEvent,
+      });
+    }
     recordAcceptedPromptHistoryEntry(deps, {
       thread: args.thread,
       input: args.input,
@@ -270,6 +347,46 @@ export function requestThreadProvision(
     });
     return context;
   });
+}
+
+export function requestThreadEnvironmentRestore(
+  deps: Pick<AppDeps, "db" | "hub" | "logger">,
+  args: RequestThreadEnvironmentRestoreArgs,
+): ThreadProvisionContext | null {
+  return deps.db.transaction(
+    (tx) => {
+      const prepared = applyLoggedThreadLifecycleEventInTransaction(
+        { db: tx, logger: deps.logger },
+        { event: { type: "run.preparing" }, threadId: args.thread.id },
+      );
+      if (!prepared.applied) {
+        return null;
+      }
+      const context = createThreadStartup({
+        clientRequestId: createClientTurnRequestId(),
+        environmentIntent: {
+          type: "provider",
+          environmentProviderId: args.provider.environmentProviderId,
+          machine: { type: "existing", hostId: args.environment.hostId },
+          inputs: args.provider.selection.inputs,
+          selectionResolved: true,
+        },
+        execution: null,
+        fork: null,
+        input: [],
+        seedWithoutRun: true,
+        titleProvided: true,
+      });
+      saveThreadProvisionContext({
+        replace: true,
+        db: tx,
+        threadId: args.thread.id,
+        context,
+      });
+      return context;
+    },
+    { behavior: "immediate" },
+  );
 }
 
 export function requestThreadTargetReprovision(
@@ -329,6 +446,7 @@ function appendReprovisionTurnRequest(
             threadId: args.thread.id,
             environmentId: args.environment.id,
             type: "client/turn/requested",
+            experimental_timelineEvent: args.experimental_timelineEvent,
             input: args.input,
             ...(args.inputGroups !== undefined
               ? { inputGroups: args.inputGroups }

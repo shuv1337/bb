@@ -96,6 +96,7 @@ import {
 } from "../lib/lifecycle-api-errors.js";
 import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
+import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 import {
   ThreadContextClearInProgressError,
   withThreadSendGuard,
@@ -203,6 +204,7 @@ function admitQueuedMessage(
     return { hasProviderSession };
   }
   const environment = getEnvironment(db, thread.environmentId);
+  assertThreadHostAcceptsWork(db, thread);
   const goneDetails = environment
     ? goneThreadEnvironmentDetails(environment)
     : null;
@@ -551,6 +553,10 @@ async function sendClaimedQueuedMessageForIdleProviderThread(
         throw createQueuedMessageClaimLostError();
       }
       const request = appendClientTurnEventInTransaction(tx, {
+        experimental_timelineEvent:
+          queuedMessage.payload.kind === "inline"
+            ? queuedMessage.payload.experimental_timelineEvent
+            : undefined,
         environmentId: thread.environmentId,
         execution,
         initiator,
@@ -692,6 +698,12 @@ async function sendClaimedQueuedMessageForThread(
   const outcome = await attemptDispatch(deps, {
     thread: args.thread,
     payload: {
+      ...(queuedMessage.payload.kind === "inline"
+        ? {
+            experimental_timelineEvent:
+              queuedMessage.payload.experimental_timelineEvent,
+          }
+        : {}),
       ...sendQueuedMessagePayload(
         { ...queuedMessage, content: input },
         args.mode,

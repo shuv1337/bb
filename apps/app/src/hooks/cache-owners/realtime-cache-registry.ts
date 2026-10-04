@@ -13,7 +13,6 @@ import {
   getCachedEnvironmentRefWorkspaceStateInvalidationQueryKeys,
   getCachedGlobalThreadListInvalidationQueryKeys,
   getCachedProjectThreadListInvalidationQueryKeys,
-  getCachedRootOrderThreadListInvalidationQueryKeys,
   getCachedSidebarNavigationThreads,
   getCachedThreadListPlaceholder,
   getCachedThreadListQueryKeys,
@@ -40,6 +39,7 @@ import {
   allPluginSettingsQueryKeyPrefix,
   allPluginSettingsViewQueryKeyPrefix,
   allPluginSourceQueryKeyPrefix,
+  pluginSafeModeQueryKey,
   allProjectCommandsQueryKeyPrefix,
   allThreadStorageFilePreviewQueryKeyPrefix,
   allThreadStorageFilesQueryKeyPrefix,
@@ -57,6 +57,7 @@ import {
   serverMoveStatusQueryKey,
   systemAppUpdateQueryKey,
   sidebarNavigationQueryKey,
+  systemAiServicesQueryKey,
   systemConfigQueryKey,
   uiPreferencesQueryKey,
   allSystemProvidersQueryKeyPrefix,
@@ -85,6 +86,7 @@ import {
   getThreadPromptHistoryInvalidationQueryKeys,
   getThreadQueueContentInvalidationQueryKeys,
   getThreadTimelineInvalidationQueryKeys,
+  getThreadCompactedHistoryInvalidationQueryKeys,
   getThreadTimelineWindowInvalidationQueryKeys,
 } from "./cache-invalidation-groups";
 
@@ -366,6 +368,10 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
       getThreadPendingInteractionInvalidationQueryKeys,
     ],
   },
+  "history-compacted": {
+    flush: "debounced",
+    dirty: [getThreadCompactedHistoryInvalidationQueryKeys],
+  },
   "interactions-changed": {
     flush: "debounced",
     dirty: [
@@ -417,10 +423,6 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   "read-state-changed": {
     flush: "debounced",
     dirty: [markThreadDetailQueryStale, markThreadListQueriesStale],
-  },
-  "order-changed": {
-    flush: "debounced",
-    dirty: [dirtyRootOrderThreadListQueries],
   },
   "tabs-changed": {
     flush: "immediate",
@@ -803,25 +805,6 @@ function dirtyThreadDetailQueriesForBackgroundActivity(
   return dirtyThreadDetailQueries(context);
 }
 
-function dirtyRootOrderThreadListQueries({
-  projectId,
-  queryClient,
-}: ThreadRealtimeDirtyContext): void {
-  queryClient.invalidateQueries({ queryKey: sidebarNavigationQueryKey() });
-  for (const queryKey of getCachedRootOrderThreadListInvalidationQueryKeys({
-    projectId,
-    queryClient,
-  })) {
-    queryClient.invalidateQueries({ exact: true, queryKey });
-  }
-  if (!projectId) return;
-  for (const queryKey of getCachedRootOrderThreadListInvalidationQueryKeys({
-    queryClient,
-  })) {
-    queryClient.invalidateQueries({ exact: true, queryKey });
-  }
-}
-
 function dirtyThreadDetailQueries({
   threadId,
 }: ThreadRealtimeDirtyContext): QueryKey[] {
@@ -1153,7 +1136,11 @@ function dirtyHostAvailabilityQueries(): QueryKey[] {
 function dirtySystemConfigQueries({ queryClient }: RealtimeDirtyContext): void {
   invalidateQueryKeysWithoutCancelingActiveFetches({
     queryClient,
-    queryKeys: [systemConfigQueryKey(), allSystemThemesQueryKeyPrefix()],
+    queryKeys: [
+      systemConfigQueryKey(),
+      systemAiServicesQueryKey(),
+      allSystemThemesQueryKeyPrefix(),
+    ],
   });
 }
 
@@ -1218,6 +1205,7 @@ function dirtyPluginManagementQueries(): QueryKey[] {
     allPluginSettingsQueryKeyPrefix(),
     allPluginSourceQueryKeyPrefix(),
     allPluginCatalogSearchQueryKeyPrefix(),
+    pluginSafeModeQueryKey(),
   ];
 }
 

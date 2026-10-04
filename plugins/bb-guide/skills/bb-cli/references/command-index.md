@@ -10,7 +10,11 @@ This index lists every command path that the core CLI registers, including alias
 
 - `bb settings`
 - `bb settings show`
+- `bb settings mobile-app`
 - `bb settings ai-services`
+- `bb settings ai-services show`
+- `bb settings ai-services set`
+- `bb settings ai-services test`
 - `bb settings general`
 - `bb settings completed-turns`
 - `bb settings experiment`
@@ -53,19 +57,18 @@ This index lists every command path that the core CLI registers, including alias
 
 `bb project show <id>` accepts `proj_personal` to inspect Personal.
 
+## prompt-history
+
+- `bb prompt-history`
+- `bb prompt-history list`
+
 ## provider
 
 - `bb provider`
 - `bb provider list`
+- `bb provider enable`
+- `bb provider disable`
 - `bb provider models`
-
-## manager
-
-- `bb manager`
-- `bb manager hire`
-- `bb manager list`
-- `bb manager status`
-- `bb manager delete`
 
 ## machine
 
@@ -79,6 +82,7 @@ This index lists every command path that the core CLI registers, including alias
 - `bb machine create`
 - `bb machine list`
 - `bb machine show`
+- `bb machine reconnect`
 - `bb machine rename`
 - `bb machine remove`
 - `bb machine suspend`
@@ -189,6 +193,7 @@ move and downloads the new server's bb-app package for its service.
 - `bb thread update`
 - `bb thread archive`
 - `bb thread unarchive`
+- `bb thread restore-environment`
 - `bb thread pin`
 - `bb thread unpin`
 - `bb thread delete`
@@ -218,6 +223,7 @@ move and downloads the new server's bb-app package for its service.
 - `bb environment providers`
 - `bb environment list`
 - `bb environment delete`
+- `bb environment cleanup`
 - `bb environment show`
 - `bb environment get`
 - `bb environment status`
@@ -280,6 +286,7 @@ move and downloads the new server's bb-app package for its service.
 - `bb plugin rpc call`
 - `bb plugin enable`
 - `bb plugin disable`
+- `bb plugin safe-mode`
 - `bb plugin config`
 - `bb plugin token`
 - `bb plugin run`

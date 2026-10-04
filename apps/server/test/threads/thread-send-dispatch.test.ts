@@ -1,11 +1,15 @@
 import {
   archiveThread,
+  getPluginTimelineEvent,
+  updatePluginTimelineEvent,
+  getAppSettings,
   updateHost,
   getQueuedThreadMessage,
   getThread,
   listEvents,
   listQueuedThreadMessages,
   markThreadDeleted,
+  setAppSettings,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
@@ -22,6 +26,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TelemetryService } from "../../src/services/system/telemetry.js";
 import * as queuedDispatch from "../../src/services/threads/queued-message-dispatch.js";
 import * as threadEvents from "../../src/services/threads/thread-events.js";
+import { buildThreadTimelineWithProfile } from "../../src/services/threads/timeline.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import {
   createAutomaticQueuedMessageGroupEligibility,
@@ -1404,6 +1409,50 @@ describe("idle cold-start activation", () => {
 });
 
 describe("service tier execution lifecycle", () => {
+  it("dispatches a previously queued fast message at the default tier after fast is disabled", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedProviderThreadFixture({
+        harness,
+        value: 82,
+        serviceTier: "fast",
+      });
+      const queued = await createQueuedMessageForThread(harness.deps, {
+        thread,
+        payload: { input: textInput("queued fast turn"), serviceTier: "fast" },
+      });
+      expect(queued.serviceTier).toBe("fast");
+      setAppSettings(harness.db, {
+        ...getAppSettings(harness.db),
+        allowFastServiceTier: false,
+      });
+
+      await sendQueuedMessage(harness.deps, {
+        claimPolicy: {
+          kind: "automatic",
+          isGroupEligible: createAutomaticQueuedMessageGroupEligibility(
+            harness.deps,
+            { now: Date.now(), retryingFailure: false, thread },
+          ),
+          retryingFailure: false,
+        },
+        threadId: thread.id,
+        queuedMessageId: queued.id,
+        mode: "auto",
+      });
+
+      expect(
+        threadEvents.getLastExecutionOptions(harness.deps, thread.id),
+      ).toMatchObject({ serviceTier: "default" });
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toContainEqual(
+        expect.objectContaining({
+          options: expect.objectContaining({ serviceTier: "default" }),
+        }),
+      );
+    });
+  });
+
   it.each(["fast", "default"] as const)(
     "uses an accepted direct %s choice as the next default",
     async (serviceTier) => {
@@ -1734,4 +1783,236 @@ describe("competing turn refusals", () => {
       expect(getThread(harness.db, fixture.thread.id)?.status).toBe("error");
     });
   });
+});
+
+describe("plugin turn markers", () => {
+  it.each(["failed", "completed"] as const)(
+    "settles a cold-start marker without an acceptance event: %s",
+    async (status) => {
+      await withTestHarness(async (harness) => {
+        const { thread } = seedColdIdleThreadFixture({ harness, value: 902 });
+        const target = {
+          threadId: thread.id,
+          pluginId: "automations",
+          eventId: "cold-run",
+        };
+        await acceptThreadSendRequest(harness.deps, {
+          thread,
+          payload: {
+            input: [
+              {
+                type: "text",
+                text: "hidden prompt",
+                mentions: [],
+                visibility: "agent-only",
+              },
+            ],
+            mode: "auto",
+            permissionMode: "full",
+            model: "gpt-5",
+            reasoningLevel: "medium",
+            serviceTier: "default",
+            experimental_timelineEvent: {
+              id: target.eventId,
+              pluginId: target.pluginId,
+              rendererId: "run",
+              payload: {},
+              presentation: {
+                icon: { glyph: "Timer" },
+                label: { pending: "Running", completed: "Finished" },
+              },
+            },
+          },
+        });
+        const command = await waitForQueuedCommand(
+          harness,
+          (entry) =>
+            entry.command.type === "thread.start" &&
+            entry.command.threadId === thread.id,
+        );
+        if (status === "failed") {
+          await reportQueuedCommandError(harness, command, {
+            errorCode: "provider_rpc_error",
+            errorMessage: "Provider could not start",
+          });
+        } else {
+          seedTurnStarted(harness.deps, {
+            threadId: thread.id,
+            providerThreadId: "cold-provider",
+            turnId: "cold-turn",
+            sequence: 100,
+          });
+          seedStoredEvent(harness.deps, {
+            threadId: thread.id,
+            providerThreadId: "cold-provider",
+            sequence: 101,
+            scope: turnScope("cold-turn"),
+            type: "turn/completed",
+            data: { status: "completed" },
+          });
+        }
+        expect(getPluginTimelineEvent(harness.db, target)).toMatchObject({
+          status: status === "failed" ? "error" : "completed",
+          turnId: status === "failed" ? null : "cold-turn",
+        });
+      });
+    },
+  );
+
+  it.each([false, true])(
+    "keeps hidden input and its marker linked through dispatch (queued: %s)",
+    async (queued) => {
+      await withTestHarness(async (harness) => {
+        const { thread } = seedProviderThreadFixture({ harness, value: 901 });
+        const target = {
+          threadId: thread.id,
+          pluginId: "automations",
+          eventId: "run-1",
+        };
+        const input = [
+          {
+            type: "text" as const,
+            text: "private run prompt",
+            mentions: [],
+            visibility: "agent-only" as const,
+          },
+        ];
+        const result = await acceptThreadSendRequest(harness.deps, {
+          thread,
+          payload: {
+            input,
+            mode: "queue-if-active",
+            permissionMode: "full",
+            model: "gpt-5",
+            reasoningLevel: "medium",
+            serviceTier: "default",
+            ...(queued ? { sendAt: Date.now() + 60_000 } : {}),
+            experimental_timelineEvent: {
+              id: target.eventId,
+              pluginId: target.pluginId,
+              rendererId: "run",
+              payload: { prompt: "private run prompt" },
+              presentation: {
+                title: "Inbox review",
+                icon: { glyph: "Timer" },
+                label: { pending: "Running", completed: "Finished" },
+              },
+            },
+          },
+        });
+        if (queued) {
+          expect(result.delivery).toBe("queued");
+          if (result.delivery !== "queued")
+            throw new Error("Expected queued run");
+          expect(result.queuedMessage.editable).toBe(false);
+          expect(getPluginTimelineEvent(harness.db, target)).toBeNull();
+          await sendQueuedMessageNow(harness.deps, {
+            threadId: thread.id,
+            queuedMessageId: result.queuedMessage.id,
+            mode: "auto",
+          });
+        }
+        const marker = getPluginTimelineEvent(harness.db, target);
+        expect(marker).toMatchObject({ status: "pending", turnId: null });
+        if (!marker) throw new Error("Missing marker");
+        const command = await waitForQueuedCommand(
+          harness,
+          (entry) =>
+            entry.command.type === "turn.submit" &&
+            entry.command.threadId === thread.id,
+        );
+        expect(command.command).toMatchObject({
+          requestId: marker.requestId,
+          input,
+        });
+        seedTurnStarted(harness.deps, {
+          threadId: thread.id,
+          providerThreadId: "provider-send-dispatch-901",
+          turnId: "plugin-turn",
+          sequence: 98,
+        });
+        seedTurnStarted(harness.deps, {
+          threadId: thread.id,
+          providerThreadId: "provider-send-dispatch-901",
+          turnId: "unrelated-turn",
+          sequence: 99,
+        });
+        seedStoredEvent(harness.deps, {
+          providerThreadId: "provider-send-dispatch-901",
+          threadId: thread.id,
+          sequence: 100,
+          scope: turnScope("plugin-turn"),
+          type: "turn/input/accepted",
+          data: { clientRequestId: marker.requestId },
+        });
+        seedStoredEvent(harness.deps, {
+          providerThreadId: "provider-send-dispatch-901",
+          threadId: thread.id,
+          sequence: 101,
+          scope: turnScope("unrelated-turn"),
+          type: "turn/completed",
+          data: { status: "failed" },
+        });
+        expect(getPluginTimelineEvent(harness.db, target)?.status).toBe(
+          "pending",
+        );
+        seedStoredEvent(harness.deps, {
+          providerThreadId: "provider-send-dispatch-901",
+          threadId: thread.id,
+          sequence: 102,
+          scope: turnScope("plugin-turn"),
+          type: "turn/completed",
+          data: { status: queued ? "interrupted" : "completed" },
+        });
+        expect(getPluginTimelineEvent(harness.db, target)).toMatchObject({
+          status: queued ? "interrupted" : "completed",
+          turnId: "plugin-turn",
+        });
+        expect(
+          updatePluginTimelineEvent(harness.db, {
+            ...target,
+            pluginId: "other-plugin",
+            update: { status: "error" },
+          }),
+        ).toBeNull();
+        updatePluginTimelineEvent(harness.db, {
+          ...target,
+          update: {
+            status: "error",
+            payload: {
+              prompt: "private run prompt",
+              reason: "delivery failed",
+            },
+          },
+        });
+        const timeline = buildThreadTimelineWithProfile(harness.db, thread, {
+          completedTurnDisplay: "flat",
+          eventBudget: 1000,
+          includeDiagnosticOperations: false,
+          maxInlineOutputChars: 10000,
+          maxSeq: 102,
+          page: { kind: "latest", segmentLimit: 20 },
+        }).response;
+        expect(
+          timeline.rows.filter(
+            (row) => row.kind === "conversation" && row.role === "user",
+          ),
+        ).toEqual([expect.objectContaining({ text: "Prior task" })]);
+        expect(
+          timeline.rows.filter(
+            (row) => row.kind === "work" && row.workKind === "extension",
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            experimental_timelineEventId: "run-1",
+            status: "error",
+            payload: {
+              prompt: "private run prompt",
+              reason: "delivery failed",
+            },
+          }),
+        ]);
+      });
+    },
+  );
 });

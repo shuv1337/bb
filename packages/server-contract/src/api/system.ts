@@ -1,6 +1,11 @@
 import { rejectMultipleWorkspaceSelectors } from "./shared.js";
 import { z } from "zod";
 import {
+  aiServiceSelectionSchema,
+  aiServiceSelectionsSchema,
+  aiServiceStatusSchema,
+  aiTaskSchema,
+  aiTextTaskSchema,
   appSettingsSchema,
   appDefaultKeybindingsSchema,
   appKeybindingOverridesSchema,
@@ -139,16 +144,52 @@ export type SystemProviderStatesResponse = z.infer<
 export const systemAiServiceSchema = z.object({
   id: z.string().min(1),
   displayName: z.string().min(1),
-  kinds: z.array(z.enum(["inference", "voice"])),
   pluginId: z.string().min(1),
+  tasks: z.array(aiTaskSchema),
+  automaticRank: z.number().int().nonnegative().nullable(),
+  status: aiServiceStatusSchema,
 });
+export type SystemAiService = z.infer<typeof systemAiServiceSchema>;
 
-export const systemAiServicesSchema = z.object({
-  inference: z.string().min(1),
-  inferenceFallback: z.string().min(1),
-  transcription: z.string().min(1),
+export const systemAiServicesResponseSchema = z.object({
+  selections: aiServiceSelectionsSchema,
   services: z.array(systemAiServiceSchema),
 });
+export type SystemAiServicesResponse = z.infer<
+  typeof systemAiServicesResponseSchema
+>;
+
+export const setAiServiceSelectionRequestSchema = z
+  .object({
+    task: aiTaskSchema,
+    selection: aiServiceSelectionSchema,
+  })
+  .strict();
+export type SetAiServiceSelectionRequest = z.infer<
+  typeof setAiServiceSelectionRequestSchema
+>;
+
+export const testAiServiceRequestSchema = z
+  .object({ task: aiTextTaskSchema })
+  .strict();
+export type TestAiServiceRequest = z.infer<typeof testAiServiceRequestSchema>;
+
+export const testAiServiceResponseSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    pluginId: z.string().min(1),
+    serviceId: z.string().min(1),
+    displayName: z.string().min(1),
+    text: z.string(),
+    durationMs: z.number().int().nonnegative(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    message: z.string().min(1),
+    durationMs: z.number().int().nonnegative(),
+  }),
+]);
+export type TestAiServiceResponse = z.infer<typeof testAiServiceResponseSchema>;
 
 export const serverAccessStatusSchema = z.object({
   providers: z.array(
@@ -197,7 +238,6 @@ export const systemConfigResponseSchema = z.object({
   primaryHostId: z.string().nullable(),
   primaryHostPlatform: hostPlatformSchema.nullable(),
   voiceTranscriptionEnabled: z.boolean(),
-  aiServices: systemAiServicesSchema,
   dataDir: z.string(),
 });
 export type SystemConfigResponse = z.infer<typeof systemConfigResponseSchema>;
@@ -275,9 +315,6 @@ export const systemAppUpdateBlockedSchema = z.object({
     "fetch-failed",
   ]),
 });
-export type SystemAppUpdateBlocked = z.infer<
-  typeof systemAppUpdateBlockedSchema
->;
 
 export const systemAppUpdateActivitySchema = z.discriminatedUnion("phase", [
   z.object({ phase: z.literal("idle") }),
@@ -498,4 +535,37 @@ export const systemMachineProvidersResponseSchema = z.object({
 });
 export type SystemMachineProvidersResponse = z.infer<
   typeof systemMachineProvidersResponseSchema
+>;
+
+export const androidAppArtifactSchema = z.object({
+  version: z.string().min(1),
+  versionCode: z.number().int().positive(),
+  size: z.number().int().positive(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export type AndroidAppArtifact = z.infer<typeof androidAppArtifactSchema>;
+
+export interface SystemMobileAppReleasesResponse {
+  android: (AndroidAppArtifact & { updatedAt: string }) | null;
+}
+
+export const systemProviderCatalogEntrySchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  pluginId: z.string(),
+  pluginName: z.string(),
+  pluginEnabled: z.boolean(),
+  enabled: z.boolean(),
+  available: z.boolean(),
+  logoUrl: z.string().nullable(),
+  info: providerInfoSchema.nullable(),
+});
+export type SystemProviderCatalogEntry = z.infer<
+  typeof systemProviderCatalogEntrySchema
+>;
+export const systemProviderEnabledRequestSchema = z
+  .object({ enabled: z.boolean() })
+  .strict();
+export type SystemProviderEnabledRequest = z.infer<
+  typeof systemProviderEnabledRequestSchema
 >;

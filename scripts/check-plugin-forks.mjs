@@ -10,11 +10,12 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { SHIMMED_TYPE_PACKAGES } from "../packages/plugin-build/src/runtime-shims.mjs";
+import { affectedPluginForks } from "./lib/ci-plugin-forks.mjs";
 import {
   forkPluginPackageJson,
   forkPluginTsconfig,
@@ -26,12 +27,16 @@ import {
 const run = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const USAGE =
-  "Usage: node scripts/check-plugin-forks.mjs [plugins/<name> ...] [--keep]\n\n" +
+  "Usage: node scripts/check-plugin-forks.mjs [plugins/<name> ...] [--keep] [--concurrency=<n>] [--changed-from=<sha>] [--shard=<index>/<count>] [--list]\n\n" +
   "Copies each forkable built-in plugin (scripts/forkable-plugins.json) out of\n" +
   "the monorepo the way a fork would: the component registry items its @/\n" +
   "imports name are written into the copy, and it installs published packages\n" +
   "plus a packed @get-bb/plugin-sdk. Then it runs the copy's typecheck, tests,\n" +
-  "and `bb plugin build`.";
+  "and `bb plugin build`. Plugins run --concurrency at a time (default: up to\n" +
+  "4), and every failure is reported at the end. --changed-from selects changed\n" +
+  "plugins only when every changed file belongs to a forkable plugin; shared or\n" +
+  "unknown changes run all plugins. --shard partitions the selection across\n" +
+  "runners (one-based index). --list prints the shard selection as JSON.";
 const COPY_EXCLUDED = new Set([
   "node_modules",
   "dist",
@@ -45,12 +50,58 @@ if (args.includes("--help")) {
   process.exit(0);
 }
 const keep = args.includes("--keep");
+for (const arg of args) {
+  if (
+    arg.startsWith("--") &&
+    !["--keep", "--list"].includes(arg) &&
+    !arg.startsWith("--concurrency=") &&
+    !arg.startsWith("--changed-from=") &&
+    !arg.startsWith("--shard=")
+  ) {
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+}
+const concurrencyArg = args.find((arg) => arg.startsWith("--concurrency="));
+const concurrency =
+  concurrencyArg === undefined
+    ? Math.min(4, availableParallelism())
+    : Number(concurrencyArg.slice("--concurrency=".length));
+if (!Number.isInteger(concurrency) || concurrency < 1) {
+  console.error(`${concurrencyArg} is not a positive integer\n\n${USAGE}`);
+  process.exit(1);
+}
 const forkable = JSON.parse(
   await readFile(join(repoRoot, "scripts", "forkable-plugins.json"), "utf8"),
 ).plugins;
 const requested = args.filter((arg) => !arg.startsWith("--"));
-const pluginDirs = requested.length > 0 ? requested : forkable;
-for (const pluginDir of pluginDirs) {
+const changedFrom = args
+  .find((arg) => arg.startsWith("--changed-from="))
+  ?.slice("--changed-from=".length);
+if (changedFrom !== undefined && requested.length > 0) {
+  throw new Error("Use plugin directories or --changed-from, not both.");
+}
+const selectedPluginDirs =
+  requested.length > 0
+    ? requested
+    : affectedPluginForks(repoRoot, changedFrom, forkable);
+const shardArg = args.find((arg) => arg.startsWith("--shard="));
+let pluginDirs = selectedPluginDirs;
+if (shardArg !== undefined) {
+  const match = /^--shard=([1-9]\d*)\/([1-9]\d*)$/u.exec(shardArg);
+  const index = Number(match?.[1]);
+  const count = Number(match?.[2]);
+  if (
+    !Number.isSafeInteger(index) ||
+    !Number.isSafeInteger(count) ||
+    index > count
+  ) {
+    throw new Error("--shard requires an index/count with 1 <= index <= count");
+  }
+  pluginDirs = selectedPluginDirs.filter(
+    (_, position) => position % count === index - 1,
+  );
+}
+for (const pluginDir of selectedPluginDirs) {
   if (!forkable.includes(pluginDir)) {
     console.error(
       `${pluginDir} is not listed in scripts/forkable-plugins.json\n\n${USAGE}`,
@@ -59,18 +110,28 @@ for (const pluginDir of pluginDirs) {
   }
 }
 
-async function step(label, command, commandArgs, options = {}) {
+if (args.includes("--list")) {
+  console.log(JSON.stringify(pluginDirs));
+  process.exit(0);
+}
+if (pluginDirs.length === 0) {
+  console.log("No changed forkable plugins.");
+  process.exit(0);
+}
+
+async function step(log, label, command, commandArgs, options = {}) {
   const startedAt = Date.now();
-  process.stdout.write(`  ${label} … `);
   try {
     const result = await run(command, commandArgs, {
       maxBuffer: 64 * 1024 * 1024,
       ...options,
     });
-    console.log(`ok (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+    log.push(
+      `  ${label} … ok (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`,
+    );
     return result.stdout;
   } catch (error) {
-    console.log("failed");
+    log.push(`  ${label} … failed`);
     throw new Error(
       `${label} failed: ${command} ${commandArgs.join(" ")}\n${error.stdout ?? ""}${error.stderr ?? ""}`,
     );
@@ -145,14 +206,18 @@ async function vendorRegistryItems(target) {
       await writeFile(join(target, file.target), file.content);
     }
   }
-  const appManifest = JSON.parse(
-    await readFile(join(repoRoot, "apps", "app", "package.json"), "utf8"),
+  const [registryManifest, appManifest] = await Promise.all(
+    [
+      join(repoRoot, "packages", "plugin-registry", "package.json"),
+      join(repoRoot, "apps", "app", "package.json"),
+    ].map(async (path) => JSON.parse(await readFile(path, "utf8"))),
   );
   return {
     items,
     packages: registryPackages(items, {
       shimmedPackages: new Set(SHIMMED_TYPE_PACKAGES),
       versions: {
+        ...registryManifest.devDependencies,
         ...appManifest.devDependencies,
         ...appManifest.dependencies,
       },
@@ -160,8 +225,7 @@ async function vendorRegistryItems(target) {
   };
 }
 
-async function checkPlugin(pluginDir, workDir, sdkTarball) {
-  console.log(`\n${pluginDir}`);
+async function checkPlugin(pluginDir, workDir, sdkTarball, log) {
   const source = join(repoRoot, pluginDir);
   const target = join(workDir, basename(pluginDir));
   await cp(source, target, {
@@ -173,7 +237,7 @@ async function checkPlugin(pluginDir, workDir, sdkTarball) {
   });
 
   const registry = await vendorRegistryItems(target);
-  console.log(
+  log.push(
     `  registry items: ${registry.items.map((item) => item.name).join(", ")}`,
   );
   const tsconfig = JSON.parse(
@@ -195,7 +259,7 @@ async function checkPlugin(pluginDir, workDir, sdkTarball) {
     join(target, "package.json"),
     `${JSON.stringify(forked.manifest, null, 2)}\n`,
   );
-  console.log(
+  log.push(
     `  package.json: @get-bb/plugin-sdk from the packed SDK, registry packages in place of @bb/shared-ui${
       forked.droppedDevDependencies.length > 0
         ? `; dropped workspace tooling ${forked.droppedDevDependencies.join(", ")}`
@@ -208,14 +272,16 @@ async function checkPlugin(pluginDir, workDir, sdkTarball) {
   );
 
   await step(
+    log,
     "npm install",
     "npm",
     ["install", "--no-audit", "--no-fund", "--legacy-peer-deps"],
     { cwd: target },
   );
-  await step("typecheck", "npm", ["run", "typecheck"], { cwd: target });
-  await step("test", "npm", ["test"], { cwd: target });
+  await step(log, "typecheck", "npm", ["run", "typecheck"], { cwd: target });
+  await step(log, "test", "npm", ["test"], { cwd: target });
   await step(
+    log,
     "bb plugin build",
     process.execPath,
     [
@@ -241,7 +307,9 @@ if (!relative(repoRoot, workDir).startsWith("..")) {
 let failed = false;
 try {
   console.log(`Work directory: ${workDir}`);
+  const printLog = { push: (line) => console.log(line) };
   await step(
+    printLog,
     "Build @get-bb/plugin-sdk and the bb CLI",
     "pnpm",
     [
@@ -258,6 +326,7 @@ try {
   );
   const packed = JSON.parse(
     await step(
+      printLog,
       "Pack @get-bb/plugin-sdk",
       "npm",
       ["pack", "--json", "--ignore-scripts", "--pack-destination", workDir],
@@ -265,10 +334,39 @@ try {
     ),
   );
   const sdkTarball = join(workDir, packed[0].filename);
-  for (const pluginDir of pluginDirs) {
-    await checkPlugin(pluginDir, workDir, sdkTarball);
+  const queue = [...pluginDirs];
+  const failures = [];
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      for (
+        let pluginDir = queue.shift();
+        pluginDir !== undefined;
+        pluginDir = queue.shift()
+      ) {
+        const log = [];
+        console.log(`Checking ${pluginDir} …`);
+        try {
+          await checkPlugin(pluginDir, workDir, sdkTarball, log);
+        } catch (error) {
+          failures.push({ pluginDir, error });
+        }
+        console.log(`\n${pluginDir}\n${log.join("\n")}`);
+      }
+    }),
+  );
+  if (failures.length > 0) {
+    failed = true;
+    for (const { pluginDir, error } of failures) {
+      console.error(
+        `\n${pluginDir}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    console.error(
+      `\n${failures.length} of ${pluginDirs.length} forkable plugin(s) failed: ${failures.map(({ pluginDir }) => pluginDir).join(", ")}`,
+    );
+  } else {
+    console.log(`\n${pluginDirs.length} forkable plugin(s) passed.`);
   }
-  console.log(`\n${pluginDirs.length} forkable plugin(s) passed.`);
 } catch (error) {
   failed = true;
   console.error(`\n${error instanceof Error ? error.message : String(error)}`);

@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,15 @@ const threadDeltaParamsSchema = z.object({
   threadId: z.string(),
   deltas: z.array(z.record(z.string(), z.unknown())),
 });
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface StartFakePiBridgeOptions {
   prefix: string;
@@ -165,9 +175,18 @@ export async function startFakePiBridge(
     },
     async teardown() {
       await experimental_closeAllForTests();
+      await bridge.waitFor(
+        () => bridge.readProcessLog().spawned.every((pid) => !isRunning(pid)),
+        "fake Pi processes to exit",
+      );
       harness.restore();
       vi.unstubAllEnvs();
-      rmSync(workspaceDir, { recursive: true, force: true });
+      await rm(workspaceDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100,
+      });
     },
   };
   if (options.initialize) {

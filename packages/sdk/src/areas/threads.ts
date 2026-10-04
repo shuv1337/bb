@@ -1,3 +1,7 @@
+import type {
+  PluginTimelineEvent,
+  PluginTimelineEventUpdate,
+} from "@bb/domain";
 import {
   parseThreadEventRow,
   type PromptInput,
@@ -85,6 +89,7 @@ export const DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS = 250;
 export interface ThreadListArgs {
   archived?: boolean;
   environmentId?: string;
+  hostId?: string;
   sectionId?: string;
   hasParent?: boolean;
   includeHidden?: boolean;
@@ -191,6 +196,7 @@ export type ThreadBannerActionResult = { ok: true };
 export type ThreadUnarchiveResult = { ok: true };
 export type ThreadArchiveAllResult = ThreadArchiveAllResponse;
 export type ThreadReadStateResult = ThreadResponse;
+export type ThreadRestoreEnvironmentResult = ThreadResponse;
 export type ThreadPinOrderResult = ThreadListResponse;
 export type ThreadPromptHistoryResult = PromptHistoryResponse;
 export type ThreadQueuedMessagesResult = ThreadQueuedMessageListResponse;
@@ -561,6 +567,18 @@ export interface ThreadsArea {
   ): Promise<ThreadDefaultExecutionOptionsResult>;
   delete(args: ThreadDeleteArgs): Promise<ThreadDeleteResult>;
   editMessage(args: ThreadEditMessageArgs): Promise<ThreadEditMessageResult>;
+  experimental_getTimelineEvent(args: {
+    threadId: string;
+    pluginId: string;
+    eventId: string;
+  }): Promise<PluginTimelineEvent | null>;
+  experimental_updateTimelineEvent(
+    args: {
+      threadId: string;
+      pluginId: string;
+      eventId: string;
+    } & PluginTimelineEventUpdate,
+  ): Promise<PluginTimelineEvent>;
   events: ThreadEventsArea;
   fork(args: ThreadForkArgs): Promise<ThreadForkResult>;
   get(args: ThreadGetArgs): Promise<ThreadGetResult>;
@@ -593,6 +611,16 @@ export interface ThreadsArea {
    * `sendAt` in the future queues it on the clock and a `message.dispatch` hook
    * can still hold it; the response says which of the two happened.
    */
+  /**
+   * Ask the environment provider to restore the destroyed workspace of a
+   * thread and attach it; the provider decides what restoring means, such as
+   * checking the recorded branch out again. Sends fail until this runs. Starts
+   * no turn: the thread settles back to `idle` once the workspace is ready.
+   * Refused unless the thread's `canRestoreEnvironment` is true.
+   */
+  restoreEnvironment(
+    args: ThreadActionArgs,
+  ): Promise<ThreadRestoreEnvironmentResult>;
   retry(args: ThreadRetryArgs): Promise<ThreadRetryResult>;
   search(args: ThreadSearchArgs): Promise<ThreadSearchResult>;
   send(args: ThreadSendArgs): Promise<ThreadSendResult>;
@@ -625,6 +653,7 @@ function listQuery(args: ThreadListArgs | undefined): ThreadListQuery {
   return {
     ...(args?.projectId ? { projectId: args.projectId } : {}),
     ...(args?.environmentId ? { environmentId: args.environmentId } : {}),
+    ...(args?.hostId ? { hostId: args.hostId } : {}),
     ...(args?.parentThreadId ? { parentThreadId: args.parentThreadId } : {}),
     ...(args?.sourceThreadId ? { sourceThreadId: args.sourceThreadId } : {}),
     ...(args?.sectionId ? { sectionId: args.sectionId } : {}),
@@ -681,6 +710,7 @@ function sendJson(args: ThreadSendArgs): SendMessageRequest {
     senderThreadId: args.senderThreadId,
     serviceTier: args.serviceTier,
     pluginSubmission: args.pluginSubmission,
+    experimental_timelineEvent: args.experimental_timelineEvent,
     executionInputSources: args.executionInputSources,
     // Present ⇒ the message joins the queue waiting for the clock instead
     // of attempting now; the response reports `delivery: "queued"`.
@@ -1146,6 +1176,22 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         }),
       );
     },
+    async experimental_getTimelineEvent({ threadId, ...query }) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"]["timeline-event"].$get({
+          param: { id: threadId },
+          query,
+        }),
+      );
+    },
+    async experimental_updateTimelineEvent({ threadId, ...json }) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"]["timeline-event"].$patch({
+          param: { id: threadId },
+          json,
+        }),
+      );
+    },
     events,
     async fork(input) {
       return transport.readJson(
@@ -1291,6 +1337,13 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         transport.api.v1.threads[":id"].send.$post({
           param: { id: input.threadId },
           json: sendJson(input),
+        }),
+      );
+    },
+    async restoreEnvironment(input) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"]["restore-environment"].$post({
+          param: { id: input.threadId },
         }),
       );
     },

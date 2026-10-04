@@ -16,7 +16,14 @@
     },
     "server": "./server.ts",
     "app": "./app.tsx",
-    "host": "./src/host.ts"
+    "host": "./src/host.ts",
+    "experimental_providers": [
+      {
+        "kind": "agent",
+        "id": "opencode",
+        "displayName": "OpenCode v2"
+      }
+    ]
   },
   "keywords": [
     "bb-plugin"

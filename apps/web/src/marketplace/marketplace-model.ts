@@ -1,3 +1,8 @@
+import {
+  pluginInstallBadge,
+  type PluginInstallBadge,
+} from "@bb/domain/plugin-install-badge";
+
 import type { MarketplaceV2Entry } from "./marketplace-v2.js";
 
 export const MARKETPLACE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u;
@@ -13,4 +18,21 @@ export function marketplaceEntryInstalls(
   stats: MarketplaceStats | null,
 ): number | undefined {
   return stats?.plugins[entry.id]?.installs;
+}
+
+export function marketplaceInstallBadge(
+  entry: MarketplaceV2Entry,
+  stats: MarketplaceStats | null,
+  now: number,
+): PluginInstallBadge | null {
+  return pluginInstallBadge(
+    {
+      installs: marketplaceEntryInstalls(entry, stats) ?? null,
+      installedByDefault: false,
+      ...(entry.publishedAt === undefined
+        ? {}
+        : { publishedAt: entry.publishedAt }),
+    },
+    now,
+  );
 }

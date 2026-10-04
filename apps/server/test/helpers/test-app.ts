@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import {
   createConnection,
   getAppSettings,
+  getDisabledProviderIds,
   listRunningThreads,
   type DbConnection,
 } from "@bb/db";
@@ -174,6 +175,7 @@ export async function createTestAppHarness(
       const settings = getAppSettings(db);
       return {
         providerOrder: settings.providerOrder,
+        disabledProviderIds: getDisabledProviderIds(db),
         defaultProviderId: settings.defaultProviderId,
       };
     },
@@ -229,13 +231,9 @@ export async function createTestAppHarness(
     hostDaemonPort: 3001,
     marketplaceUrl: "https://marketplace.invalid/marketplace.json",
     inheritedSkillsRootPaths: [],
-    inferenceFallbackModel: "test/mock-fallback-model",
-    inferenceModel: "test/mock-model",
     isDevelopment: true,
-    openAiApiKey: "test-openai-key",
     serverPort: 3334,
     sharedSkillRoots: { user: [], project: [] },
-    transcriptionModel: "test/mock-transcription",
     appUrl: "https://bb.example.test",
     ...configOverrides,
   };

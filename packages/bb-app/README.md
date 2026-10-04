@@ -45,8 +45,8 @@ Run all `bb` commands inside WSL2, install Node.js, Git, and your provider CLIs
 inside that WSL2 distro, and use Linux-style paths such as `/home/me/repo` or
 `/mnt/c/Users/me/repo`.
 
-Native Windows PowerShell, CMD, drive-letter paths, and UNC paths are not
-supported product paths. Repos inside the WSL filesystem are recommended;
+Inside WSL2, use Linux paths rather than drive-letter or UNC paths. Repos
+inside the WSL filesystem are recommended;
 `/mnt/c/...` is intentionally supported so you can keep an existing Windows
 checkout, but it is slower and less reliable for file watching.
 
@@ -213,9 +213,7 @@ Custom ACP agents are configured through the ACP providers plugin's
 `reasoningCli` or `nativeReasoning` reasoning settings. The optional
 `nativeSkillRoots` field adds provider-native skills to the composer. Its
 `user` paths resolve from the target host home directory. Its `project` paths
-resolve from the selected workspace. The `customAcpAgents` array in
-`~/.bb/config.json` is the deprecated form of the same list; bb reads it, warns
-about each entry, and stops reading it in 0.41.
+resolve from the selected workspace.
 Top-level `sharedSkillRoots` uses the same `user` and `project` path format.
 BB lists these sources as read-only skills. BB injects them into Codex, Claude,
 Pi, and ACP threads. This permits one physical skill collection for BB and a
@@ -228,9 +226,6 @@ Use `bb-app config` for persistent non-secret package settings under
 
 ```bash
 npx bb-app config set BB_APP_URL https://<machine>.<tailnet>.ts.net
-npx bb-app config set BB_INFERENCE codex/gpt-5.6-luna
-npx bb-app config set BB_INFERENCE_FALLBACK codex/gpt-5.4-mini
-npx bb-app config set BB_TRANSCRIPTION codex/gpt-transcribe
 npx bb-app config list
 npx bb-app config refresh
 ```

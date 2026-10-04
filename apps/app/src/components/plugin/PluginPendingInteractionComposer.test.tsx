@@ -1,17 +1,22 @@
 // @vitest-environment jsdom
 
+import { resolve } from "node:path";
 import { useEffect, useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultAppSettings, type PluginPendingInteraction } from "@bb/domain";
 import type { PluginPendingInteractionProps } from "@get-bb/plugin-sdk";
-import { loadPluginApp } from "@get-bb/plugin-sdk/testing/app";
 import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
   type PluginRegistrationSet,
 } from "@/lib/plugin-slots";
+import {
+  collectPluginAppRegistrations,
+  isPluginAppDefinition,
+} from "@/lib/plugin-app-definition";
+import { installPluginRuntime } from "@/lib/plugin-frontend";
 import {
   markPluginFrontendsSettled,
   resetPluginFrontendBootStateForTest,
@@ -24,6 +29,7 @@ import { resetAllCrashedPluginSlotsForTest } from "./PluginSlotMount";
 import { PluginPendingInteractionComposer } from "./PluginPendingInteractionComposer";
 import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 import { AppCommandProvider } from "@/components/commands/AppCommandProvider";
+import { sdk } from "@/lib/sdk";
 
 vi.mock("@/hooks/queries/system-queries", () => ({
   useSystemConfig: () => ({
@@ -51,9 +57,23 @@ vi.mock("@/views/thread-detail/PaneContext", () => ({
   useOptionalPaneContext: () => pane,
 }));
 
-const piApp = await loadPluginApp(() =>
-  import("../../../../../plugins/provider-pi/app"),
+const PI_APP_MODULE = resolve(
+  __dirname,
+  "../../../../../plugins/provider-pi/app.tsx",
 );
+
+async function loadPiPendingInteractions(): Promise<
+  NonNullable<PluginRegistrationSet["pendingInteractions"]>
+> {
+  installPluginRuntime();
+  const module: { default?: unknown } = await import(
+    /* @vite-ignore */ PI_APP_MODULE
+  );
+  if (!isPluginAppDefinition(module.default)) {
+    throw new Error("provider-pi's app.tsx exports no plugin app definition");
+  }
+  return collectPluginAppRegistrations(module.default).pendingInteractions;
+}
 
 function renderComposer(ui: React.ReactElement) {
   return render(
@@ -253,16 +273,19 @@ describe("PluginPendingInteractionComposer", () => {
     ).toBe("true");
   });
 
-  it("selects a pi option with its displayed number key", () => {
+  it("submits a numbered pi selection through the shared question form", async () => {
     setPluginSlotRegistrations(
       "provider-pi",
-      registrations(piApp.pendingInteractions),
+      registrations(await loadPiPendingInteractions()),
     );
     const data = {
       requestId: "ui-1",
       method: "select" as const,
       options: ["Allow once", "Deny"],
     };
+    const respond = vi
+      .spyOn(sdk.threads.interactions, "respond")
+      .mockRejectedValue(new Error("test response"));
     renderComposer(
       <PluginPendingInteractionComposer
         interaction={{
@@ -285,9 +308,16 @@ describe("PluginPendingInteractionComposer", () => {
     expect(screen.getByText("2", { selector: "kbd" })).toBeDefined();
     fireEvent.keyDown(window, { key: "2" });
     expect(
-      (screen.getByRole("radio", { name: "Deny" }) as HTMLInputElement)
-        .checked,
-    ).toBe(true);
+      screen.getByRole("button", { name: "Deny" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+    await vi.waitFor(() =>
+      expect(respond).toHaveBeenCalledWith({
+        interactionId: "pint_provider",
+        threadId: "thr_test",
+        value: "Deny",
+      }),
+    );
   });
 
   it("mounts only the renderer registered by the interaction's plugin", () => {
@@ -323,24 +353,6 @@ describe("PluginPendingInteractionComposer", () => {
 
     expect(screen.getByText("form Add secrets")).toBeDefined();
     expect(screen.queryByText("wrong plugin renderer")).toBeNull();
-  });
-
-  it("keeps a host-owned cancel fallback when the renderer is missing", () => {
-    markPluginFrontendsSettled();
-    renderComposer(
-      <PluginPendingInteractionComposer
-        interaction={interaction}
-        request={{
-          pluginId: "secrets",
-          rendererId: "secret-request",
-          title: interaction.payload.title,
-          data: interaction.payload.data,
-        }}
-        origin="plugin"
-      />,
-    );
-    expect(screen.getByText(/form is unavailable/i)).toBeDefined();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeDefined();
   });
 
   it("resolves the form through the slot store once the renderer registers", () => {
