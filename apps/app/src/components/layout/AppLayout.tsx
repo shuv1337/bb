@@ -18,6 +18,7 @@ import {
   SidebarInset,
   SidebarProvider,
   SidebarTrigger,
+  useIsSidebarFramed,
   useSidebar,
 } from "@/components/ui/sidebar.js";
 import {
@@ -39,9 +40,9 @@ import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
 import { stripProjectThreads } from "@/hooks/queries/project-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
+import { SidebarThreadEntriesProvider } from "@/lib/sidebar-thread-entries";
 import {
   didThreadDetailBootstrapRefreshAfterMount,
-  getLatestPendingInteraction,
   useThread,
   useThreadDetailBootstrap,
   useThreadPendingInteractions,
@@ -62,7 +63,6 @@ import {
   PluginPanelHeaderCenter,
 } from "@/components/plugin/PluginPanelHeader";
 import { PluginAppOverlays } from "@/components/plugin/PluginAppOverlays";
-import { AppThreadSectionMoveProvider } from "@/components/thread/ThreadSectionMoveProvider";
 import { ThreadActionsProvider } from "@/components/thread/ThreadActionsProvider";
 import {
   usePluginNavPanelChrome,
@@ -77,13 +77,16 @@ import {
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
   MACOS_TRAFFIC_LIGHT_RESERVE_OFFSET_CLASS,
+  MACOS_TRAFFIC_LIGHT_RESERVE_PADDING_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
   shouldReserveMacosTrafficLights,
   shouldUseMacosDesktopChrome,
 } from "@/lib/bb-desktop";
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
 import { useDataDirectoryCommand } from "@/hooks/useDataDirectoryCommand";
+import { useWindowReloadCommand } from "@/hooks/useWindowReloadCommand";
 import { usePluginSafeModeCommands } from "@/hooks/usePluginSafeModeCommands";
+import { usePluginCachePruneCommand } from "@/hooks/usePluginCachePruneCommand";
 import { useServerDaemonLogsCommand } from "@/hooks/useServerDaemonLogsCommand";
 import {
   getLegacyProjectComposeRoutePath,
@@ -102,15 +105,16 @@ import { dispatchBrowserViewBoundsSync } from "@/lib/browser-view-bounds-sync";
 import { useFaviconBadge } from "@/lib/favicon-color-preference";
 import { shouldShowFaviconAttentionDot } from "./faviconAttentionDot";
 import { AppLayoutSidebar } from "./AppLayoutSidebar";
+import { WindowRightPanelToggle } from "./WindowRightPanelToggle";
+import { NAV_RAIL_COLLAPSED_SIDEBAR_WIDTH } from "@/components/sidebar/navRailWidth";
+import { SidebarHistoryNavigationControls } from "@/components/sidebar/SidebarHistoryNavigationControls";
 import {
   useAppCommandHandler,
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
-import {
-  shouldRestoreIOSViewportOnKeyboardDismissal,
-  useMobileVisualViewportHeight,
-} from "./useMobileVisualViewportHeight";
+import { useMobileVisualViewportHeight } from "./useMobileVisualViewportHeight";
+import { isIOSWebKit } from "@/lib/ios-webkit";
 import { wsManager } from "@/lib/ws";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { findPaneByThread } from "@/lib/split-layout";
@@ -118,6 +122,7 @@ import { applyThreadOpenToLayout } from "@/views/thread-detail/splitThreadNaviga
 import { useAppSettingsRouteMemory } from "@/hooks/useAppSettingsRouteMemory";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 import { BackToAppCommandHandler } from "./BackToAppCommandHandler";
+import { HistoryCommandHandlers } from "./HistoryCommandHandlers";
 
 const SIDEBAR_WIDTH_KEY = "bb.sidebar.width";
 const SIDEBAR_OPEN_KEY = "bb.sidebar.open";
@@ -174,13 +179,14 @@ const sidebarOpenAtom = atomWithStorage<boolean>(
 );
 
 interface SidebarStateBridgeProps {
+  framed: boolean;
   children: ReactNode;
 }
 
 type SidebarResizeMouseEvent = ReactMouseEvent<HTMLDivElement>;
 type SidebarOpenChangeHandler = (open: boolean) => void;
 
-function SidebarStateBridge({ children }: SidebarStateBridgeProps) {
+function SidebarStateBridge({ framed, children }: SidebarStateBridgeProps) {
   const [open, setOpen] = useAtom(sidebarOpenAtom);
   const sidebarWidth = useAtomValue(sidebarWidthAtom);
   const sidebarLiveWidth = useAtomValue(sidebarLiveWidthAtom);
@@ -198,6 +204,8 @@ function SidebarStateBridge({ children }: SidebarStateBridgeProps) {
   return (
     <SidebarProvider
       width={`${sidebarLiveWidth ?? sidebarWidth}px`}
+      collapsedRailWidth={NAV_RAIL_COLLAPSED_SIDEBAR_WIDTH}
+      framed={framed}
       data-testid="app-layout-root"
       open={open}
       onOpenChange={handleOpenChange}
@@ -211,6 +219,9 @@ function resetSidebarResizeDocumentState(): void {
   document.body.classList.remove("sidebar-resizing");
 }
 
+const MACOS_SIDEBAR_TRIGGER_TRANSITION_CLASS =
+  "[transition:left_120ms_linear,padding-left_120ms_linear]";
+
 interface SidebarTriggerOverlayProps {
   reserveMacosTrafficLights: boolean;
   usesDesktopChrome: boolean;
@@ -222,6 +233,7 @@ function SidebarTriggerOverlay({
 }: SidebarTriggerOverlayProps) {
   const isCompactViewport = useIsCompactViewport();
   const { openMobile } = useSidebar();
+  const isFramed = useIsSidebarFramed();
   const panelShelfState = usePanelShelfState({
     isCompactViewport,
     isSidebarDrawerOpen: openMobile,
@@ -233,6 +245,41 @@ function SidebarTriggerOverlay({
       : "Toggle sidebar",
     "aria-keyshortcuts": shortcut?.ariaKeyshortcuts,
   };
+  if (isFramed) {
+    return (
+      <div
+        data-testid="app-window-title-bar"
+        style={{ zIndex: APP_OVERLAY_LAYER.sidebarTrigger }}
+        className={cn(
+          "fixed inset-x-0 top-0 pr-[calc(var(--bb-window-frame-lip)_+_var(--bb-panel-chrome-padding)_+_1px)]",
+          "flex h-(--bb-window-title-bar-height) items-center [--bb-macos-chrome-control-y:calc(26px_-_var(--bb-window-title-bar-height)/2)]",
+          reserveMacosTrafficLights
+            ? MACOS_TRAFFIC_LIGHT_RESERVE_PADDING_CLASS
+            : BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
+          MACOS_WINDOW_DRAG_CLASS,
+        )}
+      >
+        <div
+          className={cn(
+            "flex items-center gap-(--bb-chrome-control-gap)",
+            MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
+          )}
+        >
+          <SidebarHistoryNavigationControls />
+          <div className="relative flex items-center">
+            <SidebarTrigger {...triggerProps} />
+            <AppCommandShortcutHint
+              shortcut={shortcut}
+              className="absolute left-full ml-1"
+            />
+          </div>
+        </div>
+        <WindowRightPanelToggle
+          className={cn("ml-auto", MACOS_CHROME_CONTROL_NO_DRAG_CLASS)}
+        />
+      </div>
+    );
+  }
   if (usesDesktopChrome) {
     return (
       <div
@@ -240,13 +287,13 @@ function SidebarTriggerOverlay({
         data-panel-shelf={panelShelfState}
         style={{ zIndex: APP_OVERLAY_LAYER.sidebarTrigger }}
         className={cn(
-          "fixed top-0",
+          "fixed top-0 motion-reduce:transition-none!",
           COMPACT_SHELF_HIDDEN_FIXED_CHROME_CLASS,
           CHROME_ROW_CLASS,
+          MACOS_SIDEBAR_TRIGGER_TRANSITION_CLASS,
           reserveMacosTrafficLights
             ? MACOS_TRAFFIC_LIGHT_RESERVE_OFFSET_CLASS
-            : "left-0",
-          !reserveMacosTrafficLights && BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
+            : ["left-0", BROWSER_SIDEBAR_TRIGGER_INSET_CLASS],
           MACOS_WINDOW_DRAG_CLASS,
         )}
       >
@@ -392,7 +439,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const store = useStore();
   const [contentShell, setContentShell] = useState<HTMLDivElement | null>(null);
   const restoreIOSViewportOnKeyboardDismissal = useMemo(
-    () => shouldRestoreIOSViewportOnKeyboardDismissal(navigator),
+    () => isIOSWebKit(navigator),
     [],
   );
   useMobileVisualViewportHeight(
@@ -479,7 +526,9 @@ export function AppLayout({ children }: AppLayoutProps) {
   });
   useServerDaemonLogsCommand();
   useDataDirectoryCommand();
+  useWindowReloadCommand();
   usePluginSafeModeCommands();
+  usePluginCachePruneCommand();
   const archivedSectionId = isArchivedView
     ? new URLSearchParams(location.search).get("sectionId")
     : null;
@@ -667,8 +716,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     { enabled: isThreadView && Boolean(threadId) },
   );
   const currentThreadHasPendingInteraction =
-    getLatestPendingInteraction(currentThreadPendingInteractionsQuery.data) !==
-    null;
+    (currentThreadPendingInteractionsQuery.data?.length ?? 0) > 0;
   const faviconBadge = shouldShowFaviconAttentionDot({
     currentThreadHasPendingInteraction,
     currentThreadId: threadId,
@@ -769,17 +817,16 @@ export function AppLayout({ children }: AppLayoutProps) {
   }
 
   return (
-    <TooltipProvider delayDuration={300} disableHoverableContent>
-      <ProjectActionsProvider>
-        <ThreadTitleMentionResourcesProvider {...titleMentionResources}>
-          <AppThreadSectionMoveProvider
-            sections={sidebarNavigationQuery.data?.sections ?? []}
-          >
+    <SidebarThreadEntriesProvider navigation={sidebarNavigationQuery.data}>
+      <TooltipProvider delayDuration={300} disableHoverableContent>
+        <ProjectActionsProvider>
+          <ThreadTitleMentionResourcesProvider {...titleMentionResources}>
             <ThreadActionsProvider>
-              <SidebarStateBridge>
+              <SidebarStateBridge framed={usesDesktopChrome}>
                 {backToAppRoutePath !== null && !isSidebarResizing ? (
                   <BackToAppCommandHandler routePath={backToAppRoutePath} />
                 ) : null}
+                <HistoryCommandHandlers />
                 <AppLayoutSidebar
                   mode={
                     isGlobalSettingsView
@@ -792,9 +839,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                   }
                   onResizeMouseDown={handleResizeMouseDown}
                   isResizing={isSidebarResizing}
-                  appRoutePath={appRoutePath}
                   settingsRoutePath={settingsRoutePath}
-                  toolsBackRoutePath={toolsBackRoutePath}
                 />
                 <SidebarInset>
                   <div
@@ -846,9 +891,9 @@ export function AppLayout({ children }: AppLayoutProps) {
                 onSubmit={quickCreateProject.submitProjectPath}
               />
             </ThreadActionsProvider>
-          </AppThreadSectionMoveProvider>
-        </ThreadTitleMentionResourcesProvider>
-      </ProjectActionsProvider>
-    </TooltipProvider>
+          </ThreadTitleMentionResourcesProvider>
+        </ProjectActionsProvider>
+      </TooltipProvider>
+    </SidebarThreadEntriesProvider>
   );
 }

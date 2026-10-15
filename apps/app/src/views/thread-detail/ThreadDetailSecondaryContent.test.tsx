@@ -52,6 +52,8 @@ vi.mock("@/lib/bb-desktop", async (importOriginal) => ({
 
 vi.mock("@/components/ui/sidebar.js", () => ({
   useOptionalIsSidebarShowing: () => true,
+  useSidebarKeepsCollapsedRail: () => false,
+  useIsSidebarFramed: () => false,
 }));
 
 const { useThreadsMock } = vi.hoisted(() => ({
@@ -73,36 +75,10 @@ vi.mock("jotai", async (importOriginal) => {
   };
 });
 
-vi.mock("react-resizable-panels", async () => {
-  const React = await import("react");
-
-  const PanelGroup = React.forwardRef<
-    {
-      getLayout: () => number[];
-      setLayout: (layout: number[]) => void;
-    },
-    { children?: ReactNode }
-  >(({ children }, ref) => {
-    React.useImperativeHandle(
-      ref,
-      () => ({ getLayout: () => [50, 50], setLayout: () => {} }),
-      [],
-    );
-    return React.createElement(
-      "div",
-      { "data-testid": "panel-group" },
-      children,
-    );
-  });
-  PanelGroup.displayName = "MockPanelGroup";
-
-  const Panel = ({ children }: { children?: ReactNode }) =>
-    React.createElement("div", { "data-testid": "panel" }, children);
-  const PanelResizeHandle = ({ children }: { children?: ReactNode }) =>
-    React.createElement("div", null, children);
-
-  return { Panel, PanelGroup, PanelResizeHandle };
-});
+vi.mock(
+  "react-resizable-panels",
+  () => import("@/test/react-resizable-panels-stub"),
+);
 
 vi.mock(
   "@/components/secondary-panel/ThreadMetadataContent",
@@ -250,6 +226,7 @@ function makeThread(): ThreadDetailSecondaryContentProps["metadata"]["thread"] {
     originKind: null,
     originPluginId: null,
     visibility: "visible",
+    parentNotifications: "auto",
     status: "idle",
     stopRequestedAt: null,
     title: null,
@@ -457,7 +434,7 @@ describe("ThreadDetailSecondaryContent", () => {
     ).toBe(true);
   });
 
-  it("pins a split browser pane to its tab and gates native commands by pane focus", () => {
+  it("pins a split browser pane to its tab and gates native commands by pane focus", async () => {
     const renderBrowserDeck = vi.fn(() => null);
     const props = createProps();
     props.secondaryPanel.renderBrowserDeck = renderBrowserDeck;
@@ -472,6 +449,7 @@ describe("ThreadDetailSecondaryContent", () => {
       </MemoryRouter>,
     );
 
+    await screen.findByTestId("inline-secondary-panel");
     const panelBrowserDeck = secondaryPanelMockState.renderBrowserDeck;
     expect(panelBrowserDeck).toBeDefined();
     if (panelBrowserDeck === undefined) return;

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "13646bc5-012b-4798-90c1-31f4086b232d",
+  "id": "0ff4051a-a8fd-44bf-b4cd-662cf0124e8a",
   "prevId": "160b6d7d-ff23-4b83-8589-93e0e8e55578",
   "tables": {
     "app_settings": {
@@ -2713,145 +2713,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "plugin_timeline_events": {
-      "name": "plugin_timeline_events",
-      "columns": {
-        "thread_id": {
-          "name": "thread_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "plugin_id": {
-          "name": "plugin_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "request_event_id": {
-          "name": "request_event_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "request_id": {
-          "name": "request_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "request_sequence": {
-          "name": "request_sequence",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "renderer_id": {
-          "name": "renderer_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "payload_json": {
-          "name": "payload_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "presentation_json": {
-          "name": "presentation_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "plugin_timeline_events_request_idx": {
-          "name": "plugin_timeline_events_request_idx",
-          "columns": [
-            "thread_id",
-            "request_sequence"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "plugin_timeline_events_thread_id_threads_id_fk": {
-          "name": "plugin_timeline_events_thread_id_threads_id_fk",
-          "tableFrom": "plugin_timeline_events",
-          "tableTo": "threads",
-          "columnsFrom": [
-            "thread_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "plugin_timeline_events_request_event_id_events_id_fk": {
-          "name": "plugin_timeline_events_request_event_id_events_id_fk",
-          "tableFrom": "plugin_timeline_events",
-          "tableTo": "events",
-          "columnsFrom": [
-            "request_event_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "plugin_timeline_events_thread_id_plugin_id_id_pk": {
-          "columns": [
-            "thread_id",
-            "plugin_id",
-            "id"
-          ],
-          "name": "plugin_timeline_events_thread_id_plugin_id_id_pk"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "project_attachment_backfills": {
       "name": "project_attachment_backfills",
       "columns": {
@@ -3810,13 +3671,6 @@
           "notNull": false,
           "autoincrement": false
         },
-        "timeline_event_json": {
-          "name": "timeline_event_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "claimed_at": {
           "name": "claimed_at",
           "type": "integer",
@@ -4454,6 +4308,14 @@
           "autoincrement": false,
           "default": 0
         },
+        "work_revision": {
+          "name": "work_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
         "cycle": {
           "name": "cycle",
           "type": "integer",
@@ -4556,6 +4418,68 @@
           "value": "\"thread_pruning_cursors\".\"scope\" = coalesce(\"thread_pruning_cursors\".\"thread_id\", '')"
         }
       }
+    },
+    "thread_pruning_work": {
+      "name": "thread_pruning_work",
+      "columns": {
+        "policy": {
+          "name": "policy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "thread_id": {
+          "name": "thread_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
+        }
+      },
+      "indexes": {
+        "thread_pruning_work_thread_idx": {
+          "name": "thread_pruning_work_thread_idx",
+          "columns": [
+            "thread_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "thread_pruning_work_thread_id_threads_id_fk": {
+          "name": "thread_pruning_work_thread_id_threads_id_fk",
+          "tableFrom": "thread_pruning_work",
+          "tableTo": "threads",
+          "columnsFrom": [
+            "thread_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "thread_pruning_work_policy_thread_id_pk": {
+          "columns": [
+            "policy",
+            "thread_id"
+          ],
+          "name": "thread_pruning_work_policy_thread_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "thread_search_segments": {
       "name": "thread_search_segments",

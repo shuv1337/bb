@@ -1,3 +1,5 @@
+import { createPluginUpdateJobs } from "./services/plugins/plugin-update-jobs.js";
+import { registerPluginUpdateJobRoutes } from "./routes/plugin-update-jobs.js";
 import { recheckEnvironmentProvisioning } from "./services/threads/thread-environment-providers.js";
 import {
   enrolledInstallerScript,
@@ -35,6 +37,8 @@ import { registerThreadRoutes } from "./routes/threads/index.js";
 import { registerQueueRoutes } from "./routes/queue.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
 import { registerPluginCatalogRoutes } from "./routes/plugin-catalog.js";
+import { registerPluginInstallJobRoutes } from "./routes/plugin-install-jobs.js";
+import { createPluginInstallJobs } from "./services/plugins/plugin-install-jobs.js";
 import { registerPromptHistoryRoutes } from "./routes/prompt-history.js";
 import { registerSkillsRegistryRoutes } from "./routes/skills-registry.js";
 import {
@@ -188,6 +192,7 @@ interface CreateAppOptions {
   bbAppArtifactService?: BbAppArtifactService;
   serverMove?: ServerMoveAppOptions;
   slowApiRequestLogThresholdMs?: number;
+  performanceDiagnosticsEnabled?: () => boolean;
   staticDir?: string;
 }
 
@@ -691,14 +696,19 @@ export function createApp(
     await next();
     const durationMs = performance.now() - startedAt;
     const path = context.req.path;
+    const diagnosticsEnabled =
+      options?.performanceDiagnosticsEnabled?.() ?? false;
     if (
       shouldLogSlowApiRequest({
         durationMs,
         path,
-        thresholdMs: slowApiRequestLogThresholdMs,
+        thresholdMs: diagnosticsEnabled ? 100 : slowApiRequestLogThresholdMs,
       })
     ) {
-      deps.logger.debug(
+      const log = diagnosticsEnabled
+        ? deps.logger.info.bind(deps.logger)
+        : deps.logger.debug.bind(deps.logger);
+      log(
         {
           durationMs: roundDurationMs(durationMs),
           method: context.req.method,
@@ -876,8 +886,27 @@ export function createApp(
   registerQueueRoutes(publicApi, deps);
   registerSystemRoutes(publicApi, deps, pluginService);
   registerUiPreferenceRoutes(publicApi, deps);
-  registerPluginCatalogRoutes(publicApi, pluginCatalogService);
-  registerPluginRoutes(publicApi, deps, pluginService, upgradeWebSocket);
+  const pluginInstallJobs = createPluginInstallJobs({
+    notifyChanged: () => deps.hub.notifySystem(["plugin-install-jobs-changed"]),
+  });
+  const pluginUpdateJobs = createPluginUpdateJobs({
+    notifyChanged: () => deps.hub.notifySystem(["plugin-update-jobs-changed"]),
+  });
+  registerPluginUpdateJobRoutes(publicApi, pluginUpdateJobs);
+  registerPluginInstallJobRoutes(publicApi, pluginInstallJobs);
+  registerPluginCatalogRoutes(
+    publicApi,
+    pluginCatalogService,
+    pluginInstallJobs,
+  );
+  registerPluginRoutes(
+    publicApi,
+    deps,
+    pluginService,
+    pluginInstallJobs,
+    pluginUpdateJobs,
+    upgradeWebSocket,
+  );
   registerSkillsRegistryRoutes(publicApi, deps);
   registerServerMoveRoutes(publicApi, deps, serverMove);
   app.route("/api/v1", publicApi);
@@ -939,18 +968,20 @@ export function createApp(
       assertBrowserWebSocketAllowed(context);
       const terminalId = context.req.param("terminalId");
       const query = terminalWebSocketQuerySchema.safeParse({
+        outputAcks: context.req.query("outputAcks"),
         sinceSeq: context.req.query("sinceSeq"),
       });
       if (!query.success) {
         throw new ApiError(
           400,
           "invalid_terminal_socket_query",
-          "Terminal websocket sinceSeq must be a non-negative integer",
+          "Terminal websocket sinceSeq must be a non-negative integer and outputAcks must be 0 or 1",
         );
       }
       return {
         onOpen: (_event, socket) =>
           onTerminalSocketOpen(deps, {
+            outputAcks: query.data.outputAcks,
             socket,
             sinceSeq: query.data.sinceSeq,
             terminalId,

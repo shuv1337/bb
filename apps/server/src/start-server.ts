@@ -1,5 +1,8 @@
+import { createDesktopAppUpdateService } from "./services/system/desktop-app-update.js";
+import { createDesktopUpdateChannel } from "./services/system/desktop-update-channel.js";
 import { serve } from "@hono/node-server";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerConfig } from "@bb/config/server";
@@ -21,9 +24,14 @@ import { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artif
 import { createProviderNativeRootsCache } from "./services/providers/native-roots.js";
 import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppUpdateService } from "./services/system/app-update.js";
+import {
+  createCliCommandService,
+  createWindowsUserPath,
+} from "./services/system/cli-command.js";
 import { createAppVersionService } from "./services/system/app-version.js";
 import { createLauncherChannel } from "./services/system/launcher-channel.js";
 import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
+import { startGatedPerformanceDiagnostics } from "./services/system/performance-diagnostics.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
 import {
   runPeriodicSweeps,
@@ -35,7 +43,10 @@ import {
   type ProviderRegistryService,
 } from "./services/providers/provider-registry.js";
 import type { PluginService } from "./services/plugins/plugin-service.js";
-import { createTelemetryService } from "./services/system/telemetry.js";
+import {
+  appInstallFromServerConfig,
+  createTelemetryService,
+} from "./services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
 import { createLifecycleDedupers } from "./lifecycle-dedupers.js";
 import type { ServerLogger, ServerRuntimeConfig } from "./types.js";
@@ -107,7 +118,10 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     dataDir: serverConfig.BB_DATA_DIR,
     logger,
   });
+  let diagnosticsEnabled = () => false;
   const db = initDb(serverConfig.databasePath, {
+    slowQueryThresholdMs: () => (diagnosticsEnabled() ? 25 : 100),
+    slowQueryDiagnosticsEnabled: () => diagnosticsEnabled(),
     dataDir: serverConfig.BB_DATA_DIR,
     logger,
   });
@@ -156,6 +170,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     hostDaemonPort: serverConfig.BB_HOST_DAEMON_PORT,
     inheritedSkillsRootPaths: serverConfig.BB_INHERITED_SKILLS_ROOTS,
     isDevelopment: !isProduction,
+    performanceDiagnosticsAvailable: serverConfig.BB_PERF_DIAGNOSTICS,
     serverPort: serverConfig.BB_SERVER_PORT,
     sharedSkillRoots: { user: [], project: [] },
   };
@@ -195,6 +210,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
 
   const telemetry = await createTelemetryService({
     apiKey: serverConfig.BB_POSTHOG_API_KEY,
+    appInstall: appInstallFromServerConfig(serverConfig),
     appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     dataDir: serverConfig.BB_DATA_DIR,
@@ -234,19 +250,47 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   setPluginToolCallRegistry(new PluginToolCallRegistry({ logger }));
 
   const appVersion = createAppVersionService({
+    installKind: serverConfig.BB_APP_INSTALL_KIND ?? null,
+    sourceCommit: serverConfig.BB_APP_SOURCE_COMMIT ?? null,
     config: runtimeConfig,
     logger,
   });
   const appUpdateMode = serverConfig.BB_APP_UPDATE_MODE ?? null;
-  const appUpdate = createAppUpdateService({
-    appSurface: serverConfig.BB_APP_SURFACE,
-    appVersion,
-    config: runtimeConfig,
-    countRunningThreads: () => listRunningThreads(db).length,
-    launcher: appUpdateMode === null ? null : createLauncherChannel(process),
-    logger,
-    mode: appUpdateMode,
-    notifyChanged: () => hub.notifySystem(["app-update-changed"]),
+  const desktopUpdateChannel =
+    serverConfig.BB_APP_SURFACE === "desktop"
+      ? createDesktopUpdateChannel(process)
+      : null;
+  const appUpdate =
+    desktopUpdateChannel === null
+      ? createAppUpdateService({
+          currentCommit:
+            serverConfig.BB_APP_INSTALL_KIND === "source"
+              ? (serverConfig.BB_APP_SOURCE_COMMIT ?? null)
+              : null,
+          appSurface: serverConfig.BB_APP_SURFACE,
+          appVersion,
+          config: runtimeConfig,
+          countRunningThreads: () => listRunningThreads(db).length,
+          launcher:
+            appUpdateMode === null ? null : createLauncherChannel(process),
+          logger,
+          mode: appUpdateMode,
+          notifyChanged: () => hub.notifySystem(["app-update-changed"]),
+        })
+      : createDesktopAppUpdateService({
+          channel: desktopUpdateChannel,
+          currentVersion: runtimeConfig.appVersion,
+          dataDir: serverConfig.BB_DATA_DIR,
+          countRunningThreads: () => listRunningThreads(db).length,
+          notifyChanged: () => hub.notifySystem(["app-update-changed"]),
+          logger,
+        });
+  const cliCommand = createCliCommandService({
+    env: process.env,
+    homeDir: homedir(),
+    launcherPath: serverConfig.BB_CLI_LAUNCHER ?? null,
+    platform: process.platform,
+    windowsUserPath: createWindowsUserPath(process.env),
   });
   const {
     app,
@@ -260,6 +304,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       appUpdate,
       appVersion,
       bbAppManagedConfig,
+      cliCommand,
       config: runtimeConfig,
       db,
       hub,
@@ -288,6 +333,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
         retireProcess: retireServerProcess,
       },
       staticDir,
+      performanceDiagnosticsEnabled: () => diagnosticsEnabled(),
     },
   );
   disconnectImportedDaemonSessions(
@@ -308,7 +354,18 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     },
     { sessions: serverImport.importedDaemonSessions },
   );
-  const eventLoopStallMonitor = startEventLoopStallMonitor({ logger });
+  const performanceDiagnostics = await startGatedPerformanceDiagnostics({
+    allowed: serverConfig.BB_PERF_DIAGNOSTICS,
+    dataDir: serverConfig.BB_DATA_DIR,
+    db,
+    hub,
+    logger,
+  });
+  diagnosticsEnabled = performanceDiagnostics.isEnabled;
+  const eventLoopStallMonitor = startEventLoopStallMonitor({
+    logger,
+    thresholdMs: () => (diagnosticsEnabled() ? 100 : 500),
+  });
   const stopDaemonLivenessChecks = startDaemonLivenessChecks({
     config: runtimeConfig,
     db,
@@ -420,6 +477,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       appUpdate.dispose();
       providerModelCatalogPrewarm?.stop();
       eventLoopStallMonitor.stop();
+      await performanceDiagnostics.stop();
       stopDaemonLivenessChecks();
       if (sweepInterval !== null) {
         clearInterval(sweepInterval);

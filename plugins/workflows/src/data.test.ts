@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_WORKFLOW_SETTINGS } from "./settings.js";
 import {
   attachCallThread,
   isWorkerRetired,
@@ -59,8 +60,7 @@ describe("workflow durable data", () => {
       source: "return null",
       sourceHash: "hash",
       argsJson: "null",
-      settingsJson:
-        '{"maxActiveRuns":4,"maxConcurrentAgents":8,"maxAgentCalls":100,"totalRunTimeoutMs":86400000,"retentionDays":30,"maxNotificationBytes":16384}',
+      settingsJson: JSON.stringify(DEFAULT_WORKFLOW_SETTINGS),
       resumedFromRunId: null,
     });
   }
@@ -111,7 +111,7 @@ describe("workflow durable data", () => {
     db.close();
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    db.exec(migrations.slice(0, -2).join("\n"));
+    db.exec(migrations.slice(0, -3).join("\n"));
     const run = newRun();
     markRunning(run.id);
     const call = startCall(db, {
@@ -131,7 +131,7 @@ describe("workflow durable data", () => {
     db.prepare(
       `UPDATE workflow_calls SET child_thread_id = 'legacy-worker', status = 'failed' WHERE id = ?`,
     ).run(call.id);
-    db.exec(migrations.slice(-2).join("\n"));
+    db.exec(migrations.slice(-3).join("\n"));
     expect(retiredWorkers(db, Date.now())).toEqual([
       { threadId: "legacy-worker", callId: call.id },
     ]);
@@ -144,7 +144,7 @@ describe("workflow durable data", () => {
     db.close();
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    db.exec(migrations.slice(0, -2).join("\n"));
+    db.exec(migrations.slice(0, -3).join("\n"));
     const run = newRun();
     const insertCall = db.prepare(
       `INSERT INTO workflow_calls(id, run_id, call_index, cache_key, prompt,
@@ -161,7 +161,7 @@ describe("workflow durable data", () => {
         `worker-${String(index).padStart(3, "0")}`,
       );
     const migratedAt = Date.now();
-    db.exec(migrations.slice(-2).join("\n"));
+    db.exec(migrations.slice(-3).join("\n"));
 
     const buckets = db
       .prepare(
@@ -684,6 +684,24 @@ describe("workflow durable data", () => {
     }
   });
 
+  it("expires notified runs at their own retention deadline", () => {
+    const run = newRun();
+    const finishedAt = Date.now() - 3 * 86_400_000;
+    const deadline = finishedAt + 2 * 86_400_000;
+    db.prepare(
+      `UPDATE workflow_runs SET status = 'succeeded', notification_sent = 0,
+       finished_at = ?, settings_json = json_set(settings_json, '$.retentionDays', 2)
+       WHERE id = ?`,
+    ).run(finishedAt, run.id);
+    expect(sweepExpired(deadline, 100)).toBe(0);
+    db.prepare(
+      `UPDATE workflow_runs SET notification_sent = 1 WHERE id = ?`,
+    ).run(run.id);
+    expect(sweepExpired(deadline - 1, 100)).toBe(0);
+    expect(sweepExpired(deadline, 100)).toBe(1);
+    expect(() => getRunRequired(db, run.id)).toThrow("Unknown workflow run");
+  });
+
   it("retains active resume ancestry while deleting unrelated expired runs", () => {
     const parent = newRun();
     db.prepare(
@@ -703,8 +721,10 @@ describe("workflow durable data", () => {
       source: "return null",
       sourceHash: "child-hash",
       argsJson: "null",
-      settingsJson:
-        '{"maxActiveRuns":4,"maxConcurrentAgents":8,"maxAgentCalls":100,"totalRunTimeoutMs":86400000,"retentionDays":1,"maxNotificationBytes":16384}',
+      settingsJson: JSON.stringify({
+        ...DEFAULT_WORKFLOW_SETTINGS,
+        retentionDays: 1,
+      }),
       resumedFromRunId: parent.id,
     });
     const expired = newRun();
@@ -736,8 +756,10 @@ describe("workflow durable data", () => {
       source: "return null",
       sourceHash: "expired-child-hash",
       argsJson: "null",
-      settingsJson:
-        '{"maxActiveRuns":4,"maxConcurrentAgents":8,"maxAgentCalls":100,"totalRunTimeoutMs":86400000,"retentionDays":1,"maxNotificationBytes":16384}',
+      settingsJson: JSON.stringify({
+        ...DEFAULT_WORKFLOW_SETTINGS,
+        retentionDays: 1,
+      }),
       resumedFromRunId: parent.id,
     });
     db.prepare(

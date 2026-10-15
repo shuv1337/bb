@@ -7,12 +7,11 @@ import {
 import { describe, expect, it } from "vitest";
 import { threadScope, turnScope } from "@bb/domain";
 import {
-  createConnection,
   type DbConnection,
   type SlowDbQueryLogger,
   type SlowDbQueryLogFields,
 } from "../src/connection.js";
-import { migrate } from "../src/migrate.js";
+import { createMigratedConnection } from "../src/testing.js";
 import { noopNotifier } from "../src/notifier.js";
 import {
   createPendingInteraction,
@@ -53,6 +52,7 @@ import { replaceStoredProviderModelCatalog } from "../src/data/provider-model-ca
 import { openSession } from "../src/data/sessions.js";
 import {
   listDueScheduledQueuedThreadMessages,
+  listRetryableFailedQueuedThreadMessages,
   listQueuedThreadMessagesByWaitHolder,
 } from "../src/data/queued-thread-messages.js";
 import { listEnvironments } from "../src/data/environments.js";
@@ -61,6 +61,7 @@ import { createProject } from "../src/data/projects.js";
 import {
   createThread,
   listRunningThreads,
+  listArchivedThreadsPendingTeardown,
   listThreadsWithPendingInteractionState,
 } from "../src/data/threads.js";
 
@@ -134,11 +135,10 @@ class CapturingSlowQueryLogger implements SlowDbQueryLogger {
 
 function setup(): TestDb {
   const logger = new CapturingSlowQueryLogger();
-  const db = createConnection(":memory:", {
+  const db = createMigratedConnection({
     slowQueryLogger: logger,
     slowQueryThresholdMs: 0,
   });
-  migrate(db);
   const host = upsertHost(db, noopNotifier, {
     name: "query-plan-host",
   });
@@ -370,11 +370,7 @@ describe("slow query index plans", () => {
     },
   );
 
-  // Both queue indexes are PARTIAL. A partial index is only usable when the
-  // query repeats its WHERE clause, so a refactor that drops one liveness
-  // predicate from the query — or adds one to the index — silently degrades
-  // the sweep to a full table scan. Nothing else would notice.
-  it("finds due scheduled queued messages through the partial due index", () => {
+  it("finds due scheduled queued messages through the state due index", () => {
     const { db } = setup();
 
     const captured = captureStatements(db, () => {
@@ -387,6 +383,24 @@ describe("slow query index plans", () => {
       sql: captured[0]!.sql,
     });
     expect(details).toMatch(/USING INDEX queued_thread_messages_due_idx/u);
+    expect(details).not.toMatch(/SCAN queued_thread_messages/u);
+
+    db.$client.close();
+  });
+
+  it("finds retryable failed queued messages through the state retry index", () => {
+    const { db } = setup();
+
+    const captured = captureStatements(db, () => {
+      expect(listRetryableFailedQueuedThreadMessages(db, 1_000)).toEqual([]);
+    });
+    expect(captured).toHaveLength(1);
+    const details = queryPlanDetails({
+      db,
+      params: captured[0]!.params,
+      sql: captured[0]!.sql,
+    });
+    expect(details).toMatch(/USING INDEX queued_thread_messages_retry_idx/u);
     expect(details).not.toMatch(/SCAN queued_thread_messages/u);
 
     db.$client.close();
@@ -1039,8 +1053,8 @@ describe("slow query index plans", () => {
           expect(advanceThreadPruning(db, "resolved-items").removed).toBe(1);
         });
         const supportQueries = statements.filter((statement) =>
-          statement.sql.includes(
-            "FROM events INDEXED BY events_thread_turn_type_item_sequence_idx",
+          /from events indexed by events_thread_turn_type_item_sequence_idx/i.test(
+            statement.sql,
           ),
         );
         expect(supportQueries.length).toBeGreaterThan(0);
@@ -1059,6 +1073,25 @@ describe("slow query index plans", () => {
       }
     },
   );
+
+  it("discovers archived teardown work without walking archived thread history", () => {
+    const { db } = setup();
+    try {
+      const captured = captureStatements(db, () => {
+        listArchivedThreadsPendingTeardown(db);
+      });
+      const statement = captured[0]!;
+      const details = queryPlanDetails({ db, ...statement });
+      expect(details).toMatch(/SEARCH threads USING INDEX \S+ \(status=\?\)/);
+      expect(details).toContain(
+        "SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)",
+      );
+      expect(details).not.toContain("CORRELATED SCALAR SUBQUERY");
+      expect(details).not.toContain("SCAN threads");
+    } finally {
+      db.$client.close();
+    }
+  });
 
   it("uses the active-thread maintenance index for emitted idle checks", () => {
     const { db, logger } = setup();
@@ -1425,7 +1458,20 @@ describe("slow query index plans", () => {
   });
 
   it("pins maintenance discovery to the typed sequence index", () => {
-    const { db } = setup();
+    const { db, thread } = setup();
+    insertEvents(db, noopNotifier, [
+      {
+        threadId: thread.id,
+        sequence: 1,
+        type: "turn/diff/updated",
+        scope: turnScope("pruning-turn"),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: "{}",
+        createdAt: 1,
+      },
+    ]);
     const statements = captureStatements(db, () => {
       advanceThreadPruning(db, "turn-diffs");
     });
@@ -1504,8 +1550,8 @@ describe("slow query index plans", () => {
     expect(discoveryPlan).toContain("USING INTEGER PRIMARY KEY (rowid=?)");
     expect(discoveryPlan).not.toContain("events_thread_sequence_idx");
     const supportQueries = statements.filter((statement) =>
-      statement.sql.includes(
-        "FROM events INDEXED BY events_thread_turn_type_item_sequence_idx",
+      /from events indexed by events_thread_turn_type_item_sequence_idx/i.test(
+        statement.sql,
       ),
     );
     expect(supportQueries.length).toBeGreaterThan(0);
@@ -1513,7 +1559,7 @@ describe("slow query index plans", () => {
       expect(queryPlanDetails({ db, ...statement })).toContain(
         "USING INDEX events_thread_turn_type_item_sequence_idx",
       );
-      expect(statement.sql).toContain("LIMIT ?");
+      expect(statement.sql).toMatch(/LIMIT \?/i);
     }
     const pruneQuery = findOnlyDebugLog({
       logger,
@@ -1569,45 +1615,65 @@ describe("slow query index plans", () => {
     }
   });
 
-  it("pins the latest-thread-state lookup to the partial index with no temp sort", () => {
-    const { db, thread } = setup();
-    insertEvents(db, noopNotifier, [
-      {
-        data: JSON.stringify({ goal: "guard the query plan" }),
-        itemId: null,
-        itemKind: null,
-        parentToolCallId: null,
-        scope: threadScope(),
-        sequence: 1,
-        threadId: thread.id,
-        type: "thread/goal/updated",
-      },
-    ]);
+  it("pins multi-thread latest state lookups to one candidate seek per requested thread", () => {
+    const { db, project, thread } = setup();
+    const otherThread = createThread(db, noopNotifier, {
+      projectId: project.id,
+      providerId: "codex",
+    });
+    insertEvents(
+      db,
+      noopNotifier,
+      [thread, otherThread].flatMap((stateThread, threadIndex) =>
+        Array.from({ length: 64 }, (_, index) => ({
+          data: JSON.stringify(
+            index === 63
+              ? { goal: `goal-${threadIndex}` }
+              : { kind: "other-plugin/state", payload: { index } },
+          ),
+          itemId: null,
+          itemKind: null,
+          parentToolCallId: null,
+          scope: threadScope(),
+          sequence: index + 1,
+          threadId: stateThread.id,
+          type:
+            index === 63
+              ? ("thread/goal/updated" as const)
+              : ("thread/extensionState/updated" as const),
+        })),
+      ),
+    );
 
     const captured = captureStatements(db, () => {
       expect(
         listLatestThreadStateEventRowsByThreadIds(db, {
-          threadIds: [thread.id],
+          threadIds: [thread.id, otherThread.id],
           kind: "provider-codex/goal",
         }),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
     });
     const statement = captured.find((entry) =>
-      entry.sql.includes("latest_state"),
+      entry.sql.includes("events_thread_state_thread_sequence_idx"),
     );
     if (!statement) {
       throw new Error("Expected the latest-thread-state lookup SQL");
     }
 
+    expect(statement.sql).toContain("VALUES");
     const details = queryPlanDetails({
       db,
       params: statement.params,
       sql: statement.sql,
     });
     expect(
-      details.match(/events_thread_state_thread_sequence_idx/gu),
-    ).toHaveLength(2);
-    expect(details).not.toContain("USING INDEX events_thread_sequence_idx");
+      details.match(
+        /USING (?:COVERING )?INDEX events_thread_state_thread_sequence_idx/gu,
+      ),
+    ).toHaveLength(1);
+    expect(details).not.toMatch(
+      /USING (?:COVERING )?INDEX events_thread_sequence_idx/u,
+    );
     expect(details).not.toContain("USE TEMP B-TREE");
 
     db.$client.close();

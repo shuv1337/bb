@@ -14,16 +14,51 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompactViewportOverrideProvider } from "@bb/shared-ui/hooks/use-compact-viewport";
 import {
   Sidebar,
+  SidebarCollapsibleBody,
   SidebarContent,
   SidebarInset,
   SidebarProvider,
   SidebarTrigger,
+  useIsSidebarFramed,
   useIsSidebarShowing,
   useOptionalIsSidebarShowing,
   useSidebar,
+  useSidebarKeepsCollapsedRail,
 } from "./sidebar";
+import { setCompactSecondaryPanelSwipeOpening } from "./secondary-panel-shelf-visibility";
+import { buildBridgeInjectionScript } from "@bb/mobile-bridge";
+import { resetNativeShellForTests } from "@/lib/native-shell/native-shell";
+
+function installNativeShell() {
+  Object.defineProperty(window, "ReactNativeWebView", {
+    configurable: true,
+    value: { postMessage: () => {} },
+  });
+  // eslint-disable-next-line no-new-func
+  new Function(
+    "window",
+    buildBridgeInjectionScript({
+      bridgeVersion: 2,
+      appVersion: "0.46.1",
+      platform: "ios",
+      profileMode: "direct",
+      secureContext: true,
+      safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+      capabilities: [],
+      nativeDownloads: true,
+    }),
+  )(window);
+  resetNativeShellForTests();
+}
+
+function uninstallNativeShell() {
+  Reflect.deleteProperty(window, "ReactNativeWebView");
+  Reflect.deleteProperty(window, "bb");
+  resetNativeShellForTests();
+}
 
 afterEach(() => {
+  uninstallNativeShell();
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -209,6 +244,219 @@ describe("useIsSidebarShowing", () => {
   });
 });
 
+function CollapsedRailProbe() {
+  const keepsCollapsedRail = useSidebarKeepsCollapsedRail();
+  const isShowing = useIsSidebarShowing();
+  return (
+    <output
+      data-testid="collapsed-rail-probe"
+      data-keeps-rail={String(keepsCollapsedRail)}
+      data-showing={String(isShowing)}
+    />
+  );
+}
+
+function getDesktopSidebarParts(): {
+  root: HTMLElement;
+  gap: HTMLElement;
+  panel: HTMLElement;
+} {
+  const gap = document.querySelector('[data-sidebar="gap"]');
+  const panel = document.querySelector('[data-sidebar="panel"]');
+  const root = gap?.parentElement;
+  if (
+    !(gap instanceof HTMLElement) ||
+    !(panel instanceof HTMLElement) ||
+    !(root instanceof HTMLElement)
+  ) {
+    throw new Error("Expected the desktop sidebar root, gap, and panel");
+  }
+  return { root, gap, panel };
+}
+
+describe("desktop collapsed rail", () => {
+  it("collapses to the rail width instead of sliding off canvas", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport={false}>
+        <SidebarProvider collapsedRailWidth="52px" defaultOpen>
+          <Sidebar>Sidebar content</Sidebar>
+          <SidebarTrigger />
+          <CollapsedRailProbe />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    const { root, gap, panel } = getDesktopSidebarParts();
+    const probe = screen.getByTestId("collapsed-rail-probe");
+    expect(root.dataset.collapsible).toBe("");
+    expect(probe.dataset.keepsRail).toBe("true");
+    expect(probe.dataset.showing).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+
+    expect(root.dataset.state).toBe("collapsed");
+    expect(root.dataset.collapsible).toBe("rail");
+    expect(probe.dataset.showing).toBe("false");
+    for (const part of [gap, panel]) {
+      expect(part.style.getPropertyValue("--sidebar-rail-width")).toBe("52px");
+      expect(part.className).toContain(
+        "group-data-[collapsible=rail]:w-(--sidebar-rail-width)",
+      );
+    }
+  });
+
+  it("parks the body beside the rail at its expanded width and takes it out of reach", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport={false}>
+        <SidebarProvider collapsedRailWidth="52px" width="333px" defaultOpen>
+          <Sidebar>
+            <SidebarCollapsibleBody data-testid="body">
+              <button type="button">Thread row</button>
+            </SidebarCollapsibleBody>
+          </Sidebar>
+          <SidebarTrigger />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    const body = screen.getByTestId("body");
+    const content = screen.getByRole("button", {
+      name: "Thread row",
+    }).parentElement;
+    expect(body.hasAttribute("inert")).toBe(false);
+    expect(content?.style.width).toBe("calc(281px)");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+
+    expect(body.hasAttribute("inert")).toBe(true);
+    expect(content?.style.width).toBe("calc(281px)");
+    expect(body.className).toContain("group-data-[collapsible=rail]:invisible");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+
+    expect(body.hasAttribute("inert")).toBe(false);
+  });
+
+  it("slides fully off canvas when no rail width is configured", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport={false}>
+        <SidebarProvider defaultOpen={false}>
+          <Sidebar>Sidebar content</Sidebar>
+          <CollapsedRailProbe />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    const { root, panel } = getDesktopSidebarParts();
+    expect(root.dataset.collapsible).toBe("offcanvas");
+    expect(panel.style.getPropertyValue("--sidebar-rail-width")).toBe("");
+    expect(screen.getByTestId("collapsed-rail-probe").dataset.keepsRail).toBe(
+      "false",
+    );
+  });
+
+  it("drops the rail on compact viewports, where the drawer hides entirely", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport>
+        <SidebarProvider collapsedRailWidth="52px">
+          <Sidebar>Sidebar content</Sidebar>
+          <CollapsedRailProbe />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    const probe = screen.getByTestId("collapsed-rail-probe");
+    expect(probe.dataset.keepsRail).toBe("false");
+    expect(probe.dataset.showing).toBe("false");
+    expect(document.querySelector('[data-sidebar="gap"]')).toBeNull();
+    expect(document.querySelector('[data-collapsible="rail"]')).toBeNull();
+  });
+});
+
+function FramedProbe() {
+  return (
+    <output data-testid="framed-probe">{String(useIsSidebarFramed())}</output>
+  );
+}
+
+describe("framed desktop sidebar", () => {
+  it("rounds the leading card corner on whichever surface touches the rail", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport={false}>
+        <SidebarProvider
+          framed
+          collapsedRailWidth="52px"
+          data-testid="wrapper"
+          defaultOpen
+        >
+          <Sidebar>
+            <SidebarCollapsibleBody data-testid="body">
+              Sidebar content
+            </SidebarCollapsibleBody>
+          </Sidebar>
+          <SidebarInset data-testid="inset" />
+          <SidebarTrigger />
+          <FramedProbe />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    const inset = screen.getByTestId("inset");
+    const body = screen.getByTestId("body");
+    expect(screen.getByTestId("framed-probe").textContent).toBe("true");
+    expect(screen.getByTestId("wrapper").dataset.framed).toBe("");
+    expect(body.classList.contains("rounded-tl-xl")).toBe(true);
+    expect(body.classList.contains("rounded-bl-xl")).toBe(true);
+    expect(inset.classList.contains("rounded-tl-xl")).toBe(false);
+    expect(inset.classList.contains("rounded-bl-xl")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+
+    expect(inset.classList.contains("rounded-tl-xl")).toBe(true);
+    expect(inset.classList.contains("rounded-bl-xl")).toBe(true);
+  });
+
+  it("keeps a lip of window frame beside and below the card", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport={false}>
+        <SidebarProvider framed data-testid="wrapper">
+          <Sidebar data-testid="panel">Sidebar content</Sidebar>
+          <SidebarInset data-testid="inset" />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    const wrapper = screen.getByTestId("wrapper");
+    const inset = screen.getByTestId("inset");
+    expect(wrapper.classList.contains("pr-(--bb-window-frame-lip)")).toBe(true);
+    expect(wrapper.classList.contains("pb-(--bb-window-frame-lip)")).toBe(true);
+    expect(screen.getByTestId("panel").className).toContain(
+      "var(--bb-shell-height)_-_var(--bb-window-frame-top)_-_var(--bb-window-frame-lip)",
+    );
+    for (const edge of ["rounded-tr-xl", "rounded-br-xl", "border-r"]) {
+      expect(inset.classList.contains(edge)).toBe(true);
+    }
+  });
+
+  it("leaves compact viewports and unframed sidebars as they were", () => {
+    render(
+      <CompactViewportOverrideProvider isCompactViewport>
+        <SidebarProvider framed data-testid="wrapper">
+          <Sidebar>Sidebar content</Sidebar>
+          <SidebarInset data-testid="inset" />
+          <FramedProbe />
+        </SidebarProvider>
+      </CompactViewportOverrideProvider>,
+    );
+
+    expect(screen.getByTestId("framed-probe").textContent).toBe("false");
+    expect(screen.getByTestId("wrapper").dataset.framed).toBeUndefined();
+    expect(screen.getByTestId("inset").classList.contains("border-t")).toBe(
+      false,
+    );
+  });
+});
+
 describe("SidebarTrigger", () => {
   it("uses the shared sidebar icon on every viewport", () => {
     const markup = renderToString(
@@ -237,7 +485,7 @@ function getMobilePanel(): HTMLElement | null {
   return panel instanceof HTMLElement ? panel : null;
 }
 
-const SHELF_OPEN_TRANSLATE = "320px";
+const SHELF_OPEN_TRANSLATE = "360px";
 const SHELF_CLOSED_TRANSLATE = "0px";
 
 function getShelfRevealTranslate(): string {
@@ -885,6 +1133,51 @@ describe("mobile sidebar interrupted swipe sessions", () => {
     },
   );
 
+  it.each(["touch", "pointer"] as const)(
+    "ignores a %s swipe that starts in the browser edge strip",
+    (kind) => {
+      vi.useFakeTimers();
+      renderSelectableSwipeHarness();
+      const prose = screen.getByText("Selectable message prose");
+
+      if (kind === "touch") {
+        fireTouch(prose, "touchstart", createTouch(8, 160));
+        fireTouch(window, "touchmove", createTouch(60, 160));
+        fireTouchEnd(window, createTouch(190, 160));
+      } else {
+        firePointer(prose, "pointerdown", 8, 160);
+        firePointer(window, "pointermove", 60, 160);
+        firePointer(window, "pointerup", 190, 160);
+      }
+
+      settleMobileToggle();
+      expect(getMobilePanel()?.dataset.state).not.toBe("open");
+    },
+  );
+
+  it.each(["touch", "pointer"] as const)(
+    "opens from a %s swipe that starts at the screen edge inside the native shell",
+    (kind) => {
+      vi.useFakeTimers();
+      installNativeShell();
+      renderSelectableSwipeHarness();
+      const prose = screen.getByText("Selectable message prose");
+
+      if (kind === "touch") {
+        fireTouch(prose, "touchstart", createTouch(2, 160));
+        fireTouch(window, "touchmove", createTouch(60, 160));
+        fireTouchEnd(window, createTouch(190, 160));
+      } else {
+        firePointer(prose, "pointerdown", 2, 160);
+        firePointer(window, "pointermove", 60, 160);
+        firePointer(window, "pointerup", 190, 160);
+      }
+
+      settleMobileToggle();
+      expect(getMobilePanel()?.dataset.state).toBe("open");
+    },
+  );
+
   it("closes a short swipe that pauses before release", () => {
     vi.useFakeTimers();
     renderSelectableSwipeHarness();
@@ -1007,6 +1300,20 @@ describe("mobile sidebar text-selection arbitration", () => {
 
     expect(getMobilePanel()?.dataset.state).toBe("open");
     expect(getMobilePanel()?.textContent).toContain("Sidebar content");
+  });
+
+  it("yields a right swipe while the right panel is being swiped open", () => {
+    renderSelectableSwipeHarness();
+    const prose = screen.getByText("Selectable message prose");
+
+    setCompactSecondaryPanelSwipeOpening(true);
+    try {
+      fireTouch(prose, "touchstart", createTouch(120, 160));
+      fireTouch(window, "touchmove", createTouch(260, 164));
+      expect(getMobilePanel()?.dataset.state).toBe("closed");
+    } finally {
+      setCompactSecondaryPanelSwipeOpening(false);
+    }
   });
 
   it("defers the horizontal-scroll-region probe until horizontal intent", () => {

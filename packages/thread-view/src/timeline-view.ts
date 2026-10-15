@@ -12,6 +12,7 @@ import type {
   TimelineWorkRow,
 } from "@bb/server-contract";
 import { assertNever } from "./assert-never.js";
+import { parseSentThreadMessage } from "./tool-call-parsing.js";
 import {
   getFileChangeAction,
   type FileChangeAction,
@@ -28,7 +29,7 @@ export interface TimelineViewDelegationWorkRow extends Omit<
   TimelineDelegationWorkRow,
   "childRows"
 > {
-  childRows: ThreadTimelineViewRow[];
+  childRows: ThreadTimelineViewRow[] | null;
   inClosedStep?: boolean;
 }
 
@@ -745,20 +746,11 @@ function isSummarizableActivityRow(
     row.workKind !== "approval" &&
     row.workKind !== "question" &&
     row.workKind !== "workflow" &&
-    !(
-      row.workKind === "extension" &&
-      row.experimental_timelineEventId !== undefined
-    )
+    (row.workKind !== "command" || parseSentThreadMessage(row) === null)
   );
 }
 
 function isTimelineStepBoundary(row: ThreadTimelineViewRow): boolean {
-  if (
-    row.kind === "work" &&
-    row.workKind === "extension" &&
-    row.experimental_timelineEventId !== undefined
-  )
-    return true;
   if (row.kind !== "conversation") return false;
   if (row.role === "user" && row.turnRequest.status === "pending") {
     return false;
@@ -951,7 +943,10 @@ function toTimelineViewWorkRow(
   const closedScope = row.status !== "pending";
   return {
     ...row,
-    childRows: buildTimelineViewRows(row.childRows, { cache, closedScope }),
+    childRows:
+      row.childRows === null
+        ? null
+        : buildTimelineViewRows(row.childRows, { cache, closedScope }),
   };
 }
 

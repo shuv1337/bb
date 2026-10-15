@@ -63,6 +63,7 @@ import { PluginBrowserToolbarActions } from "@/components/plugin/PluginBrowserTo
 interface BrowserTabContentProps {
   tabId: string;
   desktopTarget?: BbDesktopBrowserTarget;
+  existingOnly?: true;
   initialUrl: string;
   addressFocusRequest: BrowserAddressFocusRequest | null;
   onAddressFocusRequestConsumed?: (request: BrowserAddressFocusRequest) => void;
@@ -383,6 +384,7 @@ function BrowserPageLoadError({
 export function BrowserTabContent({
   tabId,
   desktopTarget,
+  existingOnly,
   initialUrl,
   addressFocusRequest,
   onAddressFocusRequestConsumed,
@@ -445,6 +447,7 @@ export function BrowserTabContent({
   const [currentUrl, setCurrentUrl] = useState(initialUrl);
   const [addressDraft, setAddressDraft] = useState(initialUrl);
   const [isEditing, setIsEditing] = useState(false);
+  const [isPageFocusPending, setIsPageFocusPending] = useState(false);
   const [isFindOpen, setIsFindOpen] = useState(false);
   const isFindOpenRef = useRef(false);
   isFindOpenRef.current = isFindOpen;
@@ -461,6 +464,8 @@ export function BrowserTabContent({
   onUpdateRef.current = onUpdate;
   recordVisitRef.current = recordVisit;
   const initialUrlRef = useRef(initialUrl);
+  const existingOnlyRef = useRef(existingOnly);
+  const desktopTargetRef = useRef(desktopTarget);
   const [attachedBrowserViewIdentity, setAttachedBrowserViewIdentity] =
     useState<BrowserViewAttachIdentity | null>(null);
   const isBrowserViewAttached =
@@ -538,13 +543,14 @@ export function BrowserTabContent({
     const initialBounds = syncInitialBounds();
     const mountUrl = initialUrlRef.current;
     registerBrowserView({ environmentId, tabId, threadId });
-    const existingOnly =
-      desktopTarget !== undefined &&
-      !takeBrowserViewRecreation(tabId, desktopTarget);
+    const target = desktopTargetRef.current;
+    const attachExistingOnly =
+      existingOnlyRef.current === true &&
+      (target === undefined || !takeBrowserViewRecreation(tabId, target));
     desktopBrowser.attach({
       tabId,
       threadId,
-      ...(existingOnly ? { existingOnly: true } : {}),
+      ...(attachExistingOnly ? { existingOnly: true } : {}),
       url: mountUrl,
       bounds: initialBounds,
       visible: false,
@@ -612,7 +618,6 @@ export function BrowserTabContent({
     visibilityCoordinator,
     tabId,
     threadId,
-    desktopTarget,
   ]);
 
   useEffect(() => {
@@ -671,6 +676,31 @@ export function BrowserTabContent({
     visibilityCoordinator.hide(tabId);
   }, [visibilityCoordinator, tabId, isViewVisible, syncBounds]);
 
+  useLayoutEffect(() => {
+    if (!isPageFocusPending) return;
+    if (
+      !canShowNativeBrowserView ||
+      !canHandleBrowserCommands ||
+      hasPageLoadError ||
+      isBrowserDimmingModalOpen
+    ) {
+      setIsPageFocusPending(false);
+      return;
+    }
+    if (!isViewVisible) return;
+    setIsPageFocusPending(false);
+    desktopBrowser?.focus?.(tabId);
+  }, [
+    isPageFocusPending,
+    canShowNativeBrowserView,
+    canHandleBrowserCommands,
+    hasPageLoadError,
+    isBrowserDimmingModalOpen,
+    isViewVisible,
+    desktopBrowser,
+    tabId,
+  ]);
+
   useEffect(() => {
     if (desktopBrowser?.onFocus === undefined || onNativeFocus === undefined) {
       return;
@@ -716,7 +746,9 @@ export function BrowserTabContent({
       }
       setCurrentUrl(url);
       setIsEditing(false);
+      addressInputRef.current?.blur();
       desktopBrowser?.navigate({ tabId, url });
+      setIsPageFocusPending(true);
     },
     [desktopBrowser, tabId],
   );

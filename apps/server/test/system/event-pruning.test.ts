@@ -212,7 +212,9 @@ describe("thread event pruning", () => {
       const timeline = buildThreadTimelineWithProfile(harness.db, thread, {
         completedTurnDisplay: "collapse",
         eventBudget: 1_000_000,
+        includeClearedContextHistory: false,
         includeDiagnosticOperations: true,
+        summarizeShellCommands: true,
         maxInlineOutputChars: null,
         maxSeq: 0,
         page: {

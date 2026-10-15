@@ -141,10 +141,11 @@ Update an existing Git installation with `bb plugin update provider-opencode --y
 An existing bundled installation already contains this plugin; do not install a
 second copy over it.
 
-On our bb fork, disable the legacy ACP provider with
-`bb plugin config provider-acp set enableOpenCode false`. That setting is specific
-to our fork; stock bb users should select the native `opencode` provider instead
-of `acp-opencode`. Disabling the entire ACP plugin also disables its other agents.
+Disable just the ACP OpenCode provider with `bb provider disable acp-opencode`;
+use `bb provider enable acp-opencode` to restore it. This provider-level choice
+survives switching between ACP adapters. Existing fork settings with
+`provider-acp.enableOpenCode=false` migrate once at server startup. Other ACP
+agents and the native `opencode` provider remain independently selectable.
 
 ## Skills and commands
 

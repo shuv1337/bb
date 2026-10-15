@@ -37,6 +37,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
       experiments: {
         changelogPreview: false,
         serverMove: false,
+        performanceDiagnostics: false,
+        timelinePush: false,
       },
     },
   }),
@@ -57,9 +59,7 @@ vi.mock("@/components/project/ProjectActionsProvider", () => ({
   ),
 }));
 
-vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
-  useMoveThreadToSection: () => vi.fn(),
-}));
+vi.mock("@/hooks/mutations/thread-state-mutations", () => ({}));
 
 vi.mock("@/components/thread/ThreadActionsProvider", () => ({
   ThreadActionsProvider: ({ children }: { children: ReactNode }) => (
@@ -98,6 +98,7 @@ vi.mock("@/lib/bb-desktop", () => ({
   MACOS_CHROME_CONTROL_AXIS_CLASS: "",
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS: "",
   MACOS_TRAFFIC_LIGHT_RESERVE_OFFSET_CLASS: "",
+  MACOS_TRAFFIC_LIGHT_RESERVE_PADDING_CLASS: "",
   MACOS_WINDOW_DRAG_CLASS: "",
   MACOS_WINDOW_NO_DRAG_CLASS: "",
   getBbDesktopInfo: () => null,
@@ -156,12 +157,12 @@ vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
 }));
 
 vi.mock("@/hooks/queries/thread-queries", () => ({
+  useArchivedThreads: () => ({ data: undefined }),
   didThreadDetailBootstrapRefreshAfterMount: () => true,
   useThread: (...args: unknown[]) => mockUseThread(...args),
   useThreadDetailBootstrap: (...args: unknown[]) =>
     mockUseThreadDetailBootstrap(...args),
   useThreadPendingInteractions: () => ({ data: undefined }),
-  getLatestPendingInteraction: () => null,
 }));
 
 describe("AppLayout root compose project preference", () => {

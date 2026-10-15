@@ -1,4 +1,3 @@
-import type { PluginTimelineEventSeed } from "@bb/domain";
 import {
   getEnvironment,
   getThread,
@@ -66,7 +65,8 @@ import {
   throwSenderThreadInvalid,
   throwThreadNotWritable,
 } from "../lib/lifecycle-api-errors.js";
-import { validatePromptAttachmentReferences } from "../projects/attachments.js";
+import { resolvePromptAttachmentReferences } from "../projects/attachments.js";
+import { threadTargetHostId } from "./dispatch-attempt.js";
 import { resolvePluginMentionContextInputs } from "../plugins/plugin-mentions.js";
 import { clearThreadContext } from "./thread-context-clear.js";
 import { withThreadSendGuard } from "./thread-context-mutation-guard.js";
@@ -145,7 +145,6 @@ interface SendThreadMessageQueueRequest {
 }
 
 interface AppendAndQueueSendThreadMessageArgs {
-  experimental_timelineEvent?: PluginTimelineEventSeed;
   /** Retry provenance; absent for an original dispatch. */
   retryOf?: TurnRequestRetryMarker;
   beforeAppendInTransaction?: SendThreadMessageTransactionPreflight;
@@ -399,7 +398,6 @@ export function captureUserMessageSentTelemetry(
 }
 
 function appendAndQueueSendThreadMessageInTransaction({
-  experimental_timelineEvent,
   retryOf,
   beforeAppendInTransaction,
   db,
@@ -426,7 +424,6 @@ function appendAndQueueSendThreadMessageInTransaction({
             threadId: thread.id,
             environmentId,
             type: "client/turn/requested",
-            experimental_timelineEvent,
             ...(retryOf !== undefined ? { retryOf } : {}),
             input,
             ...(inputGroups !== undefined ? { inputGroups } : {}),
@@ -540,12 +537,20 @@ async function sendThreadMessageWithoutContextClear(
       });
     }
   };
-  await validatePromptAttachmentReferences({
+  const resolvedInput = await resolvePromptAttachmentReferences({
     db: deps.db,
     dataDir: deps.config.dataDir,
     input,
     projectId: thread.projectId,
+    hostId: threadTargetHostId(deps, thread),
   });
+  const resolvedByInput = new Map(
+    input.map((item, index) => [item, resolvedInput[index]!]),
+  );
+  input = resolvedInput;
+  inputGroups = inputGroups?.map((group) =>
+    group.map((item) => resolvedByInput.get(item) ?? item),
+  );
   // Agent-originated CLI sends still appear as normal turn requests in the
   // timeline, while initiator lets policy distinguish the source. A retry is
   // `system` whatever the original was: nobody asked for it a second time, and
@@ -594,7 +599,6 @@ async function sendThreadMessageWithoutContextClear(
 
   if (
     await dispatchTurnDuringReprovision({
-      experimental_timelineEvent: payload.experimental_timelineEvent,
       beforeRequestAppendInTransaction: beforeAppendInTransaction,
       deps,
       environment,
@@ -671,7 +675,6 @@ async function sendThreadMessageWithoutContextClear(
         }
       : await prepareReadyThreadTurnCommand(deps, commandArgs);
     const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
-      experimental_timelineEvent: args.payload.experimental_timelineEvent,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
       beforeAppendInTransaction: ({ tx }) => {
         beforeAppendInTransaction({ tx });
@@ -768,7 +771,6 @@ async function sendThreadMessageWithoutContextClear(
     requestId,
   });
   const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
-    experimental_timelineEvent: args.payload.experimental_timelineEvent,
     ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
     beforeAppendInTransaction,
     db: deps.db,

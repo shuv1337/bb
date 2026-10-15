@@ -1,4 +1,8 @@
 import { spawn } from "node:child_process";
+import {
+  createAsyncTtlMemo,
+  type AsyncTtlMemo,
+} from "../lib/async-ttl-memo.js";
 import type { HostDaemonContributedEnvEntry } from "@bb/host-daemon-contract";
 import { killProcessGroup, supportsProcessGroups } from "@bb/process-utils";
 import { z } from "zod";
@@ -13,7 +17,7 @@ const gitConfig = [
   ["url.https://github.com/.insteadOf", "ssh://git@github.com/"],
 ] as const;
 const identitySchema = z.object({
-  login: z.string().regex(/^[a-zA-Z0-9-]+$/u),
+  login: z.string().regex(/^[a-zA-Z0-9_-]+$/u),
   id: z.number().int().positive(),
   email: z.email().nullable(),
 });
@@ -86,7 +90,7 @@ export function githubGitConfiguration(): HostDaemonContributedEnvEntry[] {
   );
 }
 
-export async function resolveGitCredentials(
+async function loadGitCredentials(
   run = runGh,
 ): Promise<HostDaemonContributedEnvEntry[]> {
   try {
@@ -121,8 +125,34 @@ export async function resolveGitCredentials(
   }
 }
 
+const credentialCaches = new WeakMap<
+  typeof runGh,
+  AsyncTtlMemo<string, HostDaemonContributedEnvEntry[]>
+>();
+
+async function cachedGitCredentials(run: typeof runGh, refresh: boolean) {
+  let cache = credentialCaches.get(run);
+  if (!cache) {
+    cache = createAsyncTtlMemo({
+      maxEntries: 1_024,
+      ttlMs: (entries) => (entries.length ? 60_000 : 5_000),
+      staleWhileRevalidate: true,
+    });
+    credentialCaches.set(run, cache);
+  }
+  return structuredClone(
+    await cache.run("github.com", () => loadGitCredentials(run), refresh),
+  );
+}
+
+export async function resolveGitCredentials(
+  run = runGh,
+): Promise<HostDaemonContributedEnvEntry[]> {
+  return cachedGitCredentials(run, false);
+}
+
 export async function machineGitHealth(run = runGh) {
-  const entries = await resolveGitCredentials(run);
+  const entries = await cachedGitCredentials(run, true);
   return {
     status: entries.length ? ("ready" as const) : ("not configured" as const),
     statusMessage: entries.length

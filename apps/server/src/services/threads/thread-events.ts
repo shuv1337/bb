@@ -1,5 +1,3 @@
-import { insertPluginTimelineEvent } from "@bb/db";
-import type { PluginTimelineEventSeed } from "@bb/domain";
 import {
   appendStoredThreadEventsInTransaction,
   createEventId,
@@ -75,7 +73,6 @@ export interface TurnRequestRetryMarker {
 }
 
 interface ClientTurnRequestedEventArgs {
-  experimental_timelineEvent?: PluginTimelineEventSeed;
   /**
    * Set only when a `turn.failed` retry row is dispatching, marking this turn
    * as attempt N of an earlier request rather than something the user just
@@ -244,6 +241,7 @@ interface AppendThreadEventsTransactionResult {
 }
 
 interface BuildAppendThreadEventNotificationMetadataArgs {
+  sequence: number;
   readStateUpdate: ThreadReadStateUpdate | null;
   eventType: ThreadEventType;
 }
@@ -371,11 +369,13 @@ function buildAppendThreadEventNotificationChanges(
 }
 
 function buildAppendThreadEventNotificationMetadata({
+  sequence,
   readStateUpdate,
   eventType,
 }: BuildAppendThreadEventNotificationMetadataArgs): ThreadChangeMetadata {
   const metadata: ThreadChangeMetadata = {
     eventTypes: [eventType],
+    timelineSequence: sequence,
   };
   if (readStateUpdate?.changed === true) {
     metadata.projectId = readStateUpdate.projectId;
@@ -476,6 +476,7 @@ export function appendThreadEvent(
     args.threadId,
     buildAppendThreadEventNotificationChanges(result.readStateUpdate),
     buildAppendThreadEventNotificationMetadata({
+      sequence: result.sequence,
       readStateUpdate: result.readStateUpdate,
       eventType: args.type,
     }),
@@ -527,23 +528,10 @@ export function appendClientTurnEventInTransaction(
   db: DbTransaction,
   args: ClientTurnEventArgs,
 ): number | AppendedClientTurnRequest {
-  const result = appendBuiltClientTurnEvent(
+  return appendBuiltClientTurnEvent(
     (eventArgs) => appendThreadEventInTransaction(db, eventArgs),
     args,
   );
-  if (
-    args.type === "client/turn/requested" &&
-    args.experimental_timelineEvent &&
-    typeof result !== "number"
-  ) {
-    insertPluginTimelineEvent(db, {
-      threadId: args.threadId,
-      requestId: result.requestId,
-      requestSequence: result.sequence,
-      seed: args.experimental_timelineEvent,
-    });
-  }
-  return result;
 }
 
 export function appendPreparedClientTurnRequestedEventWithNotificationInTransaction(
@@ -554,14 +542,6 @@ export function appendPreparedClientTurnRequestedEventWithNotificationInTransact
     db,
     buildClientTurnRequestedEventArgs(args),
   );
-  if (args.experimental_timelineEvent) {
-    insertPluginTimelineEvent(db, {
-      threadId: args.threadId,
-      requestId: args.requestId,
-      requestSequence: result.sequence,
-      seed: args.experimental_timelineEvent,
-    });
-  }
   return {
     requestId: args.requestId,
     sequence: result.sequence,
@@ -569,6 +549,7 @@ export function appendPreparedClientTurnRequestedEventWithNotificationInTransact
       result.readStateUpdate,
     ),
     notificationMetadata: buildAppendThreadEventNotificationMetadata({
+      sequence: result.sequence,
       readStateUpdate: result.readStateUpdate,
       eventType: args.type,
     }),
@@ -717,6 +698,7 @@ export function appendSystemErrorEventInTransaction(
     buildSystemErrorEventArgs(args),
   );
   deps.hub.notifyThread(args.threadId, ["events-appended"], {
+    timelineSequence: sequence,
     eventTypes: ["system/error"],
   });
   return sequence;
@@ -849,7 +831,9 @@ export function appendThreadOwnershipChangeEventInTransaction(
   }
 
   const sequence = appendThreadEventInTransaction(deps.db, eventArgs);
-  deps.hub.notifyThread(args.threadId, ["events-appended"]);
+  deps.hub.notifyThread(args.threadId, ["events-appended"], {
+    timelineSequence: sequence,
+  });
   return sequence;
 }
 

@@ -1,11 +1,16 @@
 import { useEffect, type ReactNode } from "react";
 import type { ThreadQueuedMessage } from "@bb/domain";
 import { cn } from "@bb/shared-ui/lib/utils";
-import { Skeleton } from "@bb/shared-ui/skeleton";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { formatQueuedMessagePreview } from "@bb/client-core";
+import { queuedMessageFallbackTitle } from "@/lib/queued-message-wait";
 import {
-  getPendingQueuedMessagesDrawerHeight,
+  PROMPT_STACK_CARD_HEADER_BUTTON_CLASS,
+  PromptStackCard,
+} from "@/components/promptbox/banner/PromptStackCard";
+import { QueuedMessagesCountPill } from "@/components/promptbox/banner/QueuedMessagesCountPill";
+import {
   getQueuedMessagesDrawerHeight,
+  QUEUED_MESSAGES_COLLAPSED_HEIGHT,
 } from "@/components/promptbox/banner/queued-messages-layout";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import { defineSplit, SplitLoadFailure } from "@/lib/define-split";
@@ -46,16 +51,20 @@ export interface QueuedMessagesListProps {
   onSetGroupBoundary: (request: QueuedMessageGroupBoundaryRequest) => void;
   onEdit: (request: QueuedMessageEditRequest) => void;
   onDelete: (id: string) => void;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
 }
 
 function QueuedMessagesCardFrame({
   attached,
   children,
+  expanded,
   height,
   queuedMessageCount,
 }: {
   attached: boolean;
   children: ReactNode;
+  expanded: boolean;
   height: number;
   queuedMessageCount: number;
 }) {
@@ -68,40 +77,20 @@ function QueuedMessagesCardFrame({
         attached ? "-mb-5 rounded-b-none border-b-0 pb-3" : "mb-0 pb-4",
       )}
     >
-      <header className="flex h-8 shrink-0 items-center gap-2 border-b border-border/35 px-2">
-        <div className="flex min-w-16 items-baseline gap-1.5 pl-1">
-          <span className="text-xs font-medium text-foreground">Queue</span>
-          <span className="text-2xs tabular-nums text-subtle-foreground">
-            {queuedMessageCount}
-          </span>
+      <header className="shrink-0">
+        <div
+          className={cn(
+            PROMPT_STACK_CARD_HEADER_BUTTON_CLASS,
+            "cursor-default hover:bg-transparent",
+            expanded && "border-b border-border/35",
+          )}
+        >
+          <span className="font-normal">Queue</span>
+          <QueuedMessagesCountPill arrivals={0} count={queuedMessageCount} />
         </div>
       </header>
       {children}
     </PromptStackCard>
-  );
-}
-
-const LOADING_ROW_WIDTHS = ["w-3/4", "w-1/2", "w-2/3"];
-
-function QueuedMessagesLoadingRows({
-  queuedMessageCount,
-}: {
-  queuedMessageCount: number;
-}) {
-  return (
-    <div
-      role="status"
-      aria-label="Loading queued messages"
-      className="min-h-0 flex-1 py-1"
-    >
-      {LOADING_ROW_WIDTHS.slice(0, Math.max(1, queuedMessageCount)).map(
-        (width) => (
-          <div key={width} className="flex h-[33px] items-center px-3.5">
-            <Skeleton className={cn("h-3 rounded-sm", width)} />
-          </div>
-        ),
-      )}
-    </div>
   );
 }
 
@@ -116,12 +105,30 @@ function QueuedMessagesListLoading(props: QueuedMessagesListProps) {
   return (
     <QueuedMessagesCardFrame
       attached={isAttachedToComposer(props)}
-      height={getQueuedMessagesDrawerHeight(props)}
+      expanded={props.expanded}
+      height={
+        props.expanded
+          ? getQueuedMessagesDrawerHeight(props)
+          : QUEUED_MESSAGES_COLLAPSED_HEIGHT
+      }
       queuedMessageCount={props.queuedMessages.length}
     >
-      <QueuedMessagesLoadingRows
-        queuedMessageCount={props.queuedMessages.length}
-      />
+      {props.expanded ? (
+        <div className="min-h-0 flex-1 overflow-hidden py-1" aria-busy="true">
+          {props.queuedMessages.map((message) => (
+            <div
+              key={message.id}
+              className="flex h-[33px] items-center px-3.5 text-xs"
+            >
+              <span className="truncate">
+                {message.payload.kind === "retry"
+                  ? queuedMessageFallbackTitle({ ...message, now: Date.now() })
+                  : formatQueuedMessagePreview(message.content)}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </QueuedMessagesCardFrame>
   );
 }
@@ -133,6 +140,7 @@ function QueuedMessagesListFailure({
   return (
     <QueuedMessagesCardFrame
       attached={isAttachedToComposer(props)}
+      expanded
       height={getQueuedMessagesDrawerHeight(props)}
       queuedMessageCount={props.queuedMessages.length}
     >
@@ -141,25 +149,15 @@ function QueuedMessagesListFailure({
   );
 }
 
-const QueuedMessagesListSplit = defineSplit<QueuedMessagesListProps>({
+export const LazyQueuedMessagesList = defineSplit<QueuedMessagesListProps>({
   id: "queued-messages-list",
   load: () =>
     import("./QueuedMessagesList").then((module) => module.QueuedMessagesList),
   loading: QueuedMessagesListLoading,
   error: QueuedMessagesListFailure,
-  preload: "render",
-});
-
-function QueuedMessagesListGate(props: QueuedMessagesListProps) {
-  if (props.queuedMessages.length === 0 && props.inlineEditor === undefined) {
-    return null;
-  }
-  return <QueuedMessagesListSplit {...props} />;
-}
-
-export const LazyQueuedMessagesList = Object.assign(QueuedMessagesListGate, {
-  id: QueuedMessagesListSplit.id,
-  preload: QueuedMessagesListSplit.preload,
+  mountWhen: (props) =>
+    props.queuedMessages.length > 0 || props.inlineEditor !== undefined,
+  tier: "intent",
 });
 
 export function QueuedMessagesPendingCard({
@@ -168,15 +166,16 @@ export function QueuedMessagesPendingCard({
   queuedMessageCount: number;
 }) {
   useEffect(() => {
-    void QueuedMessagesListSplit.preload();
+    void LazyQueuedMessagesList.preload();
   }, []);
   return (
     <QueuedMessagesCardFrame
       attached
-      height={getPendingQueuedMessagesDrawerHeight(queuedMessageCount)}
+      expanded={false}
+      height={QUEUED_MESSAGES_COLLAPSED_HEIGHT}
       queuedMessageCount={queuedMessageCount}
     >
-      <QueuedMessagesLoadingRows queuedMessageCount={queuedMessageCount} />
+      <span role="status" aria-label="Loading queued messages" />
     </QueuedMessagesCardFrame>
   );
 }

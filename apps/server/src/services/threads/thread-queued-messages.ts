@@ -1,4 +1,3 @@
-import { pluginTimelineEventSeedSchema } from "@bb/domain";
 import {
   promptInputSchema,
   queuedMessageWaitingOnSchema,
@@ -9,6 +8,7 @@ import type {
   PromptInput,
   QueuedMessagePayload,
   QueuedMessagePayloadKind,
+  QueuedMessageState,
   QueuedMessageWaitingOn,
   StartedOnBehalfOf,
   StartedOnBehalfOfInitiator,
@@ -22,7 +22,6 @@ import { resolveDispatchAuthor } from "./dispatch-author.js";
 interface StoredQueuedThreadMessageRow {
   origin: ThreadCreateOrigin | null;
   originPluginId: string | null;
-  claimedAt: number | null;
   content: string;
   createdAt: number;
   failureReason: string | null;
@@ -34,11 +33,11 @@ interface StoredQueuedThreadMessageRow {
   retryAttempt: number | null;
   retryOfTurnRequestId: string | null;
   retryReason: string | null;
-  timelineEventJson?: string | null;
   permissionMode: PermissionMode;
   sendAt: number | null;
   serviceTier: string;
   senderThreadId: string | null;
+  state: QueuedMessageState;
   requestedByInitiator: StartedOnBehalfOfInitiator | null;
   requestedByThreadId: string | null;
   systemNotice: string | null;
@@ -137,16 +136,7 @@ function toQueuedMessagePayload(
   row: StoredQueuedThreadMessageRow,
 ): QueuedMessagePayload {
   if (row.payloadKind === "inline") {
-    return {
-      kind: "inline",
-      ...(row.timelineEventJson == null
-        ? {}
-        : {
-            experimental_timelineEvent: pluginTimelineEventSeedSchema.parse(
-              JSON.parse(row.timelineEventJson),
-            ),
-          }),
-    };
+    return { kind: "inline" };
   }
   if (
     row.retryOfTurnRequestId === null ||
@@ -192,15 +182,13 @@ export function toThreadQueuedMessage(
     serviceTier: row.serviceTier,
     groupWithNext: row.groupWithNext,
     sendAt: row.sendAt,
+    state: row.state,
     waitingOn: parseStoredQueuedThreadMessageWaitingOn(row),
     failureReason: row.failureReason,
     payload: toQueuedMessagePayload(row),
     // An `inline` draft stops being editable the moment the drain claims it:
     // the row is on its way to a provider and a rewrite would be lost.
-    editable:
-      row.payloadKind === "inline" &&
-      row.claimedAt === null &&
-      row.timelineEventJson == null,
+    editable: row.payloadKind === "inline" && row.state !== "claimed",
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   });

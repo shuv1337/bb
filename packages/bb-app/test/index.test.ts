@@ -729,15 +729,52 @@ describe("bb-app launcher", () => {
     });
   });
 
-  it("runs the source update shim only for a start with --in-app-updates", () => {
-    expect(shouldRunSourceAppUpdateShim(["--in-app-updates"])).toBe(true);
+  it("runs the source update shim for a start unless --no-in-app-updates is passed", () => {
+    expect(shouldRunSourceAppUpdateShim([])).toBe(true);
+    expect(shouldRunSourceAppUpdateShim(["start"])).toBe(true);
+    expect(shouldRunSourceAppUpdateShim(["--no-in-app-updates"])).toBe(false);
+    expect(shouldRunSourceAppUpdateShim(["start", "--no-in-app-updates"])).toBe(
+      false,
+    );
+    expect(shouldRunSourceAppUpdateShim(["stop"])).toBe(false);
+    expect(shouldRunSourceAppUpdateShim(["start", "--help"])).toBe(false);
+  });
+
+  it("keeps accepting --in-app-updates from launchers started by earlier update shims", () => {
+    expect(parseLauncherArgs(["start", "--in-app-updates"])).toEqual({
+      options: { help: false, json: false },
+      positionals: ["start"],
+    });
     expect(shouldRunSourceAppUpdateShim(["start", "--in-app-updates"])).toBe(
       true,
     );
-    expect(shouldRunSourceAppUpdateShim(["start"])).toBe(false);
-    expect(shouldRunSourceAppUpdateShim(["stop", "--in-app-updates"])).toBe(
-      false,
+    expect(() =>
+      parseLauncherArgs(["--in-app-updates", "--no-in-app-updates"]),
+    ).toThrow(
+      "--in-app-updates and --no-in-app-updates cannot be used together",
     );
+  });
+
+  it("passes opt-in performance diagnostics through to the launched server", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bb-app-performance-"));
+    try {
+      for (const enabled of [false, true]) {
+        const runtime = await resolveBbAppRuntimeState({
+          entrypointUrl: pathToFileURL("/repo/packages/bb-app/dist/bb-app.js")
+            .href,
+          env: { BB_DATA_DIR: dataDir },
+          homeDir: "/home/tester",
+          options: parseLauncherArgs(enabled ? ["--perf-diagnostics"] : [])
+            .options,
+          serverUrlMode: "local",
+        });
+        expect(runtime.serverEnv.BB_PERF_DIAGNOSTICS).toBe(
+          enabled ? "1" : undefined,
+        );
+      }
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("reports the server bind host separately from the loopback connection URL", async () => {
@@ -1920,11 +1957,24 @@ describe("bb-app launcher", () => {
     );
   });
 
-  it("runs the extensionless bundled CLI through Node on Windows", () => {
+  it("runs the bundled CLI with the launcher's own Node runtime", () => {
     expect(
       resolveBundledCliLaunch({
         args: ["status"],
-        cliPath: "C:\\bb\\host-daemon\\dist\\bb",
+        bundledCliPath: "/opt/bb/host-daemon/dist/bb",
+        cliOverride: null,
+        nodePath: "/Applications/bb.app/Contents/MacOS/bb",
+        platform: "darwin",
+      }),
+    ).toEqual({
+      command: "/Applications/bb.app/Contents/MacOS/bb",
+      args: ["/opt/bb/host-daemon/dist/bb", "status"],
+    });
+    expect(
+      resolveBundledCliLaunch({
+        args: ["status"],
+        bundledCliPath: "C:\\bb\\host-daemon\\dist\\bb",
+        cliOverride: null,
         nodePath: "C:\\node\\node.exe",
         platform: "win32",
       }),
@@ -1932,10 +1982,26 @@ describe("bb-app launcher", () => {
       command: "C:\\node\\node.exe",
       args: ["C:\\bb\\host-daemon\\dist\\bb", "status"],
     });
+  });
+
+  it("runs a BB_CLI override directly, or through Node when it is extensionless on Windows", () => {
     expect(
       resolveBundledCliLaunch({
         args: ["status"],
-        cliPath: "C:\\tools\\bb.exe",
+        bundledCliPath: "C:\\bb\\host-daemon\\dist\\bb",
+        cliOverride: "C:\\dev\\bb",
+        nodePath: "C:\\node\\node.exe",
+        platform: "win32",
+      }),
+    ).toEqual({
+      command: "C:\\node\\node.exe",
+      args: ["C:\\dev\\bb", "status"],
+    });
+    expect(
+      resolveBundledCliLaunch({
+        args: ["status"],
+        bundledCliPath: "C:\\bb\\host-daemon\\dist\\bb",
+        cliOverride: "C:\\tools\\bb.exe",
         nodePath: "C:\\node\\node.exe",
         platform: "win32",
       }),
@@ -1943,11 +2009,12 @@ describe("bb-app launcher", () => {
     expect(
       resolveBundledCliLaunch({
         args: ["status"],
-        cliPath: "/opt/bb/host-daemon/dist/bb",
+        bundledCliPath: "/opt/bb/host-daemon/dist/bb",
+        cliOverride: "/repo/apps/cli/bin/bb",
         nodePath: "/usr/bin/node",
         platform: "linux",
       }),
-    ).toEqual({ command: "/opt/bb/host-daemon/dist/bb", args: ["status"] });
+    ).toEqual({ command: "/repo/apps/cli/bin/bb", args: ["status"] });
   });
 
   it("limits npm package metadata to documented runtimes", () => {
@@ -2042,18 +2109,65 @@ describe("bb-app launcher", () => {
     const context = createTestStartContext();
 
     const desktopServerEnv = createServerEnv({
+      cliLauncherPath: null,
       context,
       env: { BB_APP_SURFACE: "desktop" },
+      install: { kind: "desktop" },
     });
-    const webServerEnv = createServerEnv({ context, env: {} });
+    const webServerEnv = createServerEnv({
+      cliLauncherPath: null,
+      context,
+      env: {},
+      install: { kind: "npm" },
+    });
     const invalidSurfaceServerEnv = createServerEnv({
+      cliLauncherPath: null,
       context,
       env: { BB_APP_SURFACE: "bogus" },
+      install: { kind: "npm" },
     });
 
     expect(desktopServerEnv.BB_APP_SURFACE).toBe("desktop");
     expect(webServerEnv.BB_APP_SURFACE).toBe("web");
     expect(invalidSurfaceServerEnv.BB_APP_SURFACE).toBe("web");
+  });
+
+  it("replaces inherited install markers so a fork never reports a stale commit", () => {
+    const serverEnv = createServerEnv({
+      cliLauncherPath: null,
+      context: createTestStartContext(),
+      env: {
+        BB_APP_INSTALL_KIND: "source",
+        BB_APP_SOURCE_COMMIT: "a".repeat(40),
+        BB_APP_SOURCE_ORIGIN: "official",
+      },
+      install: { kind: "source", origin: "fork" },
+    });
+
+    expect(serverEnv.BB_APP_INSTALL_KIND).toBe("source");
+    expect(serverEnv.BB_APP_SOURCE_ORIGIN).toBe("fork");
+    expect(serverEnv).not.toHaveProperty("BB_APP_SOURCE_COMMIT");
+  });
+
+  it("tells the server about the bb command launcher only when this start wrote one", () => {
+    const context = createTestStartContext();
+
+    expect(
+      createServerEnv({
+        cliLauncherPath: "/home/me/.bb/bin/bb",
+        context,
+        env: { BB_CLI_LAUNCHER: "/stale/bin/bb" },
+        install: { kind: "npm" },
+      }).BB_CLI_LAUNCHER,
+    ).toBe("/home/me/.bb/bin/bb");
+    expect(
+      createServerEnv({
+        cliLauncherPath: null,
+        context,
+        env: { BB_CLI_LAUNCHER: "/stale/bin/bb" },
+        install: { kind: "source", origin: "none" },
+      }),
+    ).not.toHaveProperty("BB_CLI_LAUNCHER");
   });
 });
 
