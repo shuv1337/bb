@@ -1,0 +1,20 @@
+# gitleaks config: default rules plus a baseline of reviewed false positives
+# (FM-PYRAMID-2, 2026-10-16). Add new entries only after confirming a match is not a credential.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "reviewed baseline"
+paths = [
+  '''^apps/app/src/components/settings/MachineEnvironmentSettings\.stories\.tsx$''',
+  '''^apps/mobile/eas\.json$''',
+  '''^packages/config/src/env\-vars\.ts$''',
+  '''^packages/db/src/data/order\-keys\.ts$''',
+  '''^plugins/account\-pool/src/claude\-adapter\.ts$''',
+  '''^plugins/account\-pool/src/fixtures/localhost\-key\.pem$''',
+  '''^plugins/account\-pool/src/oauth\-login\.ts$''',
+  '''^plugins/account\-pool/src/parent\-pool\.test\.ts$''',
+  '''^plugins/account\-pool/src/server\.test\.ts$''',
+  '''^plugins/provider\-opencode/src/runtime/http\-runtime\.test\.ts$''',
+  '''^scripts/bb\-cloud\-dev\.mjs$''',
+]
