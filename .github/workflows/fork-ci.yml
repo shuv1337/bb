@@ -1,0 +1,70 @@
+# Fork CI for shuv1337/bb. Upstream's CI runs on paid Blacksmith runners and is
+# disabled on this fork; the workflows still enabled are guarded to get-bb/bb,
+# so every fork run was skipped. This file gates the fork on free ubuntu-latest
+# runners and stays separate so upstream syncs never conflict with it.
+name: fork-ci
+
+on:
+  push:
+    branches: [main, fork-ci]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.x"
+  PNPM_VERSION: "9.15.0"
+
+jobs:
+  checks:
+    name: Build, typecheck, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-workspace-tools
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          pnpm-version: ${{ env.PNPM_VERSION }}
+      - run: bash .github/actions/setup-workspace/install-dependencies.sh
+      - run: node scripts/check-source-nul.mjs
+      - run: pnpm run check:plugin-forks
+      - run: pnpm exec turbo run build typecheck lint --output-logs=errors-only --concurrency=4
+
+  tests:
+    # The suites the fork's own work touches (server, plugins incl. the OpenCode v2
+    # provider, host packages). The 365-file @bb/app suite is left to upstream.
+    name: Tests (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: server
+            filter: --filter=@bb/server
+          - shard: plugins
+            filter: --filter='bb-plugin-*'
+          - shard: packages-host
+            filter: --filter=@bb/host-daemon --filter=@bb/cli --filter=@bb/agent-runtime --filter=@bb/provider-parity --filter=@bb/db
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-workspace-tools
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          pnpm-version: ${{ env.PNPM_VERSION }}
+      - run: bash .github/actions/setup-workspace/install-dependencies.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - run: pnpm exec turbo run test ${{ matrix.filter }} --output-logs=errors-only --concurrency=4
