@@ -36,7 +36,7 @@ jobs:
           pnpm-version: ${{ env.PNPM_VERSION }}
       - run: bash .github/actions/setup-workspace/install-dependencies.sh
       - run: node scripts/check-source-nul.mjs
-      - run: pnpm exec turbo run build typecheck lint --output-logs=errors-only --concurrency=${{ matrix.concurrency || 4 }}
+      - run: pnpm exec turbo run build typecheck lint --output-logs=errors-only --concurrency=4
 
   tests:
     # The suites the fork's own work touches (server, plugins incl. the OpenCode v2
