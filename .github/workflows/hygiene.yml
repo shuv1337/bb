@@ -1,0 +1,17 @@
+name: hygiene
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: hygiene-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    uses: shuv1337/shark/.github/workflows/fleet-hygiene.yml@2c100bd7f54c9635ac8301657dd6a61820c23989

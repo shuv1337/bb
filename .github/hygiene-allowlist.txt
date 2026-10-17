@@ -1,0 +1,23 @@
+# Fleet hygiene allowlist. Rules: path:, pii:, artifact:, email:, text:, shellcheck:
+# Baseline 2026-10-16 (FM-PYRAMID-2): files below already contained matches when the
+# check was added. Kept, not deleted; real host details are listed in the PR body.
+# Remove an entry once its file is cleaned up.
+pii:*.test.*
+pii:*.stories.*
+pii:*/test/*
+pii:*/__tests__/*
+pii:*/fixtures/*
+pii:*fixture*
+pii:*/.ladle/*
+pii:apps/app/src/components/dialogs/ProjectPathDialog.tsx
+pii:apps/app/src/components/thread/timeline/rows/projection-refactor-story-rows.ts
+pii:apps/mobile/src/screens/settings/AddServerScreen.tsx
+pii:apps/server/src/routes/projects.ts
+pii:apps/server/src/services/plugin-catalog/marketplace-http.ts
+pii:docs/platform-support.md
+pii:packages/bb-app/README.md
+pii:plugins/bb-guide/skills/bb-plugin-authoring/references/backend-sdk.md
+pii:plugins/docs/README.md
+pii:plugins/docs/app.tsx
+# upstream get-bb script
+shellcheck:apps/mobile/e2e/scripts/*
