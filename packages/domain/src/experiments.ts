@@ -3,6 +3,8 @@ import { z } from "zod";
 export const experimentKeys = [
   "changelogPreview",
   "serverMove",
+  "performanceDiagnostics",
+  "timelinePush",
 ] as const;
 export const experimentKeySchema = z.enum(experimentKeys);
 export type ExperimentKey = z.infer<typeof experimentKeySchema>;
@@ -19,4 +21,6 @@ export type ExperimentUpdates = z.infer<typeof experimentUpdatesSchema>;
 export const defaultExperiments: Experiments = {
   changelogPreview: false,
   serverMove: false,
+  performanceDiagnostics: false,
+  timelinePush: false,
 };

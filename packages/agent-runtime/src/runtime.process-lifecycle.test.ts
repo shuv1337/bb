@@ -32,7 +32,11 @@ import {
   type ScriptedEchoLaunchScript,
 } from "./test/runtime-test-harness.js";
 import { promptTextInput } from "./test/prompt-input.js";
-import type { AgentRuntimeBridgeLaunch, AgentRuntimeOptions } from "./types.js";
+import type {
+  AgentRuntimeBridgeLaunch,
+  AgentRuntimeOptions,
+  AgentRuntimeProcessExitInfo,
+} from "./types.js";
 
 interface CreateProviderProcessManagerArgs {
   adapterProcessEnv?: Record<string, string>;
@@ -143,6 +147,7 @@ describe("createAgentRuntime process lifecycle", () => {
         identityRegistry.createProviderState({ providerId }),
       env: args.env,
       getNextRequestId: () => nextRequestId++,
+      handleDeferredEvents: () => {},
       handleStdoutLine: ({ line, providerProcess }) => {
         args.handleStdoutLine?.(line, providerProcess.child.pid);
         const parsed = parseJsonRpcLine(line);
@@ -526,25 +531,29 @@ describe("createAgentRuntime process lifecycle", () => {
       workspacePath: tmpDir,
     });
 
-    await ensureCrashingProvider(manager);
-    await waitForRuntimeState({
-      label: "exited provider reported",
-      predicate: () => exitInfo.mock.calls.length === 1,
-    });
-    const [exitedPid] = startedPids(startsLog);
+    try {
+      await ensureCrashingProvider(manager);
+      await waitForRuntimeState({
+        label: "exited provider reported",
+        predicate: () => exitInfo.mock.calls.length === 1,
+      });
+      const [exitedPid] = startedPids(startsLog);
 
-    await manager.ensureProvider({
-      bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
-      processKey: "fake",
-      providerId: "fake",
-    });
-    const replacementProvider = manager.requireProviderProcess({
-      processKey: "fake",
-      providerId: "fake",
-    });
-    expect(exitedPid).toBeDefined();
-    expect(replacementProvider.child.pid).not.toBe(exitedPid);
-    await manager.shutdown();
+      await manager.ensureProvider({
+        bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
+        processKey: "fake",
+        providerId: "fake",
+      });
+      const replacementProvider = manager.requireProviderProcess({
+        processKey: "fake",
+        providerId: "fake",
+      });
+      expect(exitedPid).toBeDefined();
+      expect(replacementProvider.child.exitCode).toBeNull();
+      expect(startedPids(startsLog)).toHaveLength(2);
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   it("starts a single replacement for concurrent callers after an exit", async () => {
@@ -569,42 +578,45 @@ describe("createAgentRuntime process lifecycle", () => {
       workspacePath: tmpDir,
     });
 
-    await ensureCrashingProvider(manager);
-    await waitForRuntimeState({
-      label: "exited provider reported",
-      predicate: () => exitInfo.mock.calls.length === 1,
-    });
-    const [exitedPid] = startedPids(startsLog);
+    try {
+      await ensureCrashingProvider(manager);
+      await waitForRuntimeState({
+        label: "exited provider reported",
+        predicate: () => exitInfo.mock.calls.length === 1,
+      });
+      const [exitedPid] = startedPids(startsLog);
 
-    await Promise.all([
-      manager.ensureProvider({
-        bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
+      await Promise.all([
+        manager.ensureProvider({
+          bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
+          processKey: "fake",
+          providerId: "fake",
+        }),
+        manager.ensureProvider({
+          bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
+          processKey: "fake",
+          providerId: "fake",
+        }),
+        manager.ensureProvider({
+          bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
+          processKey: "fake",
+          providerId: "fake",
+        }),
+      ]);
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const replacementProvider = manager.requireProviderProcess({
         processKey: "fake",
         providerId: "fake",
-      }),
-      manager.ensureProvider({
-        bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
-        processKey: "fake",
-        providerId: "fake",
-      }),
-      manager.ensureProvider({
-        bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
-        processKey: "fake",
-        providerId: "fake",
-      }),
-    ]);
-
-    const replacementProvider = manager.requireProviderProcess({
-      processKey: "fake",
-      providerId: "fake",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    expect(exitedPid).toBeDefined();
-    expect(replacementProvider.child.pid).not.toBe(exitedPid);
-    expect(startedPids(startsLog)).toHaveLength(2);
-    expect(manager.listRunningProviders()).toEqual(["fake"]);
-    await manager.shutdown();
+      });
+      expect(exitedPid).toBeDefined();
+      expect(replacementProvider.child.exitCode).toBeNull();
+      expect(startedPids(startsLog)).toHaveLength(2);
+      expect(manager.listRunningProviders()).toEqual(["fake"]);
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   it("cuts off inherited provider output before starting a replacement", async () => {
@@ -643,36 +655,40 @@ describe("createAgentRuntime process lifecycle", () => {
       workspacePath: tmpDir,
     });
 
-    await ensureCrashingProvider(manager);
-    await waitForRuntimeState({
-      label: "exited provider reported",
-      predicate: () => exitInfo.mock.calls.length === 1,
-    });
-    const [exitedPid] = startedPids(startsLog);
+    try {
+      await ensureCrashingProvider(manager);
+      await waitForRuntimeState({
+        label: "exited provider reported",
+        predicate: () => exitInfo.mock.calls.length === 1,
+      });
+      const [exitedPid] = startedPids(startsLog);
 
-    await manager.ensureProvider({
-      bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
-      processKey: "fake",
-      providerId: "fake",
-    });
-    const replacementProvider = manager.requireProviderProcess({
-      processKey: "fake",
-      providerId: "fake",
-    });
-    await waitForRuntimeState({
-      label: "old provider descendant attempted delayed output",
-      timeoutMs: 5_000,
-      predicate: () => existsSync(writeMarker),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+      await manager.ensureProvider({
+        bridgeLaunch: MANAGER_BRIDGE_LAUNCH,
+        processKey: "fake",
+        providerId: "fake",
+      });
+      await waitForRuntimeState({
+        label: "old provider descendant attempted delayed output",
+        timeoutMs: 5_000,
+        predicate: () => existsSync(writeMarker),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
-    expect(exitedPid).toBeDefined();
-    expect(replacementProvider.child.pid).not.toBe(exitedPid);
-    expect(lines).not.toContainEqual({
-      childPid: exitedPid,
-      line: "stale-from-old-provider",
-    });
-    await manager.shutdown();
+      const replacementProvider = manager.requireProviderProcess({
+        processKey: "fake",
+        providerId: "fake",
+      });
+      expect(exitedPid).toBeDefined();
+      expect(replacementProvider.child.exitCode).toBeNull();
+      expect(startedPids(startsLog)).toHaveLength(2);
+      expect(lines).not.toContainEqual({
+        childPid: exitedPid,
+        line: "stale-from-old-provider",
+      });
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   it("treats shutdown process errors as expected without carrying state to replacement processes", async () => {
@@ -750,18 +766,20 @@ describe("createAgentRuntime process lifecycle", () => {
     env?: Record<string, string>;
   }) {
     const processLog = createScriptedEchoProcessLog();
+    const processExits: AgentRuntimeProcessExitInfo[] = [];
     const runtime = createScriptedEchoRuntime({
       runtime: {
         workspacePath: tmpDir,
         env: { ...processLog.env, ...args.env },
         onEvent: (event) => args.events.push(event),
+        onProcessExit: (info) => processExits.push(info),
       },
       launch: {
         pluginId: "provider-codex",
         scripted: { ...CODEX_SCRIPT, ...args.scripted },
       },
     });
-    return { processLog, runtime };
+    return { processLog, processExits, runtime };
   }
 
   it("runs every codex thread on one provider process", async () => {
@@ -989,7 +1007,9 @@ describe("createAgentRuntime process lifecycle", () => {
 
   it("reaps an idle codex session and resumes it on a new process", async () => {
     const events: ThreadEvent[] = [];
-    const { processLog, runtime } = createCodexRuntime({ events });
+    const { processLog, processExits, runtime } = createCodexRuntime({
+      events,
+    });
     try {
       await runtime.startThread({
         environmentId: "env-1",
@@ -1022,7 +1042,7 @@ describe("createAgentRuntime process lifecycle", () => {
       });
       expect(belowThresholdResult.reapedSessions).toEqual([]);
       expect(runtime.hasThread("t1")).toBe(true);
-      expect(stoppedProcessPids(processLog.read())).toHaveLength(0);
+      expect(processExits).toHaveLength(0);
 
       const result = await runtime.reapIdleProviderSessions({
         idleForMs: 30 * 60 * 1000,
@@ -1042,6 +1062,9 @@ describe("createAgentRuntime process lifecycle", () => {
       expect(runtime.hasThread("t1")).toBe(false);
       expect(runtime.getProviderSession("t1")).toBeNull();
       expect(runtime.listRunningProviders()).toEqual([]);
+      expect(processExits).toEqual([
+        expect.objectContaining({ providerId: "codex", expected: true }),
+      ]);
 
       await runtime.resumeThread({
         environmentId: "env-1",
@@ -1068,7 +1091,7 @@ describe("createAgentRuntime process lifecycle", () => {
       expect(logLines.filter((line) => line.startsWith("spawn:"))).toHaveLength(
         2,
       );
-      expect(stoppedProcessPids(logLines)).toHaveLength(1);
+      expect(processExits).toHaveLength(1);
       expect(
         logLines.some(
           (line) =>

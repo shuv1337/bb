@@ -126,7 +126,6 @@ export function RootComposeSecondaryContent({
             style={PAGE_SHELL_CONTENT_STYLE}
           >
             {children}
-            {compactScrollContent}
             <PluginHomepageSections />
           </div>
         </div>
@@ -139,6 +138,7 @@ export function RootComposeSecondaryContent({
       <SecondaryPanelLayout
         open={isSecondaryPanelOpen}
         onToggle={onToggleSecondaryPanel}
+        onSwipeOpen={onToggleSecondaryPanel}
         onClose={threadSecondaryPanelProps.onClose}
         resetKey="new-thread"
         contentKey="new-thread"

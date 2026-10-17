@@ -116,6 +116,7 @@ import type {
 import type {
   BbSdk,
   ThreadForkArgs,
+  PluginThreadMetadataListArgs,
   ThreadPluginMetadataArgs,
   ThreadPluginMetadataUpdateArgs,
   ThreadSpawnArgs,
@@ -367,6 +368,16 @@ function wrapSdkForPlugin(
           pluginId: args.pluginId ?? pluginId,
         });
       },
+      async experimental_listPluginMetadata(
+        args: Omit<PluginThreadMetadataListArgs, "pluginId"> & {
+          pluginId?: string;
+        },
+      ) {
+        return sdk.threads.experimental_listPluginMetadata({
+          ...args,
+          pluginId: args.pluginId ?? pluginId,
+        });
+      },
       async updatePluginMetadata(
         args: Omit<ThreadPluginMetadataUpdateArgs, "pluginId"> & {
           pluginId?: string;
@@ -380,47 +391,8 @@ function wrapSdkForPlugin(
       fork(args: ThreadForkArgs) {
         return sdk.threads.fork(withPluginThreadAttribution(args, pluginId));
       },
-      spawn(args) {
-        const { experimental_timelineEvent, ...rest } = args;
-        return sdk.threads.spawn(
-          withPluginThreadAttribution(
-            {
-              ...rest,
-              ...(experimental_timelineEvent
-                ? {
-                    experimental_timelineEvent: {
-                      ...experimental_timelineEvent,
-                      pluginId,
-                    },
-                  }
-                : {}),
-            },
-            pluginId,
-          ),
-        );
-      },
-      send(args) {
-        const { experimental_timelineEvent, ...rest } = args;
-        return sdk.threads.send({
-          ...rest,
-          ...(experimental_timelineEvent
-            ? {
-                experimental_timelineEvent: {
-                  ...experimental_timelineEvent,
-                  pluginId,
-                },
-              }
-            : {}),
-        });
-      },
-      experimental_getTimelineEvent(args) {
-        return sdk.threads.experimental_getTimelineEvent({ ...args, pluginId });
-      },
-      experimental_updateTimelineEvent(args) {
-        return sdk.threads.experimental_updateTimelineEvent({
-          ...args,
-          pluginId,
-        });
+      spawn(args: ThreadSpawnArgs) {
+        return sdk.threads.spawn(withPluginThreadAttribution(args, pluginId));
       },
     },
   };
@@ -619,8 +591,10 @@ export function createPluginApi(options: {
   const databaseHandles: Database.Database[] = [];
   const threadEventHandlers: PluginThreadEventHandlers = {
     "experimental_thread.events": [],
+    "experimental_thread.parentChanged": [],
     "experimental_terminal.input": [],
     "experimental_host.deleted": [],
+    "experimental_environment.removed": [],
     "thread.created": [],
     "thread.active": [],
     "thread.idle": [],

@@ -556,6 +556,7 @@ export async function createWorktree(
     gitArgs = [
       "worktree",
       "add",
+      "--no-track",
       "-B",
       args.branchName,
       args.targetPath,
@@ -633,7 +634,9 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     return;
   }
 
-  await experimental_killProcessesWithCwdUnder({ directory: workspacePath });
+  await experimental_killProcessesWithCwdUnder({
+    directories: [workspacePath],
+  });
   throwIfProvisionAborted(args.signal);
 
   const commonDirResult = await runGit(["rev-parse", "--git-common-dir"], {
@@ -710,7 +713,10 @@ export async function resolveAdoptableWorktree(args: {
   | { status: "failed"; message: string }
 > {
   const adoptable = await listAdoptableWorktrees(args);
-  const entry = findWorktreeEntry(adoptable, await realpathOrResolved(args.path));
+  const entry = findWorktreeEntry(
+    adoptable,
+    await realpathOrResolved(args.path),
+  );
   if (entry === null) {
     return {
       status: "failed",

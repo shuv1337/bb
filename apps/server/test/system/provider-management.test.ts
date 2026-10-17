@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { appSettingsUpdateSchema } from "@bb/domain";
-import { getDisabledProviderIds } from "@bb/db";
+import { getDisabledProviderIds, setPluginSettingsValues } from "@bb/db";
 import { systemProviderCatalogEntrySchema } from "@bb/server-contract";
 import { requireBridgeLaunchForProviderId } from "../../src/services/system/provider-bridge-launch.js";
 import { listSystemProviderInfos } from "../../src/services/system/execution-options.js";
@@ -35,6 +35,66 @@ async function visibleProviderIds(harness: TestAppHarness) {
 }
 
 describe("provider management", () => {
+  it("keeps migrated OpenCode suppression through both ACP adapters, custom overrides, restart, and explicit re-enable", async () => {
+    await withTestHarness(
+      { seedFirstPartyProviders: false },
+      async (harness) => {
+        await harness.pluginService.install("builtin:provider-acp", {
+          kind: "root",
+        });
+        await harness.pluginService.install("builtin:provider-acp-next", {
+          kind: "root",
+        });
+        await harness.pluginService.stop();
+        setPluginSettingsValues(harness.db, "provider-acp", {
+          enableOpenCode: "false",
+          customAgents: JSON.stringify(
+            JSON.stringify([
+              {
+                id: "opencode",
+                displayName: "Custom OpenCode",
+                command: "opencode",
+              },
+            ]),
+          ),
+        });
+        await harness.pluginService.start();
+        for (const pluginId of [
+          "provider-acp",
+          "bb--provider-acp-next",
+          "provider-acp",
+        ]) {
+          await harness.pluginService.setEnabled(pluginId, true);
+          const catalog = await readCatalog(
+            await harness.app.request("/api/v1/system/providers/catalog"),
+          );
+          expect(
+            catalog.find((provider) => provider.id === "acp-opencode"),
+          ).toMatchObject({ enabled: false, pluginEnabled: true, pluginId });
+          expect(
+            catalog.find((provider) => provider.id === "acp-cursor")?.enabled,
+          ).toBe(true);
+          expect(getDisabledProviderIds(harness.db)).toEqual(["acp-opencode"]);
+          expect(await visibleProviderIds(harness)).not.toContain(
+            "acp-opencode",
+          );
+          expect(() =>
+            requireBridgeLaunchForProviderId(harness.deps, "acp-opencode"),
+          ).toThrow('Provider "acp-opencode" is disabled');
+        }
+        await readCatalog(
+          await setProviderEnabled(harness, "acp-opencode", true),
+        );
+        await harness.pluginService.stop();
+        await harness.pluginService.start();
+        expect(getDisabledProviderIds(harness.db)).toEqual([]);
+        expect(() =>
+          requireBridgeLaunchForProviderId(harness.deps, "acp-opencode"),
+        ).not.toThrow();
+      },
+    );
+  });
+
   it("keeps a disabled provider discoverable, blocks launches, and preserves its siblings across plugin disable and enable", async () => {
     await withTestHarness(
       { seedFirstPartyProviders: false },

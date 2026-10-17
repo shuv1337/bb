@@ -1,5 +1,5 @@
 import { unlink } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
@@ -121,13 +121,6 @@ async function bootAutomationsPlugin(
         },
       },
       threads: {
-        queuedMessages: { list: async () => [] },
-        async experimental_getTimelineEvent() {
-          return null;
-        },
-        async experimental_updateTimelineEvent() {
-          throw new Error("not expected");
-        },
         async get({ threadId }) {
           return {
             id: threadId,
@@ -1329,9 +1322,6 @@ describe("automations server plugin harness", () => {
     const reloaded = await harness.reload(
       plugin as unknown as Parameters<typeof harness.reload>[0],
     );
-    reloaded.harness.sdk.stub("threads.experimental_getTimelineEvent", () => ({
-      status: "completed",
-    }));
     const service = reloaded.harness.runService("automation-sweep");
     await vi.waitFor(async () => {
       const runs = automationRunListResponseSchema.parse(
@@ -1359,74 +1349,71 @@ describe("automations server plugin harness", () => {
     await reloaded.harness.dispose();
   });
 
-  it("retries the recorded prompt and rejects an unrelated active run", async () => {
-    const { harness } = await bootAutomationsPlugin();
-    const automation = await createAgentAutomation(harness);
-    const first = automationRunRpcResponseSchema.parse(
-      await harness.callRpc("automations_run", {
-        projectId: PROJECT_ID,
-        automationId: automation.id,
-      }),
+  it("discovers a late-enrolled server host before dispatching a project script", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const host = await bootAutomationsPlugin();
+    const { harness } = host;
+    const source = project();
+    source.sources[0]!.path = dirname(host.bb.storage.database().name);
+    harness.sdk.stub("projects.get", async () => source);
+    const created = await harness.runCli([
+      "create",
+      "--project",
+      PROJECT_ID,
+      "--name",
+      "Late enrollment",
+      "--in",
+      "1m",
+      "--script",
+      "printf 'late enrollment OK'",
+      "--interpreter",
+      "sh",
+      "--working-directory",
+      "project",
+      "--json",
+    ]);
+    expect(created.exitCode).toBe(0);
+    const automation = automationDetailResponseSchema.parse(
+      JSON.parse(created.stdout!),
     );
-    await vi.waitFor(() =>
-      expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1),
-    );
-    harness.sdk.stub("threads.experimental_getTimelineEvent", () => ({
-      status: "error",
-      payload: {
-        automationId: automation.id,
-        projectId: PROJECT_ID,
-        name: automation.name,
-        runId: first.run.id,
-        execution: { ...agentExecution(), prompt: "original failed prompt" },
-      },
-    }));
-    await harness.emitThreadEvent("thread.failed", {
-      thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
-      error: "failed",
-    });
-    const newer = automationRunRpcResponseSchema.parse(
-      await harness.callRpc("automations_run", {
-        projectId: PROJECT_ID,
-        automationId: automation.id,
-      }),
-    );
-    expect(newer.run.id).not.toBe(first.run.id);
-    await expect(
-      harness.callRpc("automations_run", {
-        projectId: PROJECT_ID,
-        automationId: automation.id,
-        retryRunId: first.run.id,
-      }),
-    ).rejects.toThrow("already running");
-    await harness.emitThreadEvent("thread.failed", {
-      thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
-      error: "failed",
-    });
-    await harness.callRpc("automations_run", {
-      projectId: PROJECT_ID,
-      automationId: automation.id,
-      retryRunId: first.run.id,
-    });
-    await vi.waitFor(() =>
-      expect(harness.sdk.callsTo("threads.send")).toHaveLength(1),
-    );
-    expect(harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
-      threadId: "thr_spawned",
-      input: [
-        {
-          visibility: "agent-only",
-          text: expect.stringContaining("original failed prompt"),
-        },
-      ],
-      experimental_timelineEvent: {
-        payload: { execution: { prompt: "original failed prompt" } },
-      },
-    });
-    await harness.dispose();
+    let primaryHostId: string | null = null;
+    harness.sdk.stub("system.config", () => ({ primaryHostId }));
+    const initialCalls = harness.sdk.callsTo("system.config").length;
+    const service = harness.runService("automation-sweep");
+    try {
+      await vi.waitFor(() =>
+        expect(harness.sdk.callsTo("system.config")).toHaveLength(
+          initialCalls + 1,
+        ),
+      );
+      primaryHostId = "host_fake";
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(async () => {
+        const { runs } = automationRunListResponseSchema.parse(
+          await harness.callRpc("automations_runs", {
+            projectId: PROJECT_ID,
+            automationId: automation.id,
+          }),
+        );
+        expect(runs[0]).toMatchObject({
+          status: "succeeded",
+          output: expect.stringMatching(/(?:^|\n)late enrollment OK$/),
+          exitCode: 0,
+          error: null,
+        });
+      });
+      const calls = harness.sdk.callsTo("system.config").length;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(harness.sdk.callsTo("system.config")).toHaveLength(calls);
+    } finally {
+      service.controller.abort();
+      await service.done;
+      await harness.dispose();
+    }
   });
 
-  it("dispatches hidden automation input and settles only its linked turn", async () => {
+  it("dispatches a due agent automation from one sweep tick and closes it from thread.idle", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const host = await bootAutomationsPlugin();
@@ -1447,21 +1434,7 @@ describe("automations server plugin harness", () => {
     expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1);
     expect(harness.sdk.callsTo("threads.spawn")[0]?.[0]).toMatchObject({
       projectId: PROJECT_ID,
-      input: [
-        {
-          type: "text",
-          visibility: "agent-only",
-          text: `[Automation: Sweep (${automation.id})]\n\nsummarize the inbox`,
-          mentions: [],
-        },
-      ],
-      experimental_timelineEvent: {
-        rendererId: "run",
-        payload: {
-          name: "Sweep",
-          execution: { prompt: "summarize the inbox" },
-        },
-      },
+      prompt: `[bb automation due:${automation.id}]\n\nsummarize the inbox`,
       title: "Sweep",
       origin: "plugin",
       originPluginId: "automations",
@@ -1480,21 +1453,6 @@ describe("automations server plugin harness", () => {
       trigger: "schedule",
     });
 
-    await harness.emitThreadEvent("thread.idle", {
-      thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
-      lastAssistantText: null,
-    });
-    expect(
-      automationRunListResponseSchema.parse(
-        await harness.callRpc("automations_runs", {
-          projectId: PROJECT_ID,
-          automationId: automation.id,
-        }),
-      ).runs[0]?.status,
-    ).toBe("running");
-    harness.sdk.stub("threads.experimental_getTimelineEvent", () => ({
-      status: "completed",
-    }));
     await harness.emitThreadEvent("thread.idle", {
       thread: makeThreadResponse({ id: "thr_spawned", projectId: PROJECT_ID }),
       lastAssistantText: null,

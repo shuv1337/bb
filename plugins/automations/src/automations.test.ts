@@ -219,11 +219,6 @@ function createAutomationServiceBb() {
           ] as never,
       },
       threads: {
-        queuedMessages: { list: async () => [] },
-        experimental_getTimelineEvent: async () => null,
-        experimental_updateTimelineEvent: async () => {
-          throw new Error("not expected");
-        },
         get: async () => {
           throw new Error("not expected");
         },
@@ -360,11 +355,6 @@ describe("startup reconciliation", () => {
       bb: {
         sdk: {
           threads: {
-            queuedMessages: { list: async () => [] },
-            experimental_getTimelineEvent: async () => null,
-            experimental_updateTimelineEvent: async () => {
-              throw new Error("not expected");
-            },
             get: threads.get,
             send: async () => {
               throw new Error("not expected");
@@ -823,71 +813,72 @@ describe("automation data access", () => {
     expect(restored?.lastRunStatus).toBe("failed");
   });
 
-  it("does not claim due agent automations when no host is connected", async () => {
-    const db = createTestDb();
-    const automation = createScheduledAutomation(db, 1000);
-    const bb = {
-      sdk: {
-        hosts: {
-          list: async () => [
-            {
-              id: "host_test",
-              name: "host",
-              status: "disconnected",
-              lastSeenAt: null,
-              createdAt: 1,
-              updatedAt: 1,
+  it.each([1000, 2000])(
+    "leaves undispatched agent automations unchanged when next due at %s",
+    async (nextRunAt) => {
+      const db = createTestDb();
+      const automation = createScheduledAutomation(db, nextRunAt);
+      const bb = {
+        sdk: {
+          hosts: {
+            list: vi.fn(async () => {
+              return [
+                {
+                  id: "host_test",
+                  name: "host",
+                  status: "disconnected",
+                  lastSeenAt: null,
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+              ];
+            }),
+          },
+          projects: {
+            get: async () => {
+              throw new Error("not expected");
             },
-          ],
-        },
-        projects: {
-          get: async () => {
-            throw new Error("not expected");
+          },
+          system: {
+            config: async () => {
+              throw new Error("not expected");
+            },
+          },
+          threads: {
+            get: async () => {
+              throw new Error("not expected");
+            },
+            send: async () => {
+              throw new Error("not expected");
+            },
+            spawn: async () => {
+              throw new Error("not expected");
+            },
           },
         },
-        system: {
-          config: async () => {
-            throw new Error("not expected");
-          },
+        realtime: { publish: () => undefined },
+        log: {
+          debug: () => undefined,
+          error: () => undefined,
+          info: () => undefined,
+          warn: () => undefined,
         },
-        threads: {
-          queuedMessages: { list: async () => [] },
-          experimental_getTimelineEvent: async () => null,
-          experimental_updateTimelineEvent: async () => {
-            throw new Error("not expected");
-          },
-          get: async () => {
-            throw new Error("not expected");
-          },
-          send: async () => {
-            throw new Error("not expected");
-          },
-          spawn: async () => {
-            throw new Error("not expected");
-          },
-        },
-      },
-      realtime: { publish: () => undefined },
-      log: {
-        debug: () => undefined,
-        error: () => undefined,
-        info: () => undefined,
-        warn: () => undefined,
-      },
-    };
+      };
 
-    await sweepDueAutomations(bb, db, {
-      pluginDataDir: "/tmp",
-      serverUrl: "http://127.0.0.1:38886",
-      serverHostId: "host_server",
-      now: 1000,
-    });
+      await sweepDueAutomations(bb, db, {
+        pluginDataDir: "/tmp",
+        serverUrl: "http://127.0.0.1:38886",
+        serverHostId: "host_server",
+        now: 1000,
+      });
 
-    expect(getAutomation(db, automation.id)?.runCount).toBe(0);
-    expect(
-      listAutomationRuns(db, { automationId: automation.id, limit: 10 }),
-    ).toHaveLength(0);
-  });
+      expect(bb.sdk.hosts.list).toHaveBeenCalledTimes(nextRunAt > 1000 ? 0 : 1);
+      expect(getAutomation(db, automation.id)?.runCount).toBe(0);
+      expect(
+        listAutomationRuns(db, { automationId: automation.id, limit: 10 }),
+      ).toHaveLength(0);
+    },
+  );
 
   it("does not repeatedly select degraded agent executions for sweeping", () => {
     const db = createTestDb();
@@ -1288,11 +1279,6 @@ describe("automation service", () => {
           list: async () => [],
         },
         threads: {
-          queuedMessages: { list: async () => [] },
-          experimental_getTimelineEvent: async () => null,
-          experimental_updateTimelineEvent: async () => {
-            throw new Error("not expected");
-          },
           get: async () => {
             throw new Error("not expected");
           },

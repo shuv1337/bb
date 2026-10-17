@@ -6,11 +6,10 @@ description: "Configure or troubleshoot ACP agent discovery, custom models, skil
 # ACP providers
 
 Known agents can be discovered automatically when their CLI is installed on the
-host: `opencode`, `omp`, `grok`, and `hermes` appear as `acp-opencode` (OpenCode
-(ACP)), `acp-omp`, `acp-grok`, and `acp-hermes-agent`. Native OpenCode v2 is
-provider `opencode` from `provider-opencode`, not this plugin. Inspect the
-target host's catalog with `bb provider list` and
-`bb provider models <provider-id>` using its environment or machine selector.
+host: `opencode`, `omp`, `grok`, and `hermes` appear as `acp-opencode`, `acp-omp`,
+`acp-grok`, and `acp-hermes-agent`. Inspect the target host's catalog with
+`bb provider list` and `bb provider models <provider-id>` using its environment
+or machine selector.
 
 To hide a detected ACP agent, use `bb provider disable acp-opencode`, or Disable
 on Settings → Providers. Restore it with `bb provider enable acp-opencode`.
@@ -20,11 +19,42 @@ background capability probing. `bb provider list --all` includes disabled agents
 Cursor project skills come from `.cursor/skills`, which can link to
 `.agents/skills`. BB lists these linked skills as read-only under `cursor-project`.
 
-ACP agents may reject unlisted model IDs. OpenCode requires models in its own
-configuration; BB discovers them there. OpenCode agents are session modes, not
-models selectable through BB's model field. Grok Build advertises models and
-`thought_level` options over ACP, so the picker follows the connected agent
-(including `xhigh` on grok-4.6).
+ACP agents report their own models and may reject unlisted model IDs.
+For `acp-opencode` the list mirrors the OpenCode catalog, so add a model to
+the OpenCode config rather than bb's `customModels`:
+
+```sh
+bb provider models acp-opencode --environment "$BB_ENVIRONMENT_ID"
+bb thread spawn --provider acp-opencode --model <provider/model>
+```
+
+OpenCode agents are session modes, not models selectable through BB's model
+field. OpenCode reports its primary agents as the `mode` session option,
+including custom agents from the OpenCode config directory and from the
+project's `.opencode/` directory, so project agents appear when the list is
+read for that project or environment:
+
+```sh
+bb provider models acp-opencode --project "$BB_PROJECT_ID"
+bb thread spawn --provider acp-opencode --option mode=<agent>
+```
+
+bb lists only the agents OpenCode itself loads, and OpenCode does not read
+agent files from other folders such as `.agents/agents/`. To use such a folder,
+set `OPENCODE_CONFIG_DIR` as a machine variable or in a custom agent's `env`; a
+relative value is resolved in each workspace, so `.agents` lists every
+project's own `.agents/agents/*.md`:
+
+```sh
+printf '.agents' | bb machine env set OPENCODE_CONFIG_DIR
+```
+
+Every file in that folder must be a valid OpenCode agent file; OpenCode refuses
+to start on one it cannot parse, such as `tools` written as a comma-separated
+list.
+
+Grok Build advertises models and `thought_level` options over ACP, so the
+picker follows the connected agent (including `xhigh` on grok-4.6).
 
 BB launches OpenCode sessions with `OPENCODE_CLIENT=acp` and
 `OPENCODE_ENABLE_QUESTION_TOOL=false`, overriding inherited and custom launch
@@ -32,9 +62,9 @@ values. Native questions have no ACP interaction handler in BB; agents use the
 ask-user-question plugin’s `AskUserQuestion` tool instead. This also applies to
 custom agents with `dialect: "opencode"` and does not change OpenCode config files.
 
-OpenCode ACP supports the core `bb thread compact` command; Cursor ACP does not
-expose compatible compaction. Check the actual agent's capabilities before
-attempting provider-specific recovery.
+OpenCode and Grok ACP support the core `bb thread compact` command; Cursor ACP
+does not expose compatible compaction. Check the actual agent's capabilities
+before attempting provider-specific recovery.
 
 OpenCode Go subscription usage is available in Provider usage when the selected
 machine has OpenCode installed and a Go subscription. Sign in to Go in OpenCode
@@ -60,8 +90,34 @@ environment. A custom OpenCode wrapper must declare
 Missing credentials, rejected keys, and collection errors remain unavailable
 states rather than zero usage. Never print API keys when diagnosing setup.
 
-To disable only the legacy OpenCode ACP provider, run
-`bb plugin config provider-acp set enableOpenCode false`. The setting defaults
-to `true` and applies to all machines, including custom `acp-opencode` overrides.
-Other ACP providers remain enabled. Use this with the native `provider-opencode`
-plugin; set it back to `true` to restore OpenCode ACP.
+## Custom ACP agents
+
+Register another ACP agent in the ACP providers plugin's `customAgents`
+setting, a JSON array:
+`bb plugin config provider-acp set customAgents '[...]'`. The plugin
+re-registers its providers as soon as the setting changes; no restart is
+needed.
+
+- Required: `id` (lowercase letters, digits, and dashes; permanent),
+  `displayName`, and `command`. The provider id is `acp-<id>`. `cursor` is
+  reserved; an entry with id `opencode`, `omp`, `grok`, or `hermes-agent`
+  replaces the shipped agent.
+- Launch: `args`, `env`, and `cwd`.
+- `modelCli` for CLI model listing and selection, `reasoningCli` for
+  launch-time reasoning flags, `nativeReasoning` for ACP
+  `session/set_config_option` reasoning, and `permissionCli` for
+  permission-mode launch flags.
+- `dialect` (`cursor`, `opencode`, `omp`, or `grok`) selects the vendor side
+  channels bb reads.
+- `nativeSkillRoots` adds native skills to the composer: a `user` list resolved
+  from the target host's home directory and a `project` list resolved from the
+  workspace, each a relative path without dot segments.
+- `supportsManualCompaction` (default `false`) shows `/compact` only for agents
+  that accept an explicit compaction request.
+
+## Disable one provider
+
+Use `bb provider disable acp-opencode` to hide ACP OpenCode while keeping other
+ACP agents enabled. Restore it with `bb provider enable acp-opencode`. The choice
+survives switching ACP adapters; the old fork-only `enableOpenCode` setting is
+migrated once on server startup.

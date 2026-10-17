@@ -734,6 +734,7 @@ function buildContextWindowUsage(
       completedTurnDisplay: "collapse",
       includeNestedRows: false,
       includeDiagnosticOperations: false,
+      summarizeShellCommands: true,
       isLatestPage: true,
       threadStatus: "idle",
       threadName: "",
@@ -756,6 +757,7 @@ function buildTimelineRows(
       completedTurnDisplay: "collapse",
       includeNestedRows: true,
       includeDiagnosticOperations: false,
+      summarizeShellCommands: true,
       isLatestPage: true,
       threadStatus,
       threadName: "",
@@ -902,6 +904,56 @@ describe("buildThreadTimelineFromEvents", () => {
     expect(row).not.toHaveProperty("statusLabels");
   });
 
+  it("shows a shell command as run when shell command summaries are off", () => {
+    const event = createTimelineEventFactory({ threadId: "thread-1" });
+    const command =
+      "until gh pr checks 5487 | grep -qv pending; do sleep 30; done";
+    const events = fromRows([
+      event.turnStarted({ turnId: "turn-1" }),
+      event.commandStarted({ itemId: "poll", command }),
+      event.commandCompleted({ itemId: "poll", command, exitCode: 0 }),
+      event.turnCompleted({ turnId: "turn-1" }),
+    ]);
+    const commandRow = (summarizeShellCommands: boolean) => {
+      const [row] = workRowsOfKind(
+        buildThreadTimelineFromEvents({
+          acceptedClientRequestContext: EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT,
+          contextWindowEvents: [],
+          events,
+          options: {
+            completedTurnDisplay: "collapse",
+            includeDiagnosticOperations: false,
+            includeNestedRows: true,
+            isLatestPage: true,
+            summarizeShellCommands,
+            threadName: "",
+            threadStatus: "idle",
+            workspaceRoot: null,
+          },
+        }).rows,
+        "command",
+      );
+      if (row === undefined) throw new Error("Missing command row");
+      return {
+        activityIntents: row.activityIntents,
+        title: buildTimelineRowTitle(row, {
+          summaryStyle: "bundle",
+          workStyle: "default",
+        }).plain,
+      };
+    };
+
+    const summarized = commandRow(true);
+    expect(summarized.activityIntents).toEqual([
+      { type: "search", command, query: "pending", path: null },
+    ]);
+    expect(summarized.title).toMatch(/^Searched for pending/);
+
+    const unsummarized = commandRow(false);
+    expect(unsummarized.activityIntents).toEqual([]);
+    expect(unsummarized.title).toMatch(/^Ran until gh pr checks 5487/);
+  });
+
   it("hides a delivered tool result whose tool row is suppressed and shows one whose tool row is not", () => {
     const event = createTimelineEventFactory({ threadId: "thread-1" });
     const subject = (toolName: string, suppress: boolean) => ({
@@ -1030,6 +1082,7 @@ describe("buildThreadTimelineFromEvents", () => {
           completedTurnDisplay: "collapse",
           includeNestedRows: true,
           includeDiagnosticOperations: false,
+          summarizeShellCommands: true,
           isLatestPage: true,
           planCommand: { trigger: "/", name: "plan" },
           providerId,
@@ -1066,6 +1119,7 @@ describe("buildThreadTimelineFromEvents", () => {
         completedTurnDisplay: "collapse",
         includeNestedRows: true,
         includeDiagnosticOperations: false,
+        summarizeShellCommands: true,
         isLatestPage: true,
         planCommand: { trigger: "/", name: "plan" },
         providerId: "claude-code",
@@ -1099,6 +1153,7 @@ describe("buildThreadTimelineFromEvents", () => {
         completedTurnDisplay: "collapse",
         includeNestedRows: true,
         includeDiagnosticOperations: false,
+        summarizeShellCommands: true,
         isLatestPage: true,
         planCommand: { trigger: "/", name: "plan" },
         providerId: "claude-code",
@@ -1366,7 +1421,9 @@ describe("buildThreadTimelineFromEvents", () => {
       throw new Error("Expected a delegation row");
     }
     expect(
-      collectWorkflowRows(delegation.childRows).map((row) => row.taskType),
+      collectWorkflowRows(delegation.childRows ?? []).map(
+        (row) => row.taskType,
+      ),
     ).toEqual(["local_workflow"]);
     expect(delegation.childRows).toEqual(
       expect.arrayContaining([
@@ -1413,6 +1470,7 @@ describe("buildThreadTimelineFromEvents", () => {
         completedTurnDisplay: "collapse",
         includeNestedRows: true,
         includeDiagnosticOperations: false,
+        summarizeShellCommands: true,
         isLatestPage: true,
         planCommand: { trigger: "/", name: "plan" },
         providerId: "claude-code",
@@ -1729,6 +1787,40 @@ describe("buildThreadTimelineFromEvents", () => {
         sourceSeqEnd: 3,
       }),
     ]);
+  });
+
+  it("keeps an accepted steer's request seq as its message seq", () => {
+    const event = createTimelineEventFactory({ threadId: "thread-1" });
+    const steerRequest = event.clientTurnRequested({
+      target: { kind: "steer", expectedTurnId: "turn-1" },
+      text: "Also check the tests",
+    });
+    const events = fromRows([
+      event.turnStarted({ turnId: "turn-1" }),
+      steerRequest,
+      event.inputAccepted({
+        clientRequestId: steerRequest.data.requestId,
+        turnId: "turn-1",
+      }),
+    ]);
+    const [, requestEvent, acceptedEvent] = events;
+
+    const userRows = rowsOfKind(
+      buildTimelineRows(events, "active"),
+      "conversation",
+    ).filter((row) => row.role === "user");
+
+    expect(userRows).toEqual([
+      expect.objectContaining({
+        text: "Also check the tests",
+        messageSeq: requestEvent?.meta.seq,
+        sourceSeqStart: acceptedEvent?.meta.seq,
+        sourceSeqEnd: acceptedEvent?.meta.seq,
+      }),
+    ]);
+    expect(acceptedEvent?.meta.seq).toBeGreaterThan(
+      requestEvent?.meta.seq ?? 0,
+    );
   });
 
   it("uses accepted context to suppress pending steers without rendering future accepted rows", () => {
@@ -3091,6 +3183,7 @@ it("keeps a canonical disclosure ID when completed reasoning gains a delegation 
       completedTurnDisplay: "collapse",
       includeNestedRows: true,
       includeDiagnosticOperations: false,
+      summarizeShellCommands: true,
       isLatestPage: true,
       threadStatus: "active",
       threadName: "",
@@ -3114,7 +3207,7 @@ it("keeps a canonical disclosure ID when completed reasoning gains a delegation 
     ]),
   );
   const [delegation] = collectDelegationRows(rows);
-  const completed = delegation?.childRows.find((row) => row.kind === "system");
+  const completed = delegation?.childRows?.find((row) => row.kind === "system");
   expect(live.activeThinking?.id).toBeTruthy();
   expect(completed).toMatchObject({
     reasoningId: live.activeThinking?.id,

@@ -13,8 +13,40 @@ import {
   PublicMarketplacePage,
   PublicMarketplaceUnavailablePage,
 } from "./public-marketplace.js";
+import type { MarketplaceV2Entry } from "./marketplace-v2.js";
 
 describe("public marketplace route rendering", () => {
+  it.each([
+    ["Prompt Library [Experimental]", "attention", "Experimental"],
+    ["Prompt Library [Preview]", "neutral", "Preview"],
+    ["Prompt Library", null, null],
+  ] as const)("renders %j with a %s tag", (displayName, tone, label) => {
+    const entry = { ...MARKETPLACE_V2_FIXTURE.plugins[0]!, displayName };
+    const manifest = { ...MARKETPLACE_V2_FIXTURE, plugins: [entry] };
+    const pages = [
+      <PublicMarketplacePage
+        manifest={manifest}
+        stats={null}
+        state={{}}
+        onStateChange={() => {}}
+      />,
+      <PublicMarketplaceDetailPage
+        manifest={manifest}
+        entry={entry}
+        stats={null}
+      />,
+    ];
+    for (const page of pages) {
+      const html = renderToStaticMarkup(page);
+      expect(html.includes("marketplace-plugin-tag ")).toBe(tone !== null);
+      if (tone !== null) {
+        expect(html).toContain(
+          `class="marketplace-plugin-tag marketplace-plugin-tag-${tone}">${label}</span>`,
+        );
+      }
+    }
+  });
+
   it("renders the marketplace route with document shelves and controls", () => {
     const html = renderToStaticMarkup(
       <PublicMarketplacePage
@@ -78,8 +110,11 @@ describe("public marketplace route rendering", () => {
       />,
     );
     expect(html).toContain('aria-label="Category: Code &amp; Reviews"');
-    expect(html).toContain("Filtered plugins");
-    expect(html).toContain("2 plugins");
+    expect(html).toContain("<h2>Code &amp; Reviews");
+    expect(html).toContain(
+      "<span>2</span></h2><p>Work with code and reviews.</p>",
+    );
+    expect(html).not.toContain("Filtered plugins");
     expect(html).toContain(
       '<span class="marketplace-card-category">Code &amp; Reviews</span>',
     );
@@ -278,6 +313,45 @@ describe("public marketplace route rendering", () => {
         />,
       ),
     ).not.toContain("marketplace-detail-installs");
+  });
+
+  it("labels only default-installed bundled plugins as built in", () => {
+    const bundled = (plugin: string): MarketplaceV2Entry => ({
+      id: plugin,
+      displayName: plugin,
+      description: `The ${plugin} plugin.`,
+      icon: "Puzzle",
+      category: "thread-content",
+      screenshots: [],
+      tags: [],
+      author: { name: "BB" },
+      source: { bundled: { plugin } },
+    });
+    const html = renderToStaticMarkup(
+      <PublicMarketplacePage
+        manifest={{
+          ...MARKETPLACE_V2_FIXTURE,
+          plugins: [
+            ...MARKETPLACE_V2_FIXTURE.plugins,
+            bundled("bb-guide"),
+            bundled("tasks"),
+          ],
+        }}
+        stats={{
+          ...MARKETPLACE_STATS_FIXTURE,
+          plugins: { "bb-guide": { installs: 2 }, tasks: { installs: 1357 } },
+        }}
+        state={{ category: "thread-content" }}
+        onStateChange={() => {}}
+      />,
+    );
+    const card = (name: string) =>
+      html
+        .split('<article class="marketplace-card">')
+        .find((segment) => segment.includes(`<strong>${name}</strong>`));
+    expect(card("bb-guide")).toContain("Built in");
+    expect(card("tasks")).toContain('aria-label="1,357 installs"');
+    expect(card("tasks")).not.toContain("Built in");
   });
 
   it("renders the unavailable route", () => {

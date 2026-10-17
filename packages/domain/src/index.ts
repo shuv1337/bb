@@ -40,8 +40,10 @@ export * from "./prompt-attachment-limits.js";
 export * from "./prompt-history.js";
 export * from "./protocol-ids.js";
 export * from "./queued-message.js";
+export * from "./queued-message-lifecycle.js";
 export * from "./system-message.js";
 export * from "./provider-event.js";
+export * from "./thread-provider-state.js";
 export * from "./provider-extension-kind.js";
 export * from "./provider-fork.js";
 export * from "./provider-model-catalog.js";
@@ -69,11 +71,13 @@ export * from "./thread-timeline-active-prompt-mode.js";
 export * from "./thread-timeline-goal.js";
 export * from "./thread-timeline-model-fallback.js";
 export * from "./thread-timeline-pending-todos.js";
+export * from "./thread-parent-notifications.js";
 export * from "./thread-visibility.js";
 export * from "./thread.js";
 
 export * from "./project-attachment.js";
 
 export * from "./mobile-app.js";
+export * from "./environment-removal.js";
 
-export * from "./plugin-timeline-event.js";
+export const ARCHIVE_UNDO_GRACE_MS = 30_000;

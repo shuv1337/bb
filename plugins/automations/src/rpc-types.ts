@@ -21,16 +21,7 @@ export {
 
 export const permissionModeSchema = z.enum(["accept-edits", "auto", "full"]);
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
-export const reasoningLevelSchema = z.enum([
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "ultracode",
-  "max",
-  "ultra",
-]);
+export const reasoningLevelSchema = z.string().min(1);
 export type ReasoningLevel = z.infer<typeof reasoningLevelSchema>;
 export const serviceTierSchema = z.string().min(1);
 export type ServiceTier = z.infer<typeof serviceTierSchema>;
@@ -163,7 +154,7 @@ export const automationTriggerSchema = z.discriminatedUnion("triggerType", [
 ]);
 export type AutomationTrigger = z.infer<typeof automationTriggerSchema>;
 
-export const automationAgentExecutionSchema = z
+const automationAgentExecutionSchema = z
   .object({
     mode: z.literal("agent"),
     prompt: z.string().min(1),
@@ -472,7 +463,6 @@ export type UpdateAutomationInput = z.infer<typeof updateAutomationInputSchema>;
 
 export const runAutomationInputSchema = projectAutomationInputSchema
   .extend({
-    retryRunId: z.string().min(1).optional(),
     idempotencyKey: z
       .string()
       .min(1)

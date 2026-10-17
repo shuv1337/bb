@@ -46,12 +46,6 @@ export default async function acpProvidersPlugin(
   registerUsageSource(bb);
   const host = bb.hosts.experimental_client({ contract: acpHostContract });
   const settings = bb.settings.define({
-    enableOpenCode: {
-      type: "boolean",
-      label: "OpenCode (ACP)",
-      description: "Disable when using the native OpenCode provider.",
-      default: true,
-    },
     customAgents: {
       type: "string",
       label: "Custom agents",
@@ -80,8 +74,6 @@ export default async function acpProvidersPlugin(
     },
   });
 
-  let enableOpenCode = true;
-
   const registered = new Map<string, { key: string; dispose(): void }>();
 
   const narrowed = new Map<string, AcpAgentDefinition>();
@@ -94,7 +86,7 @@ export default async function acpProvidersPlugin(
         (agent) => narrowed.get(agent.id) ?? agent,
       ),
       ...configuredAgents,
-    ].filter((agent) => enableOpenCode || agent.id !== "acp-opencode");
+    ];
   }
 
   function register(declaration: PluginProviderDeclaration): void {
@@ -171,7 +163,6 @@ export default async function acpProvidersPlugin(
       if (signal.aborted) return;
       if (configuredIds.has(shipped.id) || disabledIds.has(shipped.id))
         continue;
-      if (!enableOpenCode && shipped.id === "acp-opencode") continue;
       const agent = narrowed.get(shipped.id) ?? shipped;
       if ((agent.fork ?? "none") === "none") continue;
       let probe: AcpAgentProbe;
@@ -208,10 +199,8 @@ export default async function acpProvidersPlugin(
   }
 
   const initial = await settings.get();
-  enableOpenCode = initial.enableOpenCode;
   await queueReconcile(initial.customAgents);
   settings.onChange((next) => {
-    enableOpenCode = next.enableOpenCode;
     void queueReconcile(next.customAgents).catch((error: unknown) => {
       bb.log.error(
         `Could not re-register the configured ACP agents: ${String(error)}`,

@@ -1,4 +1,5 @@
 import type { FeatureFlags } from "@bb/domain";
+import type { AppInstallKind, AppSourceOrigin } from "./app-install.js";
 import type { AppSurface } from "./app-surface.js";
 import type { AppUpdateMode } from "./app-update.js";
 import {
@@ -14,6 +15,9 @@ import {
   resolveEnvLoader,
 } from "./env.js";
 import {
+  BB_APP_INSTALL_KIND_ENV,
+  BB_APP_SOURCE_COMMIT_ENV,
+  BB_APP_SOURCE_ORIGIN_ENV,
   BB_APP_URL_ENV,
   BB_APP_SURFACE_ENV,
   BB_APP_VERSION_ENV,
@@ -24,7 +28,9 @@ import {
   BB_SERVER_BIND_HOST_ENV,
   BB_SERVER_LAUNCH_ID_ENV,
   BB_APP_UPDATE_MODE_ENV,
+  BB_CLI_LAUNCHER_ENV,
   BB_TELEMETRY_ENV,
+  BB_PERF_DIAGNOSTICS_ENV,
   DEFAULT_BB_APP_URL,
   DEFAULT_BB_APP_SURFACE,
   DEFAULT_BB_APP_VERSION,
@@ -43,6 +49,9 @@ import { loadServerPortConfig, type ServerPortConfig } from "./server-port.js";
 
 export interface ServerConfig
   extends CommonConfig, DatabaseConfig, ServerPortConfig {
+  BB_APP_INSTALL_KIND?: AppInstallKind;
+  BB_APP_SOURCE_COMMIT?: string;
+  BB_APP_SOURCE_ORIGIN?: AppSourceOrigin;
   BB_APP_URL: string;
   BB_APP_SURFACE: AppSurface;
   BB_APP_VERSION: string;
@@ -55,7 +64,9 @@ export interface ServerConfig
   BB_SERVER_BIND_HOST: ServerBindHost;
   BB_SERVER_LAUNCH_ID?: string;
   BB_APP_UPDATE_MODE?: AppUpdateMode;
+  BB_CLI_LAUNCHER?: string;
   BB_TELEMETRY: boolean;
+  BB_PERF_DIAGNOSTICS: boolean;
   featureFlags: FeatureFlags;
 }
 
@@ -150,6 +161,12 @@ export function loadServerConfig(
       definition: BB_SERVER_BIND_HOST_ENV,
       env: loader.env,
     }),
+    BB_PERF_DIAGNOSTICS: readEnvVarWithDefault({
+      context: loader.context,
+      definition: BB_PERF_DIAGNOSTICS_ENV,
+      env: loader.env,
+      defaultValue: false,
+    }),
     BB_TELEMETRY: readEnvVarWithDefault({
       context: loader.context,
       defaultValue: DEFAULT_BB_TELEMETRY,
@@ -174,6 +191,42 @@ export function loadServerConfig(
     value: readOptionalEnvVar({
       context: loader.context,
       definition: BB_APP_UPDATE_MODE_ENV,
+      env: loader.env,
+    }),
+  });
+  assignIfDefined({
+    key: "BB_CLI_LAUNCHER",
+    target: config,
+    value: readOptionalEnvVar({
+      context: loader.context,
+      definition: BB_CLI_LAUNCHER_ENV,
+      env: loader.env,
+    }),
+  });
+  assignIfDefined({
+    key: "BB_APP_INSTALL_KIND",
+    target: config,
+    value: readOptionalEnvVar({
+      context: loader.context,
+      definition: BB_APP_INSTALL_KIND_ENV,
+      env: loader.env,
+    }),
+  });
+  assignIfDefined({
+    key: "BB_APP_SOURCE_ORIGIN",
+    target: config,
+    value: readOptionalEnvVar({
+      context: loader.context,
+      definition: BB_APP_SOURCE_ORIGIN_ENV,
+      env: loader.env,
+    }),
+  });
+  assignIfDefined({
+    key: "BB_APP_SOURCE_COMMIT",
+    target: config,
+    value: readOptionalEnvVar({
+      context: loader.context,
+      definition: BB_APP_SOURCE_COMMIT_ENV,
       env: loader.env,
     }),
   });
